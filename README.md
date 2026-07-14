@@ -22,6 +22,8 @@ RPC reconciliation is the authoritative current-membership plane. peer-observer 
 
 Current status: the recorded-event vertical slice, SQLite/API service, and minimal browser table are working and tested. Live NATS subscription, RPC polling, and the edge outbox are not wired yet.
 
+See the [system architecture visualisation](docs/mempool-atlas-system.html) for the implemented foundation, planned live data path, and the distinction between peer-observer evidence and RPC-authoritative membership.
+
 ## Development
 
 Prerequisites are a current Rust toolchain, Node.js, npm, `protoc`, and `just`.

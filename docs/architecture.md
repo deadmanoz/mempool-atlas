@@ -1,5 +1,7 @@
 # Architecture
 
+The self-contained [system architecture visualisation](mempool-atlas-system.html) shows this design, including which components are implemented and which belong to the next live-capture iteration.
+
 Mempool Atlas is divided into two Rust process boundaries and one browser client.
 
 The implemented node-side library decodes peer-observer events and injects a configured source identity, source session, and local sequence. The implemented `atlas-server` ingests those normalized events idempotently, reduces current membership into SQLite, and exposes read-only browser data. The browser currently fetches a membership checkpoint, and its isolated state reducer already rejects sequence gaps in preparation for streamed deltas.

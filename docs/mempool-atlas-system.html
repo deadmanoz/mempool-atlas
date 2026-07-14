@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mempool Atlas system architecture</title>
+    <link rel="icon" href="data:," />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0f14;
+        --surface: #111820;
+        --surface-raised: #17212b;
+        --border: rgba(255, 255, 255, 0.09);
+        --text: #e6edf3;
+        --text-dim: #8b99a8;
+        --bitcoin: #f0c040;
+        --evidence: #fb923c;
+        --state: #34d399;
+        --delivery: #4a9eff;
+        --extension: #b388ff;
+        --danger: #ff6666;
+        --font-body: "Sora", system-ui, sans-serif;
+        --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        padding: clamp(24px, 4vw, 56px);
+        background:
+          radial-gradient(
+            circle at 10% 0%,
+            rgba(74, 158, 255, 0.12),
+            transparent 34rem
+          ),
+          radial-gradient(
+            circle at 92% 12%,
+            rgba(240, 192, 64, 0.09),
+            transparent 30rem
+          ),
+          var(--bg);
+        color: var(--text);
+        font-family: var(--font-body);
+      }
+
+      main {
+        width: min(1680px, 100%);
+        margin: 0 auto;
+      }
+
+      .eyebrow {
+        margin: 0 0 12px;
+        color: var(--bitcoin);
+        font-family: var(--font-mono);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 980px;
+        margin: 0;
+        font-size: clamp(34px, 5vw, 66px);
+        line-height: 1.03;
+        letter-spacing: -0.04em;
+      }
+
+      .lede {
+        max-width: 950px;
+        margin: 20px 0 0;
+        color: var(--text-dim);
+        font-size: clamp(15px, 1.5vw, 19px);
+        line-height: 1.7;
+      }
+
+      .status-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin: 28px 0;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        padding: 9px 13px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: rgba(17, 24, 32, 0.88);
+        color: var(--text-dim);
+        font-family: var(--font-mono);
+        font-size: 11px;
+      }
+
+      .status::before {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        content: "";
+      }
+
+      .status.built::before {
+        background: var(--state);
+        box-shadow: 0 0 14px rgba(52, 211, 153, 0.6);
+      }
+
+      .status.next::before {
+        border: 1px dashed var(--delivery);
+      }
+
+      .mermaid-wrap {
+        position: relative;
+        min-height: 640px;
+        overflow: auto;
+        padding: 54px 24px 28px;
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        background:
+          linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+          linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.018) 1px,
+            transparent 1px
+          ),
+          rgba(17, 24, 32, 0.92);
+        background-size: 32px 32px;
+        box-shadow: 0 28px 90px rgba(0, 0, 0, 0.3);
+      }
+
+      .mermaid-wrap svg {
+        min-width: 1180px;
+        max-width: none !important;
+        height: auto;
+        transition: transform 140ms ease;
+      }
+
+      .zoom-controls {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        z-index: 10;
+        display: flex;
+        gap: 5px;
+      }
+
+      .zoom-controls button {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        place-items: center;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: rgba(23, 33, 43, 0.96);
+        color: var(--text);
+        font: 600 16px var(--font-mono);
+        cursor: pointer;
+      }
+
+      .zoom-controls button:hover,
+      .zoom-controls button:focus-visible {
+        border-color: var(--delivery);
+        outline: none;
+      }
+
+      .mermaid .nodeLabel,
+      .mermaid .cluster-label {
+        color: var(--text) !important;
+        font-family: var(--font-body) !important;
+      }
+
+      .mermaid .edgeLabel {
+        color: var(--text-dim) !important;
+        background-color: var(--bg) !important;
+        font-family: var(--font-mono) !important;
+        font-size: 12px !important;
+      }
+
+      .mermaid .edgeLabel rect {
+        fill: var(--bg) !important;
+        opacity: 0.94 !important;
+      }
+
+      .legend {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      .legend-card {
+        min-height: 128px;
+        padding: 18px;
+        border: 1px solid var(--border);
+        border-top: 3px solid var(--tone);
+        border-radius: 12px;
+        background: rgba(17, 24, 32, 0.78);
+      }
+
+      .legend-card h2 {
+        margin: 0 0 9px;
+        color: var(--tone);
+        font-size: 13px;
+        letter-spacing: 0.02em;
+      }
+
+      .legend-card p {
+        margin: 0;
+        color: var(--text-dim);
+        font-size: 12px;
+        line-height: 1.65;
+      }
+
+      .evidence {
+        --tone: var(--evidence);
+      }
+
+      .state {
+        --tone: var(--state);
+      }
+
+      .delivery {
+        --tone: var(--delivery);
+      }
+
+      .extension {
+        --tone: var(--extension);
+      }
+
+      .semantic-note {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 28px;
+        margin: 20px 2px 0;
+        color: var(--text-dim);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        line-height: 1.6;
+      }
+
+      .semantic-note span::before {
+        margin-right: 8px;
+        color: var(--danger);
+        content: "≠";
+      }
+
+      footer {
+        margin-top: 26px;
+        color: #657383;
+        font-family: var(--font-mono);
+        font-size: 10px;
+      }
+
+      @media (max-width: 980px) {
+        .legend {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 620px) {
+        body {
+          padding: 22px 14px 32px;
+        }
+
+        .legend {
+          grid-template-columns: 1fr;
+        }
+
+        .mermaid-wrap {
+          min-height: 560px;
+          padding-inline: 12px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Mempool Atlas · system architecture</p>
+      <h1>Evidence arrives fast. RPC keeps membership honest.</h1>
+      <p class="lede">
+        Each monitored Bitcoin implementation gets the same node-local
+        collector. peer-observer records the forensic story, RPC reconciles what
+        is actually present, and the central service builds a comparable
+        per-source projection without confusing receipt, admission, membership,
+        or rejection.
+      </p>
+
+      <div class="status-row" aria-label="Implementation status legend">
+        <span class="status built">solid border · implemented foundation</span>
+        <span class="status next"
+          >dashed border · next iteration in atlas-jp3</span
+        >
+      </div>
+
+      <div class="mermaid-wrap">
+        <div class="zoom-controls" aria-label="Diagram zoom controls">
+          <button
+            type="button"
+            onclick="zoomDiagram(this, 1.2)"
+            aria-label="Zoom in"
+            title="Zoom in"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            onclick="zoomDiagram(this, 1 / 1.2)"
+            aria-label="Zoom out"
+            title="Zoom out"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            onclick="zoomDiagram(this, 0)"
+            aria-label="Reset zoom"
+            title="Reset zoom"
+          >
+            ⟲
+          </button>
+        </div>
+        <pre class="mermaid">
+flowchart TB
+  CORE["CORE SOURCE<br/>Bitcoin Core v31.1 · pruned"]
+  KNOTS["KNOTS SOURCE<br/>Bitcoin Knots · pruned"]
+  COREOBS["peer-observer + NATS<br/>mempool · netmsg<br/>subscription next"]
+  KNOTSOBS["peer-observer + NATS<br/>mempool · netmsg<br/>subscription next"]
+  COREAGENT["atlas-agent<br/>decoder + normalization built<br/>live runtime + RPC next"]
+  KNOTSAGENT["atlas-agent<br/>decoder + normalization built<br/>live runtime + RPC next"]
+  COREOUT[("Core SQLite outbox<br/>next")]
+  KNOTSOUT[("Knots SQLite outbox<br/>next")]
+
+  CORE -->|"observed activity"| COREOBS
+  COREOBS -.->|"unframed protobuf Event"| COREAGENT
+  CORE -.->|"RPC snapshot · derived corrections"| COREAGENT
+  COREAGENT -.->|"persist before delivery"| COREOUT
+
+  KNOTS -->|"observed activity"| KNOTSOBS
+  KNOTSOBS -.->|"unframed protobuf Event"| KNOTSAGENT
+  KNOTS -.->|"RPC snapshot · derived corrections"| KNOTSAGENT
+  KNOTSAGENT -.->|"persist before delivery"| KNOTSOUT
+
+  subgraph CENTRAL["Central Atlas service · vps-webserver-01 target"]
+    direction TB
+    INGEST["POST /api/v1/events<br/>idempotent ingest"]
+    EVENTS[("SQLite event ledger<br/>append-only evidence")]
+    MEMBERS[("SQLite current_membership<br/>per-source projection")]
+    VARIANTS[("SQLite transaction_variant<br/>raw forms by txid and wtxid")]
+    CLASSIFIERS["facts and classifier registry<br/>contract built · rule packs later"]
+    READ["GET /api/v1/mempool<br/>JSON read API"]
+
+    INGEST -->|"append once"| EVENTS
+    INGEST -->|"apply membership mutation"| MEMBERS
+    INGEST -->|"preserve raw variant"| VARIANTS
+    EVENTS -.->|"evidence inputs"| CLASSIFIERS
+    MEMBERS --> READ
+    VARIANTS -.-> READ
+    CLASSIFIERS -.-> READ
+  end
+
+  COREOUT -.->|"at-least-once HTTPS delivery"| INGEST
+  KNOTSOUT -.->|"at-least-once HTTPS delivery"| INGEST
+
+  TABLE["Browser table<br/>request and refresh · built"]
+  COMPARE["Multi-source comparison<br/>shared · Core-only · Knots-only<br/>next"]
+  READ --> TABLE
+  READ -.-> COMPARE
+
+  class CORE,KNOTS bitcoinNode
+  class COREOBS,KNOTSOBS evidenceNext
+  class COREAGENT,KNOTSAGENT serviceBuilt
+  class COREOUT,KNOTSOUT serviceNext
+  class INGEST,READ serviceBuilt
+  class EVENTS,MEMBERS,VARIANTS dataBuilt
+  class CLASSIFIERS extensionNext
+  class TABLE uiBuilt
+  class COMPARE uiNext
+
+  classDef bitcoinNode fill:#3d3200,stroke:#f0c040,stroke-width:2px
+  classDef evidenceNext fill:#3d2a1a,stroke:#fb923c,stroke-width:2px,stroke-dasharray:6 4
+  classDef serviceBuilt fill:#1a3a5c,stroke:#4a9eff,stroke-width:2px
+  classDef serviceNext fill:#1a3a5c,stroke:#4a9eff,stroke-width:2px,stroke-dasharray:6 4
+  classDef dataBuilt fill:#1a3d2a,stroke:#34d399,stroke-width:2px
+  classDef extensionNext fill:#2d1a3d,stroke:#b388ff,stroke-width:2px,stroke-dasharray:6 4
+  classDef uiBuilt fill:#2d1a3d,stroke:#b388ff,stroke-width:2px
+  classDef uiNext fill:#2d1a3d,stroke:#b388ff,stroke-width:2px,stroke-dasharray:6 4
+
+  style CENTRAL fill:#0f1720,stroke:#34d399,stroke-width:1px
+        </pre>
+      </div>
+
+      <div class="legend" aria-label="Architecture plane explanations">
+        <article class="legend-card evidence">
+          <h2>Evidence plane</h2>
+          <p>
+            peer-observer captures admission, removal, replacement, rejection,
+            peer context, and raw transaction evidence. Collector downtime can
+            leave an unrecoverable forensic gap.
+          </p>
+        </article>
+        <article class="legend-card state">
+          <h2>State plane</h2>
+          <p>
+            RPC is authoritative for one node's current mempool at poll time.
+            Reconciliation repairs membership drift without storing each
+            complete poll as an event.
+          </p>
+        </article>
+        <article class="legend-card delivery">
+          <h2>Delivery and projection</h2>
+          <p>
+            The local outbox provides at-least-once delivery. Central
+            idempotency makes duplicates harmless and rejects conflicting reuse
+            of an event identity.
+          </p>
+        </article>
+        <article class="legend-card extension">
+          <h2>Extensible interpretation</h2>
+          <p>
+            Transaction facts and classifiers remain optional layers. Fork
+            policy, data carriage, and future heuristics can evolve without
+            changing the underlying observation model.
+          </p>
+        </article>
+      </div>
+
+      <div class="semantic-note" aria-label="Important semantic distinctions">
+        <span>P2P receipt is not admission</span>
+        <span>absence is not organic rejection</span>
+        <span>pruning does not weaken mempool visibility</span>
+        <span>at-least-once delivery is not exactly-once transport</span>
+      </div>
+
+      <footer>
+        Target architecture with implementation status as of 14 July 2026. No
+        ZMQ dependency is required.
+      </footer>
+    </main>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: "base",
+        look: "classic",
+        securityLevel: "strict",
+        flowchart: {
+          curve: "basis",
+          htmlLabels: true,
+          nodeSpacing: 30,
+          rankSpacing: 54,
+          padding: 18,
+        },
+        themeVariables: {
+          background: "#111820",
+          primaryColor: "#1a3a5c",
+          primaryBorderColor: "#4a9eff",
+          primaryTextColor: "#e6edf3",
+          secondaryColor: "#1a3d2a",
+          secondaryBorderColor: "#34d399",
+          secondaryTextColor: "#e6edf3",
+          tertiaryColor: "#3d2a1a",
+          tertiaryBorderColor: "#fb923c",
+          tertiaryTextColor: "#e6edf3",
+          clusterBkg: "#0f1720",
+          clusterBorder: "#4a9eff",
+          lineColor: "#718096",
+          edgeLabelBackground: "#0b0f14",
+          fontFamily: "Sora, system-ui, sans-serif",
+          fontSize: "14px",
+        },
+      });
+    </script>
+    <script>
+      function zoomDiagram(button, factor) {
+        const wrapper = button.closest(".mermaid-wrap");
+        const svg = wrapper.querySelector("svg");
+        if (!svg) return;
+
+        if (!svg.dataset.scale) svg.dataset.scale = "1";
+        const currentScale = Number(svg.dataset.scale);
+        const nextScale =
+          factor === 0 ? 1 : Math.max(0.3, Math.min(5, currentScale * factor));
+
+        svg.dataset.scale = String(nextScale);
+        svg.style.transform = `scale(${nextScale})`;
+        svg.style.transformOrigin = "top left";
+        wrapper.classList.toggle("is-zoomed", nextScale !== 1);
+      }
+    </script>
+  </body>
+</html>
