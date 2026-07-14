@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Compare current Bitcoin mempool membership across observed nodes."
+    />
+    <title>Mempool Atlas</title>
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header">
+        <p class="eyebrow">Fork monitoring</p>
+        <h1>Mempool Atlas</h1>
+        <p>Current transaction membership reported by each observed node.</p>
+      </header>
+
+      <section class="panel" aria-labelledby="membership-heading">
+        <div class="panel-heading">
+          <h2 id="membership-heading">Mempool membership</h2>
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+
+        <p id="status" class="status" role="status">Loading memberships…</p>
+        <p id="empty" class="empty" hidden>No memberships were returned.</p>
+
+        <div id="table-wrap" class="table-wrap" hidden>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Source</th>
+                <th scope="col">Transaction ID</th>
+                <th scope="col">Present</th>
+              </tr>
+            </thead>
+            <tbody id="memberships"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

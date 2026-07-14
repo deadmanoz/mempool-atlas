@@ -1,0 +1,18 @@
+[package]
+name = "atlas-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+atlas-model = { path = "../../crates/atlas-model" }
+bitcoin.workspace = true
+hex.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+
+[lints]
+workspace = true

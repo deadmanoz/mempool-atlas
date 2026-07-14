@@ -1,0 +1,30 @@
+syntax = "proto2";
+
+import "bitcoin_primitives.proto";
+
+// This file is only for Events of the p2p-extractor.
+package p2p_extractor;
+
+message p2p {
+  oneof p2p_event {
+    PingDuration ping_duration = 1;
+    AddressAnnouncement address_announcement = 2;
+    InventoryAnnouncement inventory_announcement = 3;
+    sint64 feefilter_announcement = 4;
+  }
+}
+
+// A Ping-Pong duration measurement performed by the p2p-extractor.
+message PingDuration {
+  required uint64 duration = 1; // Time it takes for the node to respond with a pong to a ping in nanoseconds. This is useful to measure node processing backlog.
+}
+
+// An addrv2 message that the p2p-extractor received from the node.
+message AddressAnnouncement {
+  repeated bitcoin_primitives.Address addresses = 1;
+}
+
+// An inv message that the p2p-extractor received from the node.
+message InventoryAnnouncement {
+  repeated bitcoin_primitives.InventoryItem inventory = 1;
+}

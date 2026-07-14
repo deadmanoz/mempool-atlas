@@ -1,0 +1,272 @@
+syntax = "proto2";
+
+import "bitcoin_primitives.proto";
+
+package ebpf_extractor.message;
+
+// Metadata for a P2P message.
+message Metadata {
+  required uint64  peer_id                 = 1;  // Peer id assigned by Bitcoin Core
+  required string  addr                    = 2;  // Address of the peer
+  required bitcoin_primitives.ConnType conn_type    = 3;
+  required string  command                 = 4;  // Command or message type
+  required bool    inbound                 = 5;  // Message direction
+  required uint64  size                    = 6;  // Serialized message size
+}
+
+// A P2P message event.
+message MessageEvent {
+  required Metadata meta = 1;
+  oneof msg {
+    Ping ping = 2;
+    Pong pong = 3;
+    Inv inv = 4;
+    GetData getdata = 5;
+    Tx tx = 6;
+    Headers headers = 7;
+    Addr addr = 8;
+    AddrV2 addrv2 = 9;
+    FeeFilter feefilter = 10;
+    GetHeaders getheaders = 11;
+    GetBlocks getblocks = 12;
+    Version version = 13;
+    NotFound notfound = 14;
+    Reject reject = 39;
+    CompactBlock compactblock = 16;
+    SendCompact sendcompact = 17;
+    Block block = 18;
+    GetBlockTxn getblocktxn = 19;
+    BlockTxn blocktxn = 20;
+    Alert alert = 21;
+    FilterAdd filteradd = 22;
+    FilterLoad filterload = 23;
+    GetCFCheckpt getcfcheckpt = 24;
+    CFHeaders cfheaders = 25;
+    CFilter cfilter = 26;
+    CFCheckpt cfcheckpt = 27;
+    GetCFHeaders getcfheaders = 28;
+    GetCFilter getcfilter = 29;
+    MerkleBlock merkleblock = 30;
+    Unknown unknown = 31;
+
+    bool verack = 32; // always true
+    bool sendheaders = 33; // always true
+    bool getaddr = 34; // always true
+    bool mempool = 35; // always true
+    bool wtxidrelay = 36; // always true
+    bool sendaddrv2 = 37; // always true
+
+    // A BIP37 "filterclear" message.
+    bool filterclear = 38; // always true
+
+    bool emptyaddrv2 = 40; // always true
+    bool oldping = 41; // always true
+  }
+}
+
+// A "ping" message.
+message Ping {
+  required fixed64 value = 1; // Random value send with the ping. The reply should send the same value back.
+}
+
+// A "pong" message.
+message Pong {
+  required fixed64 value = 1; // Random value originally received via the ping.
+}
+
+// A "inv" message.
+message Inv {
+  repeated bitcoin_primitives.InventoryItem items = 1;
+}
+
+// A "notfound" message
+message NotFound {
+  repeated bitcoin_primitives.InventoryItem items = 1;
+}
+
+// A "cmpctblock" message
+message CompactBlock {
+  required bitcoin_primitives.BlockHeader header = 1;
+  required uint64 nonce = 2;
+  repeated bytes short_ids = 3;
+  repeated bitcoin_primitives.PrefilledTransaction transactions = 4;
+}
+
+// A "tx" message
+message Tx {
+  required bitcoin_primitives.Transaction tx = 1;
+}
+
+// A "getdata" message
+message GetData {
+  repeated bitcoin_primitives.InventoryItem items = 1;
+}
+
+// A "headers" message
+message Headers {
+  repeated bitcoin_primitives.BlockHeader headers = 1;
+}
+
+// A "getblocktxn" message
+message GetBlockTxn {
+  required bytes block_hash = 1;
+  repeated uint64 tx_indexes = 2; // proper indexes - not encoded differentially.
+}
+
+// A "blocktxn" message
+message BlockTxn {
+  required bytes block_hash = 1;
+  repeated bitcoin_primitives.Transaction transactions = 2;
+}
+
+// A "alert" message
+message Alert {
+  required bytes alert = 1;
+}
+
+// A "addr" message
+message Addr {
+  repeated bitcoin_primitives.Address addresses = 1;
+}
+
+// A "addrv2" message
+message AddrV2 {
+  repeated bitcoin_primitives.Address addresses = 1;
+}
+
+// A "reject" message
+message Reject {
+  required string rejected_command = 1;
+  enum RejectReason {
+    MALFORMED = 0;
+    INVALID = 1;
+    OBSOLETE = 2;
+    DUPLICATE = 3;
+    NONSTANDARD = 4;
+    DUST = 5;
+    FEE = 6;
+    CHECKPOINT = 7;
+  }
+  required RejectReason reason = 2;
+  required string reason_details = 3;
+  required bytes hash = 4;
+}
+
+// A "sendcmpct" message
+message SendCompact {
+  required bool send_compact = 1;
+  required uint64 version = 2;
+}
+
+// A "feefilter" message
+message FeeFilter {
+  required sint64 fee = 1;
+}
+
+// A "getheaders" message
+message GetHeaders {
+  required uint32 version = 1;
+  repeated bytes locator_hashes = 2;
+  required bytes stop_hash = 3;
+}
+
+// A "getblocks" message
+message GetBlocks {
+  required uint32 version = 1;
+  repeated bytes locator_hashes = 2;
+  required bytes stop_hash = 3;
+}
+
+// A "version" message
+message Version {
+  required uint32 version = 1;
+  required uint64 services = 2;
+  required sint64 timestamp = 3;
+  required bitcoin_primitives.Address receiver = 4;
+  required bitcoin_primitives.Address sender = 5;
+  required uint64 nonce = 6;
+  required string user_agent = 7;
+  required sint32 start_height = 8;
+  required bool relay = 9;
+}
+
+// A "block" message
+message Block {
+  required bitcoin_primitives.BlockHeader header = 1;
+  repeated bitcoin_primitives.Transaction transactions = 2;
+}
+
+// A BIP37 "filteradd" message
+message FilterAdd {
+  required bytes filter = 1;
+}
+
+// A BIP37 "filterload" message
+message FilterLoad {
+  required bytes filter = 1;
+  required uint32 hash_funcs = 2;
+  required uint32 tweak = 3;
+  enum BloomFlags {
+    None = 0;
+    All = 1;
+    PubkeyOnly = 2;
+  };
+  required BloomFlags flags = 4;
+}
+
+// A BIP157 "getcfcheckpt" message
+message GetCFCheckpt {
+  required uint32 filter_type = 1;
+  required bytes stop_hash = 2;
+}
+
+// A BIP157 "cfcheckpt" message
+message CFCheckpt {
+  required uint32 filter_type = 1;
+  required bytes stop_hash = 2;
+  repeated bytes filter_headers = 3;
+}
+
+
+// A BIP157 "getcfheaders" message
+message GetCFHeaders {
+  required uint32 filter_type = 1;
+  required uint32 start_height = 2;
+  required bytes stop_hash = 3;
+}
+
+// A BIP157 "cfheaders" message
+message CFHeaders {
+  required uint32 filter_type = 1;
+  required bytes stop_hash = 2;
+  required bytes previous_filter_header = 3;
+  repeated bytes filter_hashes = 4;
+}
+
+// A BIP157 "getcfilter" message
+message GetCFilter {
+  required uint32 filter_type = 1;
+  required uint32 start_height = 2;
+  required bytes stop_hash = 3;
+}
+
+// A BIP157 "cfilter" message
+message CFilter {
+  required uint32 filter_type = 1;
+  required bytes block_hash = 2;
+  required bytes filter = 3;
+}
+
+// A "merkleblock" message.
+message MerkleBlock {
+  required bitcoin_primitives.BlockHeader header = 1;
+  required uint32 num_transactions = 2;
+  repeated bool bits = 3;
+  repeated bytes hashes = 4;
+}
+
+// A message that's not implemented in rust-bitcoin.
+message Unknown {
+  required string command = 1;
+  required bytes payload = 2;
+}
