@@ -121,6 +121,16 @@
         border: 1px dashed var(--delivery);
       }
 
+      .status.partitioned {
+        border-color: rgba(240, 192, 64, 0.35);
+        color: var(--text);
+      }
+
+      .status.partitioned::before {
+        background: var(--bitcoin);
+        box-shadow: 0 0 14px rgba(240, 192, 64, 0.5);
+      }
+
       .mermaid-wrap {
         position: relative;
         min-height: 640px;
@@ -293,12 +303,16 @@
       <p class="lede">
         Each monitored Bitcoin implementation gets the same node-local
         collector. peer-observer records the forensic story, RPC reconciles what
-        is actually present, and the central service builds a comparable
-        per-source projection without confusing receipt, admission, membership,
-        or rejection.
+        is actually present, and the central service keeps one source-labelled
+        projection per node. Cross-source comparisons are derived on demand,
+        never stored as a merged Atlas mempool.
       </p>
 
-      <div class="status-row" aria-label="Implementation status legend">
+      <div
+        class="status-row"
+        aria-label="Architecture guarantees and implementation status"
+      >
+        <span class="status partitioned">no canonical Atlas mempool</span>
         <span class="status built">solid border · implemented foundation</span>
         <span class="status next"
           >dashed border · next iteration in atlas-jp3</span
@@ -353,14 +367,14 @@ flowchart TB
   KNOTS -.->|"RPC snapshot · derived corrections"| KNOTSAGENT
   KNOTSAGENT -.->|"persist before delivery"| KNOTSOUT
 
-  subgraph CENTRAL["Central Atlas service · vps-webserver-01 target"]
+  subgraph CENTRAL["Central Atlas service · co-located, source-partitioned storage"]
     direction TB
     INGEST["POST /api/v1/events<br/>idempotent ingest"]
-    EVENTS[("SQLite event ledger<br/>append-only evidence")]
-    MEMBERS[("SQLite current_membership<br/>per-source projection")]
-    VARIANTS[("SQLite transaction_variant<br/>raw forms by txid and wtxid")]
+    EVENTS[("SQLite event ledger<br/>source-labelled observations")]
+    MEMBERS[("SQLite current_membership<br/>one projection per source")]
+    VARIANTS[("SQLite transaction_variant<br/>shared intrinsic transaction facts")]
     CLASSIFIERS["facts and classifier registry<br/>contract built · rule packs later"]
-    READ["GET /api/v1/mempool<br/>JSON read API"]
+    READ["GET /api/v1/mempool<br/>labelled rows · optional source filter"]
 
     INGEST -->|"append once"| EVENTS
     INGEST -->|"apply membership mutation"| MEMBERS
@@ -375,9 +389,9 @@ flowchart TB
   KNOTSOUT -.->|"at-least-once HTTPS delivery"| INGEST
 
   TABLE["Browser table<br/>request and refresh · built"]
-  COMPARE["Multi-source comparison<br/>shared · Core-only · Knots-only<br/>next"]
+  COMPARE["Derived comparison view<br/>intersection · Core-only · Knots-only<br/>never a merged mempool · next"]
   READ --> TABLE
-  READ -.-> COMPARE
+  READ -.->|"derive for selected sources"| COMPARE
 
   class CORE,KNOTS bitcoinNode
   class COREOBS,KNOTSOBS evidenceNext
@@ -422,9 +436,10 @@ flowchart TB
         <article class="legend-card delivery">
           <h2>Delivery and projection</h2>
           <p>
-            The local outbox provides at-least-once delivery. Central
-            idempotency makes duplicates harmless and rejects conflicting reuse
-            of an event identity.
+            The local outbox provides at-least-once delivery. Central storage
+            co-locates source-labelled events, but current membership remains
+            partitioned by source. Comparison sets are computed views, not
+            membership written back into a combined pool.
           </p>
         </article>
         <article class="legend-card extension">
@@ -440,13 +455,15 @@ flowchart TB
       <div class="semantic-note" aria-label="Important semantic distinctions">
         <span>P2P receipt is not admission</span>
         <span>absence is not organic rejection</span>
+        <span>central storage is not merged state</span>
         <span>pruning does not weaken mempool visibility</span>
         <span>at-least-once delivery is not exactly-once transport</span>
       </div>
 
       <footer>
-        Target architecture with implementation status as of 14 July 2026. No
-        ZMQ dependency is required.
+        Target architecture with implementation status as of 14 July 2026.
+        Comparisons are computed views over source-partitioned state. No ZMQ
+        dependency is required.
       </footer>
     </main>
 

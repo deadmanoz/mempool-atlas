@@ -9,10 +9,14 @@ use tower::ServiceExt;
 const TXID: &str = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100";
 
 fn event() -> NormalizedEvent {
+    event_for("source-a", "session-a")
+}
+
+fn event_for(source_id: &str, session_id: &str) -> NormalizedEvent {
     normalize_payload(
         include_bytes!("../../../fixtures/peer-observer/mempool-added.pb"),
-        &SourceId::new("source-a").expect("source"),
-        &SourceSessionId::new("session-a").expect("session"),
+        &SourceId::new(source_id).expect("source"),
+        &SourceSessionId::new(session_id).expect("session"),
         1,
         1_721_234_567_897,
     )
@@ -62,4 +66,55 @@ async fn event_is_idempotent_and_visible_in_read_api() {
     let snapshot: MempoolSnapshot = serde_json::from_slice(&bytes).expect("snapshot");
     assert_eq!(snapshot.memberships.len(), 1);
     assert_eq!(snapshot.memberships[0].txid, TXID);
+}
+
+#[tokio::test]
+async fn same_txid_from_two_sources_remains_two_memberships() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let database = temporary.path().join("atlas.db");
+    Store::migrate(&database).expect("migrate");
+    let application = router(Store::open(database).expect("store"));
+
+    for event in [
+        event_for("source-a", "session-a"),
+        event_for("source-b", "session-b"),
+    ] {
+        let response = application
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&event).expect("event json")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    let response = application
+        .oneshot(
+            Request::get("/api/v1/mempool")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let snapshot: MempoolSnapshot = serde_json::from_slice(&bytes).expect("snapshot");
+
+    assert_eq!(snapshot.source_id, None);
+    assert_eq!(snapshot.memberships.len(), 2);
+    assert!(snapshot.memberships.iter().all(|row| row.txid == TXID));
+    assert_eq!(
+        snapshot
+            .memberships
+            .iter()
+            .map(|row| row.source_id.as_str())
+            .collect::<Vec<_>>(),
+        ["source-a", "source-b"]
+    );
 }
