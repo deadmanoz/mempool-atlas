@@ -2,6 +2,7 @@ set shell := ["bash", "-uc"]
 set dotenv-load := true
 
 export ATLAS_DATABASE := env_var_or_default("ATLAS_DATABASE", "var/atlas.db")
+export ATLAS_AGENT_DATABASE := env_var_or_default("ATLAS_AGENT_DATABASE", "var/atlas-agent.db")
 export ATLAS_BIND := env_var_or_default("ATLAS_BIND", "127.0.0.1:3101")
 
 default:
@@ -27,6 +28,9 @@ test-rust:
 test-web:
     npm --prefix web test
 
+test-baseline-scale:
+    cargo test --release -p atlas-server --test baseline_scale -- --ignored --nocapture
+
 proto-check:
     ./scripts/check-peer-observer-protos.sh
 
@@ -45,6 +49,9 @@ format:
 dev:
     cargo run -p atlas-server -- serve --database "$ATLAS_DATABASE" --bind "$ATLAS_BIND"
 
+agent-dev:
+    cargo run -p atlas-agent -- run --database "$ATLAS_AGENT_DATABASE"
+
 web-dev:
     npm --prefix web run dev
 
@@ -56,6 +63,15 @@ db-migrate-deploy:
 
 db-backup:
     ./scripts/migrate-safe.sh backup-only "$ATLAS_DATABASE"
+
+agent-db-migrate-dev:
+    ./scripts/migrate-safe.sh migrate "$ATLAS_AGENT_DATABASE" agent
+
+agent-db-migrate-deploy:
+    ./scripts/migrate-safe.sh migrate "$ATLAS_AGENT_DATABASE" agent
+
+agent-db-backup:
+    ./scripts/migrate-safe.sh backup-only "$ATLAS_AGENT_DATABASE" agent
 
 clean:
     cargo clean

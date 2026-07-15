@@ -313,9 +313,11 @@
         aria-label="Architecture guarantees and implementation status"
       >
         <span class="status partitioned">no canonical Atlas mempool</span>
-        <span class="status built">solid border · implemented foundation</span>
+        <span class="status built"
+          >solid border · live vertical slice built</span
+        >
         <span class="status next"
-          >dashed border · next iteration in atlas-jp3</span
+          >dashed border · comparison and classifiers planned</span
         >
       </div>
 
@@ -350,33 +352,33 @@
 flowchart TB
   CORE["CORE SOURCE<br/>Bitcoin Core v31.1 · pruned"]
   KNOTS["KNOTS SOURCE<br/>Bitcoin Knots · pruned"]
-  COREOBS["peer-observer + NATS<br/>mempool · netmsg<br/>subscription next"]
-  KNOTSOBS["peer-observer + NATS<br/>mempool · netmsg<br/>subscription next"]
-  COREAGENT["atlas-agent<br/>decoder + normalization built<br/>live runtime + RPC next"]
-  KNOTSAGENT["atlas-agent<br/>decoder + normalization built<br/>live runtime + RPC next"]
-  COREOUT[("Core SQLite outbox<br/>next")]
-  KNOTSOUT[("Knots SQLite outbox<br/>next")]
+  COREOBS["peer-observer + NATS<br/>all mempool · inbound P2P default<br/>all P2P for bounded diagnostics"]
+  KNOTSOBS["peer-observer + NATS<br/>all mempool · inbound P2P default<br/>all P2P for bounded diagnostics"]
+  COREAGENT["atlas-agent<br/>capture + RPC reconciliation<br/>ordered local projection"]
+  KNOTSAGENT["atlas-agent<br/>capture + RPC reconciliation<br/>ordered local projection"]
+  COREOUT[("Core durable SQLite outbox<br/>strict FIFO<br/>single live · bounded RPC prefix")]
+  KNOTSOUT[("Knots durable SQLite outbox<br/>strict FIFO<br/>single live · bounded RPC prefix")]
 
   CORE -->|"observed activity"| COREOBS
-  COREOBS -.->|"unframed protobuf Event"| COREAGENT
-  CORE -.->|"RPC snapshot · derived corrections"| COREAGENT
-  COREAGENT -.->|"persist before delivery"| COREOUT
+  COREOBS -->|"unframed protobuf Event"| COREAGENT
+  CORE -->|"getrawmempool · fenced reconciliation"| COREAGENT
+  COREAGENT -->|"atomic projection + enqueue"| COREOUT
 
   KNOTS -->|"observed activity"| KNOTSOBS
-  KNOTSOBS -.->|"unframed protobuf Event"| KNOTSAGENT
-  KNOTS -.->|"RPC snapshot · derived corrections"| KNOTSAGENT
-  KNOTSAGENT -.->|"persist before delivery"| KNOTSOUT
+  KNOTSOBS -->|"unframed protobuf Event"| KNOTSAGENT
+  KNOTS -->|"getrawmempool · fenced reconciliation"| KNOTSAGENT
+  KNOTSAGENT -->|"atomic projection + enqueue"| KNOTSOUT
 
   subgraph CENTRAL["Central Atlas service · co-located, source-partitioned storage"]
     direction TB
-    INGEST["POST /api/v1/events<br/>idempotent ingest"]
+    INGEST["POST /api/v1/events<br/>POST /api/v1/events/batch<br/>idempotent · batch atomic"]
     EVENTS[("SQLite event ledger<br/>source-labelled observations")]
     MEMBERS[("SQLite current_membership<br/>one projection per source")]
     VARIANTS[("SQLite transaction_variant<br/>shared intrinsic transaction facts")]
-    CLASSIFIERS["facts and classifier registry<br/>contract built · rule packs later"]
+    CLASSIFIERS["Classifier registry + rule packs<br/>planned extension"]
     READ["GET /api/v1/mempool<br/>labelled rows · optional source filter"]
 
-    INGEST -->|"append once"| EVENTS
+    INGEST -->|"append once · ordered transaction"| EVENTS
     INGEST -->|"apply membership mutation"| MEMBERS
     INGEST -->|"preserve raw variant"| VARIANTS
     EVENTS -.->|"evidence inputs"| CLASSIFIERS
@@ -385,8 +387,8 @@ flowchart TB
     CLASSIFIERS -.-> READ
   end
 
-  COREOUT -.->|"at-least-once HTTPS delivery"| INGEST
-  KNOTSOUT -.->|"at-least-once HTTPS delivery"| INGEST
+  COREOUT -->|"live: one event<br/>RPC: ≤512 events · ≤4 MiB<br/>complete ordered 202 ack"| INGEST
+  KNOTSOUT -->|"live: one event<br/>RPC: ≤512 events · ≤4 MiB<br/>complete ordered 202 ack"| INGEST
 
   TABLE["Browser table<br/>request and refresh · built"]
   COMPARE["Derived comparison view<br/>intersection · Core-only · Knots-only<br/>never a merged mempool · next"]
@@ -394,9 +396,9 @@ flowchart TB
   READ -.->|"derive for selected sources"| COMPARE
 
   class CORE,KNOTS bitcoinNode
-  class COREOBS,KNOTSOBS evidenceNext
+  class COREOBS,KNOTSOBS evidenceBuilt
   class COREAGENT,KNOTSAGENT serviceBuilt
-  class COREOUT,KNOTSOUT serviceNext
+  class COREOUT,KNOTSOUT dataBuilt
   class INGEST,READ serviceBuilt
   class EVENTS,MEMBERS,VARIANTS dataBuilt
   class CLASSIFIERS extensionNext
@@ -404,9 +406,8 @@ flowchart TB
   class COMPARE uiNext
 
   classDef bitcoinNode fill:#3d3200,stroke:#f0c040,stroke-width:2px
-  classDef evidenceNext fill:#3d2a1a,stroke:#fb923c,stroke-width:2px,stroke-dasharray:6 4
+  classDef evidenceBuilt fill:#3d2a1a,stroke:#fb923c,stroke-width:2px
   classDef serviceBuilt fill:#1a3a5c,stroke:#4a9eff,stroke-width:2px
-  classDef serviceNext fill:#1a3a5c,stroke:#4a9eff,stroke-width:2px,stroke-dasharray:6 4
   classDef dataBuilt fill:#1a3d2a,stroke:#34d399,stroke-width:2px
   classDef extensionNext fill:#2d1a3d,stroke:#b388ff,stroke-width:2px,stroke-dasharray:6 4
   classDef uiBuilt fill:#2d1a3d,stroke:#b388ff,stroke-width:2px
@@ -421,25 +422,31 @@ flowchart TB
           <h2>Evidence plane</h2>
           <p>
             peer-observer captures admission, removal, replacement, rejection,
-            peer context, and raw transaction evidence. Collector downtime can
-            leave an unrecoverable forensic gap.
+            peer context, and raw transaction evidence. Mempool evidence is
+            fully retained, while P2P capture defaults to inbound sightings.
+            Those sightings preserve pre-validation peer evidence. Full raw
+            relay capture remains available for bounded diagnostics. Collector
+            downtime can still leave an unrecoverable forensic gap.
           </p>
         </article>
         <article class="legend-card state">
           <h2>State plane</h2>
           <p>
-            RPC is authoritative for one node's current mempool at poll time.
-            Reconciliation repairs membership drift without storing each
-            complete poll as an event.
+            RPC is authoritative for one node's current mempool at poll time. A
+            projection fence orders snapshot formation against peer-observer
+            capture, so reconciliation repairs drift without overwriting newer
+            evidence or storing each complete poll as an event.
           </p>
         </article>
         <article class="legend-card delivery">
           <h2>Delivery and projection</h2>
           <p>
-            The local outbox provides at-least-once delivery. Central storage
-            co-locates source-labelled events, but current membership remains
-            partitioned by source. Comparison sets are computed views, not
-            membership written back into a combined pool.
+            The durable local outbox drains in strict FIFO order with
+            at-least-once delivery. Live evidence stays on the single-event
+            path, while contiguous RPC corrections use an atomic batch of at
+            most 512 events and 4 MiB. A complete, same-order 202
+            acknowledgement removes the whole prefix; otherwise none of it is
+            removed. Central membership remains partitioned by source.
           </p>
         </article>
         <article class="legend-card extension">
@@ -454,16 +461,18 @@ flowchart TB
 
       <div class="semantic-note" aria-label="Important semantic distinctions">
         <span>P2P receipt is not admission</span>
+        <span>inbound-only capture is not transaction deduplication</span>
         <span>absence is not organic rejection</span>
         <span>central storage is not merged state</span>
         <span>pruning does not weaken mempool visibility</span>
         <span>at-least-once delivery is not exactly-once transport</span>
+        <span>batching is not event coalescing</span>
       </div>
 
       <footer>
-        Target architecture with implementation status as of 14 July 2026.
-        Comparisons are computed views over source-partitioned state. No ZMQ
-        dependency is required.
+        Architecture and implementation status as of 15 July 2026. Comparisons
+        are computed views over source-partitioned state. No ZMQ dependency is
+        required.
       </footer>
     </main>
 

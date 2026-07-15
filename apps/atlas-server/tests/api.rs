@@ -1,5 +1,8 @@
 use atlas_agent::peer_observer::normalize_payload;
-use atlas_model::{IngestResponse, IngestStatus, MempoolSnapshot, NormalizedEvent};
+use atlas_model::{
+    Evidence, IngestBatchRequest, IngestBatchResponse, IngestResponse, IngestStatus,
+    MAX_INGEST_BATCH_BODY_BYTES, MempoolSnapshot, NormalizedEvent,
+};
 use atlas_model::{SourceId, SourceSessionId};
 use atlas_server::{Store, router};
 use axum::body::{Body, to_bytes};
@@ -69,6 +72,108 @@ async fn event_is_idempotent_and_visible_in_read_api() {
 }
 
 #[tokio::test]
+async fn event_batch_is_idempotent_and_acknowledged_in_request_order() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let database = temporary.path().join("atlas.db");
+    Store::migrate(&database).expect("migrate");
+    let application = router(Store::open(database).expect("store"));
+    let request = IngestBatchRequest {
+        events: vec![
+            event_for("source-a", "session-a"),
+            event_for("source-a", "session-b"),
+        ],
+    };
+    let expected_event_ids = request
+        .events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect::<Vec<_>>();
+    let body = serde_json::to_vec(&request).expect("batch json");
+
+    for expected_status in [IngestStatus::Applied, IngestStatus::Duplicate] {
+        let response = application
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/events/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let response: IngestBatchResponse = serde_json::from_slice(&bytes).expect("batch response");
+        assert_eq!(
+            response
+                .acknowledgements
+                .iter()
+                .map(|acknowledgement| acknowledgement.event_id.clone())
+                .collect::<Vec<_>>(),
+            expected_event_ids
+        );
+        assert!(
+            response
+                .acknowledgements
+                .iter()
+                .all(|acknowledgement| acknowledgement.status == expected_status)
+        );
+    }
+}
+
+#[tokio::test]
+async fn event_batch_rejects_mixed_sources_before_ingest() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let database = temporary.path().join("atlas.db");
+    Store::migrate(&database).expect("migrate");
+    let store = Store::open(database).expect("store");
+    let application = router(store.clone());
+    let request = IngestBatchRequest {
+        events: vec![
+            event_for("source-a", "session-a"),
+            event_for("source-b", "session-b"),
+        ],
+    };
+
+    let response = application
+        .oneshot(
+            Request::post("/api/v1/events/batch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&request).expect("batch json"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(store.mempool(None).expect("mempool").memberships.is_empty());
+}
+
+#[tokio::test]
+async fn event_batch_rejects_a_body_above_the_wire_limit() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let database = temporary.path().join("atlas.db");
+    Store::migrate(&database).expect("migrate");
+    let application = router(Store::open(database).expect("store"));
+
+    let response = application
+        .oneshot(
+            Request::post("/api/v1/events/batch")
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b' '; MAX_INGEST_BATCH_BODY_BYTES + 1]))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
 async fn same_txid_from_two_sources_remains_two_memberships() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let database = temporary.path().join("atlas.db");
@@ -117,4 +222,46 @@ async fn same_txid_from_two_sources_remains_two_memberships() {
             .collect::<Vec<_>>(),
         ["source-a", "source-b"]
     );
+}
+
+#[tokio::test]
+async fn p2p_transaction_larger_than_axum_default_body_limit_is_ingested() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let database = temporary.path().join("atlas.db");
+    Store::migrate(&database).expect("migrate");
+    let application = router(Store::open(database).expect("store"));
+    let event = NormalizedEvent::new(
+        SourceId::new("source-a").expect("source"),
+        SourceSessionId::new("session-a").expect("session"),
+        1,
+        1_721_234_567_897,
+        1_721_234_567_897,
+        Evidence::P2pTransaction {
+            txid: TXID.to_owned(),
+            wtxid: TXID.to_owned(),
+            raw_transaction_hex: Some("00".repeat(1_100_000)),
+            peer_id: Some(42),
+            inbound: Some(true),
+        },
+    )
+    .expect("event");
+    let body = serde_json::to_vec(&event).expect("event json");
+    assert!(body.len() > 2 * 1024 * 1024);
+    assert!(body.len() < 16 * 1024 * 1024);
+
+    let response = application
+        .oneshot(
+            Request::post("/api/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let ingest: IngestResponse = serde_json::from_slice(&bytes).expect("ingest response");
+    assert_eq!(ingest.status, IngestStatus::Applied);
 }

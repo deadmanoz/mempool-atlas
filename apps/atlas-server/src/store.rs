@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atlas_model::{
-    Evidence, IngestStatus, MembershipRow, MempoolSnapshot, NormalizedEvent, SourceId,
+    Evidence, IngestBatchRequest, IngestStatus, MembershipRow, MempoolSnapshot, NormalizedEvent,
+    SourceId,
 };
 use rusqlite::{Connection, OpenFlags, Transaction, params};
 use thiserror::Error;
@@ -79,65 +80,32 @@ impl Store {
 
     pub fn ingest(&self, event: &NormalizedEvent) -> Result<IngestStatus, StoreError> {
         event.validate()?;
+        let mut statuses = self.ingest_validated(std::slice::from_ref(event))?;
+        Ok(statuses
+            .pop()
+            .expect("single-event ingest must return exactly one status"))
+    }
+
+    pub fn ingest_batch(
+        &self,
+        request: &IngestBatchRequest,
+    ) -> Result<Vec<IngestStatus>, StoreError> {
+        request.validate()?;
+        self.ingest_validated(&request.events)
+    }
+
+    fn ingest_validated(
+        &self,
+        events: &[NormalizedEvent],
+    ) -> Result<Vec<IngestStatus>, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
-        upsert_source(&transaction, event)?;
-
-        let payload_json = serde_json::to_string(&event.evidence)?;
-        let local_sequence = to_sqlite_integer(event.local_sequence, "local_sequence")?;
-        let observed_at_ms = to_sqlite_integer(event.observed_at_ms, "observed_at_ms")?;
-        let received_at_ms = to_sqlite_integer(event.received_at_ms, "received_at_ms")?;
-        let inserted = transaction.execute(
-            "INSERT INTO event (
-                event_id, source_id, source_session_id, local_sequence,
-                observed_at_ms, received_at_ms, event_kind, payload_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT (event_id) DO NOTHING",
-            params![
-                event.event_id,
-                event.source_id.as_str(),
-                event.source_session_id.as_str(),
-                local_sequence,
-                observed_at_ms,
-                received_at_ms,
-                event.evidence.kind(),
-                payload_json,
-            ],
-        )?;
-
-        if inserted == 0 {
-            let existing = transaction.query_row(
-                "SELECT observed_at_ms, received_at_ms, event_kind, payload_json
-                 FROM event WHERE event_id = ?1",
-                [&event.event_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )?;
-            if existing
-                != (
-                    observed_at_ms,
-                    received_at_ms,
-                    event.evidence.kind().to_owned(),
-                    payload_json,
-                )
-            {
-                return Err(StoreError::ConflictingEvent {
-                    event_id: event.event_id.clone(),
-                });
-            }
-            transaction.commit()?;
-            return Ok(IngestStatus::Duplicate);
+        let mut statuses = Vec::with_capacity(events.len());
+        for event in events {
+            statuses.push(ingest_in_transaction(&transaction, event)?);
         }
-
-        apply_evidence(&transaction, event)?;
         transaction.commit()?;
-        Ok(IngestStatus::Applied)
+        Ok(statuses)
     }
 
     pub fn mempool(&self, source_id: Option<&SourceId>) -> Result<MempoolSnapshot, StoreError> {
@@ -175,6 +143,67 @@ impl Store {
     fn connect(&self) -> Result<Connection, StoreError> {
         open_existing_connection(&self.path)
     }
+}
+
+fn ingest_in_transaction(
+    transaction: &Transaction<'_>,
+    event: &NormalizedEvent,
+) -> Result<IngestStatus, StoreError> {
+    upsert_source(transaction, event)?;
+
+    let payload_json = serde_json::to_string(&event.evidence)?;
+    let local_sequence = to_sqlite_integer(event.local_sequence, "local_sequence")?;
+    let observed_at_ms = to_sqlite_integer(event.observed_at_ms, "observed_at_ms")?;
+    let received_at_ms = to_sqlite_integer(event.received_at_ms, "received_at_ms")?;
+    let inserted = transaction.execute(
+        "INSERT INTO event (
+                event_id, source_id, source_session_id, local_sequence,
+                observed_at_ms, received_at_ms, event_kind, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (event_id) DO NOTHING",
+        params![
+            event.event_id,
+            event.source_id.as_str(),
+            event.source_session_id.as_str(),
+            local_sequence,
+            observed_at_ms,
+            received_at_ms,
+            event.evidence.kind(),
+            payload_json,
+        ],
+    )?;
+
+    if inserted == 0 {
+        let existing = transaction.query_row(
+            "SELECT observed_at_ms, received_at_ms, event_kind, payload_json
+                 FROM event WHERE event_id = ?1",
+            [&event.event_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        if existing
+            != (
+                observed_at_ms,
+                received_at_ms,
+                event.evidence.kind().to_owned(),
+                payload_json,
+            )
+        {
+            return Err(StoreError::ConflictingEvent {
+                event_id: event.event_id.clone(),
+            });
+        }
+        return Ok(IngestStatus::Duplicate);
+    }
+
+    apply_evidence(transaction, event)?;
+    Ok(IngestStatus::Applied)
 }
 
 fn open_existing_connection(path: &Path) -> Result<Connection, StoreError> {
@@ -307,6 +336,7 @@ mod tests {
     use super::*;
 
     const TXID: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const TXID_B: &str = "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
 
     fn test_store() -> (TempDir, Store) {
         let temporary = tempfile::tempdir().expect("temporary directory");
@@ -317,15 +347,27 @@ mod tests {
     }
 
     fn added_event() -> NormalizedEvent {
-        NormalizedEvent::new(
-            SourceId::new("source-a").expect("source"),
-            SourceSessionId::new("session-a").expect("session"),
+        event_for(
+            "session-a",
             1,
-            100,
-            101,
             Evidence::MempoolAdded {
                 txid: TXID.to_owned(),
             },
+        )
+    }
+
+    fn event_for(
+        source_session_id: &str,
+        local_sequence: u64,
+        evidence: Evidence,
+    ) -> NormalizedEvent {
+        NormalizedEvent::new(
+            SourceId::new("source-a").expect("source"),
+            SourceSessionId::new(source_session_id).expect("session"),
+            local_sequence,
+            100,
+            101,
+            evidence,
         )
         .expect("event")
     }
@@ -342,6 +384,150 @@ mod tests {
         let snapshot = store.mempool(None).expect("mempool");
         assert_eq!(snapshot.memberships.len(), 1);
         assert_eq!(snapshot.memberships[0].txid, TXID);
+    }
+
+    #[test]
+    fn batch_ingest_returns_ordered_applied_then_duplicate_statuses() {
+        let (_temporary, store) = test_store();
+        let request = IngestBatchRequest {
+            events: vec![
+                event_for(
+                    "session-a",
+                    1,
+                    Evidence::MempoolAdded {
+                        txid: TXID.to_owned(),
+                    },
+                ),
+                event_for(
+                    "session-b",
+                    1,
+                    Evidence::MempoolAdded {
+                        txid: TXID_B.to_owned(),
+                    },
+                ),
+            ],
+        };
+
+        assert_eq!(
+            store.ingest_batch(&request).expect("first batch"),
+            vec![IngestStatus::Applied, IngestStatus::Applied]
+        );
+        assert_eq!(
+            store.ingest_batch(&request).expect("duplicate batch"),
+            vec![IngestStatus::Duplicate, IngestStatus::Duplicate]
+        );
+    }
+
+    #[test]
+    fn batch_ingest_applies_membership_mutations_in_request_order() {
+        let (temporary, store) = test_store();
+        let present = event_for(
+            "session-a",
+            1,
+            Evidence::MempoolReconciled {
+                txid: TXID.to_owned(),
+                present: true,
+            },
+        );
+        let absent = event_for(
+            "session-a",
+            2,
+            Evidence::MempoolReconciled {
+                txid: TXID.to_owned(),
+                present: false,
+            },
+        );
+        let absent_event_id = absent.event_id.clone();
+
+        store
+            .ingest_batch(&IngestBatchRequest {
+                events: vec![present, absent],
+            })
+            .expect("ordered batch");
+
+        assert!(store.mempool(None).expect("mempool").memberships.is_empty());
+        let membership = Connection::open(temporary.path().join("atlas.db"))
+            .expect("inspect database")
+            .query_row(
+                "SELECT present, evidence_event_id FROM current_membership
+                 WHERE source_id = 'source-a' AND txid = ?1",
+                [TXID],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("membership");
+        assert_eq!(membership, (0, absent_event_id));
+    }
+
+    #[test]
+    fn conflicting_late_batch_event_rolls_back_earlier_events() {
+        let (temporary, store) = test_store();
+        let existing = event_for(
+            "existing-session",
+            1,
+            Evidence::MempoolRejected {
+                txid: TXID.to_owned(),
+                reason: "policy".to_owned(),
+            },
+        );
+        store.ingest(&existing).expect("existing event");
+        let mut conflicting = existing;
+        conflicting.received_at_ms += 1;
+        let request = IngestBatchRequest {
+            events: vec![
+                event_for(
+                    "batch-session",
+                    1,
+                    Evidence::MempoolAdded {
+                        txid: TXID.to_owned(),
+                    },
+                ),
+                event_for(
+                    "batch-session",
+                    2,
+                    Evidence::MempoolAdded {
+                        txid: TXID_B.to_owned(),
+                    },
+                ),
+                conflicting,
+            ],
+        };
+
+        assert!(matches!(
+            store.ingest_batch(&request),
+            Err(StoreError::ConflictingEvent { .. })
+        ));
+        assert!(store.mempool(None).expect("mempool").memberships.is_empty());
+        let event_count = Connection::open(temporary.path().join("atlas.db"))
+            .expect("inspect database")
+            .query_row("SELECT COUNT(*) FROM event", [], |row| row.get::<_, i64>(0))
+            .expect("event count");
+        assert_eq!(event_count, 1);
+    }
+
+    #[test]
+    fn invalid_late_batch_event_prevents_any_application() {
+        let (temporary, store) = test_store();
+        let valid = added_event();
+        let mut invalid = event_for(
+            "session-a",
+            2,
+            Evidence::MempoolAdded {
+                txid: TXID_B.to_owned(),
+            },
+        );
+        invalid.event_id = "wrong/session/identity".to_owned();
+
+        assert!(matches!(
+            store.ingest_batch(&IngestBatchRequest {
+                events: vec![valid, invalid],
+            }),
+            Err(StoreError::Model(atlas_model::ModelError::EventIdMismatch))
+        ));
+        let event_count = Connection::open(temporary.path().join("atlas.db"))
+            .expect("inspect database")
+            .query_row("SELECT COUNT(*) FROM event", [], |row| row.get::<_, i64>(0))
+            .expect("event count");
+        assert_eq!(event_count, 0);
     }
 
     #[test]

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const SCHEMA_VERSION: u16 = 1;
+pub const MAX_INGEST_BATCH_EVENTS: usize = 512;
+pub const MAX_INGEST_BATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ModelError {
@@ -25,6 +27,12 @@ pub enum ModelError {
     UnsupportedSchemaVersion { found: u16, expected: u16 },
     #[error("event_id does not match source, session, and local sequence")]
     EventIdMismatch,
+    #[error("ingest batch must contain at least one event")]
+    EmptyIngestBatch,
+    #[error("ingest batch contains {found} events; maximum is {maximum}")]
+    IngestBatchTooLarge { found: usize, maximum: usize },
+    #[error("ingest batch mixes source {found} with source {expected}")]
+    IngestBatchSourceMismatch { expected: String, found: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -132,6 +140,10 @@ impl NormalizedEvent {
     pub fn membership_mutations(&self) -> Vec<MembershipMutation> {
         match &self.evidence {
             Evidence::MempoolAdded { txid } => vec![MembershipMutation::present(txid)],
+            Evidence::MempoolReconciled { txid, present } => vec![MembershipMutation {
+                txid: txid.to_owned(),
+                present: *present,
+            }],
             Evidence::MempoolRemoved { txid, .. } => vec![MembershipMutation::absent(txid)],
             Evidence::MempoolReplaced {
                 replaced_txid,
@@ -153,6 +165,10 @@ impl NormalizedEvent {
 pub enum Evidence {
     MempoolAdded {
         txid: String,
+    },
+    MempoolReconciled {
+        txid: String,
+        present: bool,
     },
     MempoolRemoved {
         txid: String,
@@ -179,6 +195,7 @@ impl Evidence {
     pub fn validate(&self) -> Result<(), ModelError> {
         match self {
             Self::MempoolAdded { txid }
+            | Self::MempoolReconciled { txid, .. }
             | Self::MempoolRemoved { txid, .. }
             | Self::MempoolRejected { txid, .. } => validate_txid(txid),
             Self::MempoolReplaced {
@@ -199,6 +216,7 @@ impl Evidence {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::MempoolAdded { .. } => "mempool_added",
+            Self::MempoolReconciled { .. } => "mempool_reconciled",
             Self::MempoolRemoved { .. } => "mempool_removed",
             Self::MempoolRejected { .. } => "mempool_rejected",
             Self::MempoolReplaced { .. } => "mempool_replaced",
@@ -273,6 +291,41 @@ pub struct IngestResponse {
     pub status: IngestStatus,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IngestBatchRequest {
+    pub events: Vec<NormalizedEvent>,
+}
+
+impl IngestBatchRequest {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        let Some(first) = self.events.first() else {
+            return Err(ModelError::EmptyIngestBatch);
+        };
+        if self.events.len() > MAX_INGEST_BATCH_EVENTS {
+            return Err(ModelError::IngestBatchTooLarge {
+                found: self.events.len(),
+                maximum: MAX_INGEST_BATCH_EVENTS,
+            });
+        }
+
+        for event in &self.events {
+            event.validate()?;
+            if event.source_id != first.source_id {
+                return Err(ModelError::IngestBatchSourceMismatch {
+                    expected: first.source_id.to_string(),
+                    found: event.source_id.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IngestBatchResponse {
+    pub acknowledgements: Vec<IngestResponse>,
+}
+
 fn ensure_nonempty(field: &'static str, value: &str) -> Result<(), ModelError> {
     if value.trim().is_empty() {
         return Err(ModelError::EmptyIdentifier { field });
@@ -314,10 +367,19 @@ mod tests {
     const TXID_B: &str = "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
 
     fn event(evidence: Evidence) -> NormalizedEvent {
+        event_for("source-a", "session-a", 7, evidence)
+    }
+
+    fn event_for(
+        source_id: &str,
+        source_session_id: &str,
+        local_sequence: u64,
+        evidence: Evidence,
+    ) -> NormalizedEvent {
         NormalizedEvent::new(
-            SourceId::new("source-a").expect("source"),
-            SourceSessionId::new("session-a").expect("session"),
-            7,
+            SourceId::new(source_id).expect("source"),
+            SourceSessionId::new(source_session_id).expect("session"),
+            local_sequence,
             1_000,
             1_001,
             evidence,
@@ -331,6 +393,95 @@ mod tests {
             txid: TXID_A.to_owned(),
         });
         assert_eq!(event.event_id, "source-a/session-a/7");
+    }
+
+    #[test]
+    fn ingest_batch_requires_events() {
+        assert_eq!(
+            IngestBatchRequest { events: Vec::new() }.validate(),
+            Err(ModelError::EmptyIngestBatch)
+        );
+    }
+
+    #[test]
+    fn ingest_batch_enforces_event_count_bound() {
+        let event = event(Evidence::MempoolAdded {
+            txid: TXID_A.to_owned(),
+        });
+        let request = IngestBatchRequest {
+            events: vec![event; MAX_INGEST_BATCH_EVENTS + 1],
+        };
+
+        assert_eq!(
+            request.validate(),
+            Err(ModelError::IngestBatchTooLarge {
+                found: MAX_INGEST_BATCH_EVENTS + 1,
+                maximum: MAX_INGEST_BATCH_EVENTS,
+            })
+        );
+    }
+
+    #[test]
+    fn ingest_batch_accepts_multiple_sessions_for_one_source() {
+        let request = IngestBatchRequest {
+            events: vec![
+                event_for(
+                    "source-a",
+                    "session-a",
+                    1,
+                    Evidence::MempoolAdded {
+                        txid: TXID_A.to_owned(),
+                    },
+                ),
+                event_for(
+                    "source-a",
+                    "session-b",
+                    1,
+                    Evidence::MempoolAdded {
+                        txid: TXID_B.to_owned(),
+                    },
+                ),
+            ],
+        };
+
+        assert_eq!(request.validate(), Ok(()));
+    }
+
+    #[test]
+    fn ingest_batch_rejects_mixed_sources_and_invalid_events() {
+        let valid = event_for(
+            "source-a",
+            "session-a",
+            1,
+            Evidence::MempoolAdded {
+                txid: TXID_A.to_owned(),
+            },
+        );
+        let other_source = event_for(
+            "source-b",
+            "session-b",
+            1,
+            Evidence::MempoolAdded {
+                txid: TXID_B.to_owned(),
+            },
+        );
+        assert!(matches!(
+            IngestBatchRequest {
+                events: vec![valid.clone(), other_source],
+            }
+            .validate(),
+            Err(ModelError::IngestBatchSourceMismatch { .. })
+        ));
+
+        let mut invalid = valid.clone();
+        invalid.event_id = "wrong/session/identity".to_owned();
+        assert_eq!(
+            IngestBatchRequest {
+                events: vec![valid, invalid],
+            }
+            .validate(),
+            Err(ModelError::EventIdMismatch)
+        );
     }
 
     #[test]
@@ -354,6 +505,64 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn reconciliation_sets_the_requested_membership_state() {
+        for present in [true, false] {
+            let event = event(Evidence::MempoolReconciled {
+                txid: TXID_A.to_owned(),
+                present,
+            });
+            assert_eq!(
+                event.membership_mutations(),
+                vec![MembershipMutation {
+                    txid: TXID_A.to_owned(),
+                    present,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn reconciliation_remains_distinct_from_removal_and_rejection() {
+        let reconciled = Evidence::MempoolReconciled {
+            txid: TXID_A.to_owned(),
+            present: false,
+        };
+        let removed = Evidence::MempoolRemoved {
+            txid: TXID_A.to_owned(),
+            reason: Some("expired".to_owned()),
+        };
+        let rejected = Evidence::MempoolRejected {
+            txid: TXID_A.to_owned(),
+            reason: "policy".to_owned(),
+        };
+
+        assert_eq!(reconciled.kind(), "mempool_reconciled");
+        assert_eq!(removed.kind(), "mempool_removed");
+        assert_eq!(rejected.kind(), "mempool_rejected");
+        assert_ne!(reconciled, removed);
+        assert_ne!(reconciled, rejected);
+        assert!(event(rejected).membership_mutations().is_empty());
+    }
+
+    #[test]
+    fn reconciliation_validates_its_txid() {
+        assert!(matches!(
+            NormalizedEvent::new(
+                SourceId::new("source-a").expect("source"),
+                SourceSessionId::new("session-a").expect("session"),
+                7,
+                1_000,
+                1_001,
+                Evidence::MempoolReconciled {
+                    txid: "not-a-txid".to_owned(),
+                    present: true,
+                },
+            ),
+            Err(ModelError::InvalidTxid(_))
+        ));
     }
 
     #[test]

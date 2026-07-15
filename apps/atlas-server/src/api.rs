@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
-use atlas_model::{IngestResponse, MempoolSnapshot, NormalizedEvent, SourceId};
-use axum::extract::{Query, State};
+use atlas_model::{
+    IngestBatchRequest, IngestBatchResponse, IngestResponse, MAX_INGEST_BATCH_BODY_BYTES,
+    MempoolSnapshot, NormalizedEvent, SourceId,
+};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -13,7 +16,14 @@ use crate::store::{Store, StoreError};
 pub fn router(store: Store) -> Router {
     Router::new()
         .route("/healthz", get(health))
-        .route("/api/v1/events", post(ingest_event))
+        .route(
+            "/api/v1/events",
+            post(ingest_event).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route(
+            "/api/v1/events/batch",
+            post(ingest_batch).layer(DefaultBodyLimit::max(MAX_INGEST_BATCH_BODY_BYTES)),
+        )
         .route("/api/v1/mempool", get(mempool))
         .with_state(AppState {
             store: Arc::new(store),
@@ -46,6 +56,31 @@ async fn ingest_event(
     Ok((
         StatusCode::ACCEPTED,
         Json(IngestResponse { event_id, status }),
+    ))
+}
+
+async fn ingest_batch(
+    State(state): State<AppState>,
+    Json(request): Json<IngestBatchRequest>,
+) -> Result<(StatusCode, Json<IngestBatchResponse>), ApiError> {
+    request.validate()?;
+    let event_ids = request
+        .events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect::<Vec<_>>();
+    let store = Arc::clone(&state.store);
+    let statuses = tokio::task::spawn_blocking(move || store.ingest_batch(&request))
+        .await
+        .map_err(ApiError::Task)??;
+    let acknowledgements = event_ids
+        .into_iter()
+        .zip(statuses)
+        .map(|(event_id, status)| IngestResponse { event_id, status })
+        .collect();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(IngestBatchResponse { acknowledgements }),
     ))
 }
 

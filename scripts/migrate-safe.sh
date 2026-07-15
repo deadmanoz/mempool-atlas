@@ -4,9 +4,15 @@ set -euo pipefail
 
 mode="${1:-}"
 database="${2:-}"
+component="${3:-server}"
 
 if [[ "$mode" != "migrate" && "$mode" != "backup-only" ]]; then
-    echo "usage: $0 <migrate|backup-only> <database-path>" >&2
+    echo "usage: $0 <migrate|backup-only> <database-path> [server|agent]" >&2
+    exit 2
+fi
+
+if [[ "$component" != "server" && "$component" != "agent" ]]; then
+    echo "error: component must be server or agent" >&2
     exit 2
 fi
 
@@ -20,14 +26,15 @@ if [[ -f "$database" ]]; then
     backup_dir="${ATLAS_BACKUP_DIR:-backups}"
     mkdir -p "$backup_dir"
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    backup="$backup_dir/atlas-$timestamp-$$.db"
+    backup="$backup_dir/atlas-$component-$timestamp-$$.db"
     sqlite3 "$database" ".timeout 5000" ".backup '$backup'"
     integrity="$(sqlite3 "$backup" 'PRAGMA integrity_check;')"
     if [[ "$integrity" != "ok" ]]; then
         echo "error: backup integrity check failed: $integrity" >&2
-        rm -f "$backup"
+        rm -f "$backup" "${backup}-wal" "${backup}-shm"
         exit 1
     fi
+    rm -f "${backup}-wal" "${backup}-shm"
     echo "backup: $backup"
 elif [[ "$mode" == "backup-only" ]]; then
     echo "error: database does not exist: $database" >&2
@@ -39,7 +46,12 @@ if [[ "$mode" == "backup-only" ]]; then
 fi
 
 mkdir -p "$(dirname "$database")"
-if cargo run -p atlas-server -- migrate --database "$database"; then
+if [[ "$component" == "agent" ]]; then
+    migration_command=(cargo run -p atlas-agent -- migrate --database "$database")
+else
+    migration_command=(cargo run -p atlas-server -- migrate --database "$database")
+fi
+if "${migration_command[@]}"; then
     exit 0
 fi
 

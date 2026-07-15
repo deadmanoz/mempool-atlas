@@ -15,6 +15,12 @@ pub const MEMPOOL_SUBJECT: &str = "mempool";
 pub const NETMSG_SUBJECT: &str = "netmsg";
 pub const P2P_EXTRACTOR_SUBJECT: &str = "p2p-extractor";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerObservation {
+    pub observed_at_ms: u64,
+    pub evidence: Evidence,
+}
+
 #[derive(Debug, Error)]
 pub enum PeerObserverError {
     #[error("invalid peer-observer protobuf: {0}")]
@@ -33,9 +39,9 @@ pub fn normalize_payload(
     local_sequence: u64,
     received_at_ms: u64,
 ) -> Result<Option<NormalizedEvent>, PeerObserverError> {
-    let event = wire::event::Event::decode(payload)?;
-    normalize_event(
-        &event,
+    let observation = observe_payload(payload)?;
+    normalize_observation(
+        observation,
         source_id,
         source_session_id,
         local_sequence,
@@ -51,6 +57,26 @@ pub fn normalize_event(
     local_sequence: u64,
     received_at_ms: u64,
 ) -> Result<Option<NormalizedEvent>, PeerObserverError> {
+    let observation = observe_event(event)?;
+    normalize_observation(
+        observation,
+        source_id,
+        source_session_id,
+        local_sequence,
+        received_at_ms,
+    )
+}
+
+/// Extracts a supported observation without assigning Atlas identity or sequence.
+pub fn observe_payload(payload: &[u8]) -> Result<Option<PeerObservation>, PeerObserverError> {
+    let event = wire::event::Event::decode(payload)?;
+    observe_event(&event)
+}
+
+/// Extracts a supported observation from a decoded peer-observer event.
+pub fn observe_event(
+    event: &wire::event::Event,
+) -> Result<Option<PeerObservation>, PeerObserverError> {
     let Some(PeerObserverEvent::EbpfExtractor(ebpf)) = event.peer_observer_event.as_ref() else {
         return Ok(None);
     };
@@ -64,17 +90,30 @@ pub fn normalize_event(
         EbpfEvent::Connection(_) | EbpfEvent::Validation(_) => None,
     };
 
-    evidence
-        .map(|evidence| {
+    Ok(evidence.map(|evidence| PeerObservation {
+        observed_at_ms: event.timestamp,
+        evidence,
+    }))
+}
+
+fn normalize_observation(
+    observation: Option<PeerObservation>,
+    source_id: &SourceId,
+    source_session_id: &SourceSessionId,
+    local_sequence: u64,
+    received_at_ms: u64,
+) -> Result<Option<NormalizedEvent>, PeerObserverError> {
+    observation
+        .map(|observation| {
             NormalizedEvent::new(
                 source_id.clone(),
                 source_session_id.clone(),
                 local_sequence,
-                event.timestamp,
+                observation.observed_at_ms,
                 received_at_ms,
-                evidence,
+                observation.evidence,
             )
-            .map_err(PeerObserverError::from)
+            .map_err(Into::into)
         })
         .transpose()
 }
