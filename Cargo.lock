@@ -129,6 +129,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-classifiers"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "atlas-model"
 version = "0.1.0"
 dependencies = [

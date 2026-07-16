@@ -30,7 +30,7 @@ Central storage is shared operationally, not semantically. Every event remains l
 
 One selected source is the primary Atlas mempool view. Atlas never constructs a combined cross-source mempool. Shared, source-only, and divergent sets will be computed by an optional comparison workspace that consumes two or more independent source snapshots. A fork deployment may make that workspace the landing view without changing Atlas storage semantics or the long-lived single-source product.
 
-The shared model never hard-codes Core, Knots, fork heights, or deployment hostnames. Fork-specific source profiles and optional classifiers are configuration layered on top of the generic observation model.
+The shared model never hard-codes Core, Knots, fork heights, or deployment hostnames. Fork-specific source profiles and required MVP classifier rule packs are configuration layered on top of the generic observation model.
 
 ## Operations
 

@@ -6,7 +6,7 @@ All notable changes to Mempool Atlas will be documented in this file.
 
 - Enrich source-local membership with exact verbose RPC virtual size, base fee, and node entry time while representing peer-observer admissions awaiting those facts explicitly.
 - Render large selected-source snapshots as a dependency-free Canvas fee-by-age swim view with bounded transaction inspection.
-- Remove the unused classifier trait crate until a concrete classifier requires an implementation boundary.
+- Preserve the in-process classifier contract as a required MVP extension point.
 - Make one selected source the primary Mempool Atlas read model and reserve cross-source comparison for an optional derived workspace.
 - Persist source-scoped NATS capture gaps, expose historical evidence integrity with each source snapshot, and warn without claiming that RPC recovered missing forensic evidence.
 - Replace stale preproduction central and agent databases through a coordinated backup-first schema reinitialization instead of evolving them in place.

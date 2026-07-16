@@ -316,7 +316,7 @@
         <span class="status partitioned">one source · primary view</span>
         <span class="status built">solid border · source path built</span>
         <span class="status next"
-          >dashed border · optional consumers planned</span
+          >dashed border · planned consumers</span
         >
       </div>
 
@@ -392,7 +392,7 @@ flowchart TB
   SWIM["Single-source Canvas browser<br/>base-fee-rate × age grid<br/>glyph area = vsize · primary"]
   WARNING["Capture-integrity warning<br/>possible or known historical gap"]
   COMPARE["Optional comparison workspace<br/>consume independent snapshots<br/>derive intersection and differences · planned"]
-  CLASSIFIERS["Classifier rule packs<br/>optional interpretation · planned"]
+  CLASSIFIERS["Classifier rule packs<br/>required MVP interpretation · planned"]
 
   READ -->|"selected source"| SWIM
   READ --> WARNING
@@ -459,9 +459,10 @@ flowchart TB
         <article class="legend-card extension">
           <h2>Extensible interpretation</h2>
           <p>
-            Comparison and classifiers remain optional consumers. Fork policy,
-            data carriage, and future heuristics can evolve without changing a
-            source snapshot or the underlying observation model.
+            Comparison remains an optional consumer; classifiers are required
+            for the MVP. Fork policy, data carriage, and future heuristics can
+            evolve without changing a source snapshot or the underlying
+            observation model.
           </p>
         </article>
       </div>

@@ -1,11 +1,12 @@
 # Mempool Atlas
 
-Mempool Atlas is a standalone Bitcoin mempool observation and visualization tool whose primary product view is one selected node's mempool. Its first deployment may place an optional Core and Knots comparison workspace in front for the 2026 fork-monitoring work, but comparison remains a derived consumer of independent source snapshots and the code and data model must remain implementation-neutral.
+Mempool Atlas is a standalone Bitcoin mempool observation and visualization tool whose primary product view is one selected node's mempool. Extensible transaction classification is required for the MVP. Its first deployment may place an optional Core and Knots comparison workspace in front for the 2026 fork-monitoring work, but comparison remains a derived consumer of independent source snapshots and the code and data model must remain implementation-neutral.
 
 ## Architecture
 
 - `apps/atlas-agent/` owns peer-observer protobuf decoding, live NATS capture, the inbound-by-default P2P volume policy, periodic RPC reconciliation, the effective local projection, strict FIFO single-event and bounded reconciliation-batch HTTP delivery, and the source-bound SQLite outbox.
 - `apps/atlas-server/` owns the implemented idempotent single and atomic batch ingest, source-partitioned central SQLite state, and source-scoped read API. Server-side stream delivery is not implemented.
+- `crates/atlas-classifiers/` defines the required MVP classifier contract and will contain in-process rule packs. It is not a dynamic plugin system.
 - `crates/atlas-model/` contains shared wire and domain types. It must not depend on agent or server internals.
 - `proto/peer-observer/` vendors the minimal canonical peer-observer protobuf import closure at a recorded upstream commit.
 - `web/` is a dependency-free TypeScript/Vite client for one selected source. Its primary overview uses Canvas 2D so large mempools do not create one DOM element per transaction.

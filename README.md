@@ -1,6 +1,6 @@
 # Mempool Atlas
 
-Mempool Atlas lets you explore one Bitcoin node's observed mempool. Its first deployment will also support an optional Core and Knots comparison workspace for the 2026 fork-monitoring work, but that comparison is a derived view over independent source snapshots rather than the core product model.
+Mempool Atlas lets you explore one Bitcoin node's observed mempool. Extensible transaction classification is part of the MVP. Its first deployment will also support an optional Core and Knots comparison workspace for the 2026 fork-monitoring work, but that comparison is a derived view over independent source snapshots rather than the core product model.
 
 The project treats five claims independently: a node received a transaction, admitted it, currently holds it, organically rejected it, or produced a classifier result. In particular, absence from one mempool is not labelled as rejection without supporting evidence.
 
@@ -31,7 +31,7 @@ Delivery is strict FIFO across capture sessions. Live and other non-reconciliati
 
 The central service co-locates data without merging node state. Events retain their source identity, current membership and capture integrity are maintained independently for each source, and the primary read returns exactly one source snapshot. Cross-source intersections or differences will be derived by an optional comparison workspace that consumes those snapshots. Atlas does not maintain a canonical combined mempool.
 
-Current status: the live node-local capture, durable outbox, fact-bearing RPC reconciliation, source-scoped SQLite/API service, capture-gap reporting, and scalable single-source Canvas browser are implemented and component-tested. Comparison views and transaction classifiers remain later product layers.
+Current status: the live node-local capture, durable outbox, fact-bearing RPC reconciliation, source-scoped SQLite/API service, capture-gap reporting, scalable single-source Canvas browser, and classifier contract are implemented and component-tested. Concrete classifier rule packs remain MVP work; comparison remains a later optional product layer.
 
 See the [system architecture visualisation](docs/mempool-atlas-system.html) for the implemented live data path, the primary single-source experience, source-partitioned storage, planned comparison layer, and the distinction between peer-observer evidence and RPC-authoritative membership.
 
