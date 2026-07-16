@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use atlas_agent::delivery::{DeliveryOutcome, deliver_next};
 use atlas_agent::outbox::{AgentIdentity, Outbox};
 use atlas_model::{
-    Evidence, IngestBatchRequest, IngestBatchResponse, IngestResponse, IngestStatus, SourceId,
-    SourceSessionId,
+    Evidence, IngestBatchRequest, IngestBatchResponse, IngestResponse, IngestStatus,
+    MempoolEntryFacts, MempoolEntryFactsStatus, SourceId, SourceSessionId,
 };
 use atlas_server::{Store, router};
 use axum::extract::State;
@@ -30,8 +30,18 @@ fn identity() -> AgentIdentity {
     )
 }
 
-fn txids(count: u64) -> BTreeSet<String> {
-    (1..=count).map(|value| format!("{value:064x}")).collect()
+fn facts() -> MempoolEntryFacts {
+    MempoolEntryFacts {
+        vsize: 141,
+        fee_sats: 1_200,
+        entered_at_ms: 1_721_234_000_000,
+    }
+}
+
+fn snapshot(count: u64) -> BTreeMap<String, MempoolEntryFacts> {
+    (1..=count)
+        .map(|value| (format!("{value:064x}"), facts()))
+        .collect()
 }
 
 fn open_outbox(path: &Path) -> Outbox {
@@ -58,7 +68,7 @@ async fn reconciliation_batches_drain_before_later_live_evidence() {
     Store::migrate(&store_path).expect("migrate store");
     let outbox = open_outbox(&outbox_path);
     let store = Store::open(&store_path).expect("store");
-    let baseline = txids(1_025);
+    let baseline = snapshot(1_025);
 
     assert_eq!(
         outbox
@@ -107,6 +117,9 @@ async fn reconciliation_batches_drain_before_later_live_evidence() {
         .expect("central mempool")
         .expect("known source");
     assert_eq!(snapshot.memberships.len(), 1_024);
+    assert!(snapshot.memberships.iter().all(|membership| {
+        membership.facts == MempoolEntryFactsStatus::Available { facts: facts() }
+    }));
     server.abort();
 }
 
@@ -159,7 +172,7 @@ async fn committed_batch_with_lost_response_retries_after_agent_reopen() {
     let store = Store::open(&store_path).expect("store");
     assert_eq!(
         outbox
-            .reconcile_rpc_snapshot(&identity(), txids(3), 100)
+            .reconcile_rpc_snapshot(&identity(), snapshot(3), 100)
             .expect("baseline"),
         3
     );

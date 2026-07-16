@@ -1,12 +1,12 @@
 //! Long-running node-local capture, reconciliation, and delivery loops.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use async_nats::{Client as NatsClient, ConnectOptions, Event as NatsEvent, Message, Subscriber};
-use atlas_model::{CaptureGapCertainty, Evidence};
+use atlas_model::{CaptureGapCertainty, Evidence, MempoolEntryFacts};
 use futures_util::StreamExt;
 use reqwest::Client as HttpClient;
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
@@ -640,7 +640,7 @@ async fn poll_rpc(
             }
             _ = ticker.tick() => {
                 let _projection_guard = projection_fence.lock().await;
-                match rpc.get_raw_mempool().await {
+                match rpc.get_mempool_snapshot().await {
                     Ok(snapshot) => {
                         let correction_count = reconcile(
                             outbox.clone(),
@@ -666,7 +666,7 @@ async fn poll_rpc(
 async fn reconcile(
     outbox: Outbox,
     identity: AgentIdentity,
-    snapshot: BTreeSet<String>,
+    snapshot: BTreeMap<String, MempoolEntryFacts>,
     completed_at_ms: u64,
 ) -> anyhow::Result<usize> {
     let correction_count = tokio::task::spawn_blocking(move || {

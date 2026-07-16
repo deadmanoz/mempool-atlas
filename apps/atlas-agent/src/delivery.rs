@@ -228,12 +228,12 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use atlas_model::{Evidence, IngestBatchRequest, SourceId, SourceSessionId};
+    use atlas_model::{Evidence, IngestBatchRequest, MempoolEntryFacts, SourceId, SourceSessionId};
     use axum::http::StatusCode as AxumStatusCode;
     use axum::response::IntoResponse;
     use axum::routing::post;
@@ -281,8 +281,17 @@ mod tests {
         );
         let outbox = Outbox::open(&path, source_id).expect("open");
         let snapshot = (0..count)
-            .map(|value| format!("{value:064x}"))
-            .collect::<BTreeSet<_>>();
+            .map(|value| {
+                (
+                    format!("{value:064x}"),
+                    MempoolEntryFacts {
+                        vsize: 141,
+                        fee_sats: 1_200,
+                        entered_at_ms: 1_721_234_000_000,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         assert_eq!(
             outbox
                 .reconcile_rpc_snapshot(&identity, snapshot, 100)

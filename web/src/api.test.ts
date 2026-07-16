@@ -13,6 +13,12 @@ const snapshot = (sourceId = "core") => ({
       txid: "abc",
       updated_at_ms: 1_700_000_000_000,
       evidence_event_id: "event-1",
+      facts: {
+        status: "available",
+        vsize: 141,
+        fee_sats: 423,
+        entered_at_ms: 1_699_999_000_000,
+      },
     },
   ],
 });
@@ -28,6 +34,30 @@ describe("parseMempoolResponse", () => {
     expect(response.source_id).toBe("core");
     expect(response.health.capture.status).toBe("no_reported_gaps");
     expect(response.memberships[0]?.txid).toBe("abc");
+    expect(response.memberships[0]?.facts).toEqual({
+      status: "available",
+      vsize: 141,
+      fee_sats: 423,
+      entered_at_ms: 1_699_999_000_000,
+    });
+  });
+
+  it("parses a membership awaiting RPC facts", () => {
+    const response = parseMempoolResponse({
+      ...snapshot(),
+      memberships: [
+        {
+          txid: "def",
+          updated_at_ms: 1_700_000_000_000,
+          evidence_event_id: "event-2",
+          facts: { status: "awaiting_rpc" },
+        },
+      ],
+    });
+
+    expect(response.memberships[0]?.facts).toEqual({
+      status: "awaiting_rpc",
+    });
   });
 
   it("parses a known capture gap", () => {
@@ -62,6 +92,43 @@ describe("parseMempoolResponse", () => {
         memberships: [{ txid: "abc" }],
       }),
     ).toThrow("Invalid membership at index 0");
+  });
+
+  it.each([
+    undefined,
+    { status: "unknown" },
+    { status: "awaiting_rpc", vsize: 141 },
+    {
+      status: "available",
+      vsize: 0,
+      fee_sats: 423,
+      entered_at_ms: 1_699_999_000_000,
+    },
+    {
+      status: "available",
+      vsize: 141,
+      fee_sats: -1,
+      entered_at_ms: 1_699_999_000_000,
+    },
+    {
+      status: "available",
+      vsize: 141,
+      fee_sats: 423,
+    },
+  ])("rejects malformed membership facts %#", (facts) => {
+    expect(() =>
+      parseMempoolResponse({
+        ...snapshot(),
+        memberships: [
+          {
+            txid: "abc",
+            updated_at_ms: 1_700_000_000_000,
+            evidence_event_id: "event-1",
+            facts,
+          },
+        ],
+      }),
+    ).toThrow("Invalid membership facts at index 0");
   });
 
   it("rejects a malformed capture status", () => {

@@ -22,5 +22,13 @@ CREATE TABLE outbox_event (
 ) STRICT;
 
 CREATE TABLE projected_membership (
-    txid TEXT PRIMARY KEY NOT NULL
+    txid TEXT PRIMARY KEY NOT NULL,
+    vsize INTEGER CHECK (vsize > 0),
+    fee_sats INTEGER CHECK (fee_sats >= 0),
+    entered_at_ms INTEGER CHECK (entered_at_ms >= 0),
+    CHECK (
+        (vsize IS NULL AND fee_sats IS NULL AND entered_at_ms IS NULL)
+        OR
+        (vsize IS NOT NULL AND fee_sats IS NOT NULL AND entered_at_ms IS NOT NULL)
+    )
 ) STRICT;

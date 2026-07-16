@@ -1,20 +1,20 @@
 //! Durable node-local delivery queue and effective mempool projection.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use atlas_model::{
-    Evidence, MAX_INGEST_BATCH_BODY_BYTES, MAX_INGEST_BATCH_EVENTS, NormalizedEvent, SourceId,
-    SourceSessionId,
+    Evidence, MAX_INGEST_BATCH_BODY_BYTES, MAX_INGEST_BATCH_EVENTS, MembershipMutation,
+    MempoolEntryFacts, NormalizedEvent, ReconciledMembership, SourceId, SourceSessionId,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use thiserror::Error;
 
-const LATEST_SCHEMA_VERSION: i64 = 2;
+const LATEST_SCHEMA_VERSION: i64 = 3;
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,6 +85,8 @@ pub enum OutboxError {
     NegativeStoredInteger { field: &'static str },
     #[error("stored event source {stored} does not match bound source {bound}")]
     StoredSource { bound: String, stored: String },
+    #[error("projected membership {txid} contains incomplete mempool entry facts")]
+    IncompleteProjectedFacts { txid: String },
 }
 
 impl Outbox {
@@ -149,7 +151,7 @@ impl Outbox {
         }
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(MIGRATION_1)?;
-        transaction.pragma_update(None, "user_version", 2)?;
+        transaction.pragma_update(None, "user_version", 3)?;
         transaction.commit()?;
         Ok(())
     }
@@ -193,13 +195,15 @@ impl Outbox {
     pub fn reconcile_rpc_snapshot(
         &self,
         identity: &AgentIdentity,
-        snapshot: BTreeSet<String>,
+        snapshot: BTreeMap<String, MempoolEntryFacts>,
         completed_at_ms: u64,
     ) -> Result<usize, OutboxError> {
-        for txid in &snapshot {
+        for (txid, facts) in &snapshot {
             Evidence::MempoolReconciled {
                 txid: txid.clone(),
-                present: true,
+                membership: ReconciledMembership::Present {
+                    facts: facts.clone(),
+                },
             }
             .validate()?;
         }
@@ -210,26 +214,46 @@ impl Outbox {
         let projected = projected_membership_in(&transaction)?;
         let mut correction_count = 0_usize;
 
-        for (txids, present) in [
-            (projected.difference(&snapshot), false),
-            (snapshot.difference(&projected), true),
-        ] {
-            for txid in txids {
-                let pending = enqueue_in_transaction(
-                    &transaction,
-                    identity,
-                    completed_at_ms,
-                    completed_at_ms,
-                    Evidence::MempoolReconciled {
-                        txid: txid.clone(),
-                        present,
-                    },
-                    None,
-                    None,
-                )?;
-                apply_projection(&transaction, &pending.event)?;
-                correction_count += 1;
+        for txid in projected
+            .keys()
+            .filter(|txid| !snapshot.contains_key(*txid))
+        {
+            let pending = enqueue_in_transaction(
+                &transaction,
+                identity,
+                completed_at_ms,
+                completed_at_ms,
+                Evidence::MempoolReconciled {
+                    txid: txid.clone(),
+                    membership: ReconciledMembership::Absent,
+                },
+                None,
+                None,
+            )?;
+            apply_projection(&transaction, &pending.event)?;
+            correction_count += 1;
+        }
+
+        for (txid, facts) in &snapshot {
+            if projected.get(txid).and_then(Option::as_ref) == Some(facts) {
+                continue;
             }
+            let pending = enqueue_in_transaction(
+                &transaction,
+                identity,
+                completed_at_ms,
+                completed_at_ms,
+                Evidence::MempoolReconciled {
+                    txid: txid.clone(),
+                    membership: ReconciledMembership::Present {
+                        facts: facts.clone(),
+                    },
+                },
+                None,
+                None,
+            )?;
+            apply_projection(&transaction, &pending.event)?;
+            correction_count += 1;
         }
 
         transaction.execute(
@@ -397,7 +421,9 @@ impl Outbox {
         from_sqlite_integer(count, "pending_count")
     }
 
-    pub fn projected_membership(&self) -> Result<BTreeSet<String>, OutboxError> {
+    pub fn projected_membership(
+        &self,
+    ) -> Result<BTreeMap<String, Option<MempoolEntryFacts>>, OutboxError> {
         let connection = self.connect()?;
         projected_membership_in(&connection)
     }
@@ -518,29 +544,71 @@ fn apply_projection(
     event: &NormalizedEvent,
 ) -> Result<(), OutboxError> {
     for mutation in event.membership_mutations() {
-        if mutation.present {
-            transaction.execute(
-                "INSERT INTO projected_membership (txid) VALUES (?1)
-                 ON CONFLICT (txid) DO NOTHING",
-                [&mutation.txid],
-            )?;
-        } else {
-            transaction.execute(
-                "DELETE FROM projected_membership WHERE txid = ?1",
-                [&mutation.txid],
-            )?;
+        match mutation {
+            MembershipMutation::Absent { txid } => {
+                transaction.execute("DELETE FROM projected_membership WHERE txid = ?1", [&txid])?;
+            }
+            MembershipMutation::Present { txid, facts: None } => {
+                transaction.execute(
+                    "INSERT INTO projected_membership (txid) VALUES (?1)
+                     ON CONFLICT (txid) DO NOTHING",
+                    [&txid],
+                )?;
+            }
+            MembershipMutation::Present {
+                txid,
+                facts: Some(facts),
+            } => {
+                transaction.execute(
+                    "INSERT INTO projected_membership (
+                        txid, vsize, fee_sats, entered_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (txid) DO UPDATE SET
+                        vsize = excluded.vsize,
+                        fee_sats = excluded.fee_sats,
+                        entered_at_ms = excluded.entered_at_ms",
+                    params![
+                        txid,
+                        to_sqlite_integer(facts.vsize, "vsize")?,
+                        to_sqlite_integer(facts.fee_sats, "fee_sats")?,
+                        to_sqlite_integer(facts.entered_at_ms, "entered_at_ms")?,
+                    ],
+                )?;
+            }
         }
     }
     Ok(())
 }
 
-fn projected_membership_in(connection: &Connection) -> Result<BTreeSet<String>, OutboxError> {
-    let mut statement =
-        connection.prepare("SELECT txid FROM projected_membership ORDER BY txid")?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-    let mut membership = BTreeSet::new();
+fn projected_membership_in(
+    connection: &Connection,
+) -> Result<BTreeMap<String, Option<MempoolEntryFacts>>, OutboxError> {
+    let mut statement = connection.prepare(
+        "SELECT txid, vsize, fee_sats, entered_at_ms
+         FROM projected_membership
+         ORDER BY txid",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+        ))
+    })?;
+    let mut membership = BTreeMap::new();
     for row in rows {
-        membership.insert(row?);
+        let (txid, vsize, fee_sats, entered_at_ms) = row?;
+        let facts = match (vsize, fee_sats, entered_at_ms) {
+            (None, None, None) => None,
+            (Some(vsize), Some(fee_sats), Some(entered_at_ms)) => Some(MempoolEntryFacts {
+                vsize: from_sqlite_integer(vsize, "vsize")?,
+                fee_sats: from_sqlite_integer(fee_sats, "fee_sats")?,
+                entered_at_ms: from_sqlite_integer(entered_at_ms, "entered_at_ms")?,
+            }),
+            _ => return Err(OutboxError::IncompleteProjectedFacts { txid }),
+        };
+        membership.insert(txid, facts);
     }
     Ok(membership)
 }
@@ -641,6 +709,21 @@ mod tests {
         }
     }
 
+    fn facts() -> MempoolEntryFacts {
+        MempoolEntryFacts {
+            vsize: 141,
+            fee_sats: 1_200,
+            entered_at_ms: 1_721_234_000_000,
+        }
+    }
+
+    fn snapshot(txids: &[&str]) -> BTreeMap<String, MempoolEntryFacts> {
+        txids
+            .iter()
+            .map(|txid| ((*txid).to_owned(), facts()))
+            .collect()
+    }
+
     fn reconciliation_batch(delivery: PendingDelivery) -> Vec<PendingEvent> {
         match delivery {
             PendingDelivery::ReconciliationBatch(pending) => pending,
@@ -683,12 +766,106 @@ mod tests {
         assert_eq!(reopened.next_pending().expect("next"), Some(pending));
         assert_eq!(
             reopened.projected_membership().expect("projection"),
-            BTreeSet::from([TXID_A.to_owned()])
+            BTreeMap::from([(TXID_A.to_owned(), None)])
         );
         assert!(matches!(
             Outbox::open(&path, source("knots-a")),
             Err(OutboxError::SourceBinding { .. })
         ));
+    }
+
+    #[test]
+    fn rpc_enriches_a_pending_live_membership() {
+        let (_temporary, _path, outbox) = test_outbox();
+        let identity = identity("session-a");
+        let live = outbox
+            .enqueue_observation(&identity, 100, 101, added(TXID_A), None, None)
+            .expect("live addition");
+        assert_eq!(
+            outbox.projected_membership().expect("pending projection"),
+            BTreeMap::from([(TXID_A.to_owned(), None)])
+        );
+
+        assert_eq!(
+            outbox
+                .reconcile_rpc_snapshot(&identity, snapshot(&[TXID_A]), 110)
+                .expect("enrichment"),
+            1
+        );
+        assert_eq!(
+            outbox.projected_membership().expect("enriched projection"),
+            BTreeMap::from([(TXID_A.to_owned(), Some(facts()))])
+        );
+        outbox
+            .mark_delivered(live.outbox_id)
+            .expect("deliver live addition");
+        let enrichment = reconciliation_batch(
+            outbox
+                .next_delivery()
+                .expect("next")
+                .expect("pending enrichment"),
+        );
+        assert_eq!(
+            enrichment[0].event.evidence,
+            Evidence::MempoolReconciled {
+                txid: TXID_A.to_owned(),
+                membership: ReconciledMembership::Present { facts: facts() },
+            }
+        );
+    }
+
+    #[test]
+    fn rpc_emits_changed_facts_for_an_existing_membership() {
+        let (_temporary, _path, outbox) = test_outbox();
+        let identity = identity("session-a");
+        assert_eq!(
+            outbox
+                .reconcile_rpc_snapshot(&identity, snapshot(&[TXID_A]), 100)
+                .expect("initial snapshot"),
+            1
+        );
+        let initial = reconciliation_batch(
+            outbox
+                .next_delivery()
+                .expect("next")
+                .expect("initial event"),
+        );
+        outbox
+            .mark_delivered_prefix(&[initial[0].outbox_id])
+            .expect("deliver initial event");
+
+        let mut changed = facts();
+        changed.fee_sats += 1;
+        changed.entered_at_ms += 1_000;
+        assert_eq!(
+            outbox
+                .reconcile_rpc_snapshot(
+                    &identity,
+                    BTreeMap::from([(TXID_A.to_owned(), changed.clone())]),
+                    200,
+                )
+                .expect("changed snapshot"),
+            1
+        );
+        let correction = reconciliation_batch(
+            outbox
+                .next_delivery()
+                .expect("next")
+                .expect("changed event"),
+        );
+        assert_eq!(
+            correction[0].event.evidence,
+            Evidence::MempoolReconciled {
+                txid: TXID_A.to_owned(),
+                membership: ReconciledMembership::Present {
+                    facts: changed.clone(),
+                },
+            }
+        );
+        assert_eq!(
+            outbox.projected_membership().expect("changed projection"),
+            BTreeMap::from([(TXID_A.to_owned(), Some(changed))])
+        );
     }
 
     #[test]
@@ -787,7 +964,7 @@ mod tests {
         );
         assert_eq!(
             outbox.projected_membership().expect("projection"),
-            BTreeSet::from([TXID_A.to_owned(), TXID_B.to_owned()])
+            BTreeMap::from([(TXID_A.to_owned(), None), (TXID_B.to_owned(), None)])
         );
     }
 
@@ -835,8 +1012,8 @@ mod tests {
     fn reconciliation_batch_honours_count_and_exact_body_limits() {
         let (_temporary, _path, outbox) = test_outbox();
         let snapshot = (0_u64..513)
-            .map(|value| format!("{value:064x}"))
-            .collect::<BTreeSet<_>>();
+            .map(|value| (format!("{value:064x}"), facts()))
+            .collect::<BTreeMap<_, _>>();
         assert_eq!(
             outbox
                 .reconcile_rpc_snapshot(&identity("session-a"), snapshot, 500)
@@ -880,11 +1057,7 @@ mod tests {
         let identity = identity("session-a");
         assert_eq!(
             outbox
-                .reconcile_rpc_snapshot(
-                    &identity,
-                    BTreeSet::from([TXID_A.to_owned(), TXID_B.to_owned()]),
-                    500,
-                )
+                .reconcile_rpc_snapshot(&identity, snapshot(&[TXID_A, TXID_B]), 500,)
                 .expect("baseline"),
             2
         );
@@ -941,7 +1114,7 @@ mod tests {
             outbox
                 .reconcile_rpc_snapshot(
                     &identity("session-a"),
-                    BTreeSet::from([TXID_A.to_owned(), TXID_B.to_owned(), TXID_C.to_owned(),]),
+                    snapshot(&[TXID_A, TXID_B, TXID_C]),
                     500,
                 )
                 .expect("baseline"),
@@ -994,11 +1167,7 @@ mod tests {
     fn rpc_reconciliation_updates_projection_and_baseline_durably() {
         let (_temporary, path, outbox) = test_outbox();
         let baseline_count = outbox
-            .reconcile_rpc_snapshot(
-                &identity("session-a"),
-                BTreeSet::from([TXID_B.to_owned(), TXID_A.to_owned()]),
-                500,
-            )
+            .reconcile_rpc_snapshot(&identity("session-a"), snapshot(&[TXID_B, TXID_A]), 500)
             .expect("baseline");
         assert_eq!(baseline_count, 2);
         let baseline = reconciliation_batch(
@@ -1017,11 +1186,11 @@ mod tests {
             vec![
                 &Evidence::MempoolReconciled {
                     txid: TXID_A.to_owned(),
-                    present: true,
+                    membership: ReconciledMembership::Present { facts: facts() },
                 },
                 &Evidence::MempoolReconciled {
                     txid: TXID_B.to_owned(),
-                    present: true,
+                    membership: ReconciledMembership::Present { facts: facts() },
                 },
             ]
         );
@@ -1030,7 +1199,10 @@ mod tests {
         let reopened = Outbox::open(&path, source("core-a")).expect("reopen");
         assert_eq!(
             reopened.projected_membership().expect("projection"),
-            BTreeSet::from([TXID_A.to_owned(), TXID_B.to_owned()])
+            BTreeMap::from([
+                (TXID_A.to_owned(), Some(facts())),
+                (TXID_B.to_owned(), Some(facts())),
+            ])
         );
         assert_eq!(
             reopened.last_rpc_success_at_ms().expect("rpc time"),
@@ -1045,11 +1217,7 @@ mod tests {
             .expect("deliver baseline");
 
         let correction_count = reopened
-            .reconcile_rpc_snapshot(
-                &identity("session-a"),
-                BTreeSet::from([TXID_B.to_owned(), TXID_C.to_owned()]),
-                600,
-            )
+            .reconcile_rpc_snapshot(&identity("session-a"), snapshot(&[TXID_B, TXID_C]), 600)
             .expect("second reconciliation");
         assert_eq!(correction_count, 2);
         let corrections = reconciliation_batch(
@@ -1064,19 +1232,22 @@ mod tests {
             corrections[0].event.evidence,
             Evidence::MempoolReconciled {
                 txid: TXID_A.to_owned(),
-                present: false,
+                membership: ReconciledMembership::Absent,
             }
         );
         assert_eq!(
             corrections[1].event.evidence,
             Evidence::MempoolReconciled {
                 txid: TXID_C.to_owned(),
-                present: true,
+                membership: ReconciledMembership::Present { facts: facts() },
             }
         );
         assert_eq!(
             reopened.projected_membership().expect("projection"),
-            BTreeSet::from([TXID_B.to_owned(), TXID_C.to_owned()])
+            BTreeMap::from([
+                (TXID_B.to_owned(), Some(facts())),
+                (TXID_C.to_owned(), Some(facts())),
+            ])
         );
         assert_eq!(
             reopened.last_rpc_success_at_ms().expect("rpc time"),
@@ -1085,11 +1256,7 @@ mod tests {
 
         assert_eq!(
             reopened
-                .reconcile_rpc_snapshot(
-                    &identity("session-a"),
-                    BTreeSet::from([TXID_B.to_owned(), TXID_C.to_owned()]),
-                    700,
-                )
+                .reconcile_rpc_snapshot(&identity("session-a"), snapshot(&[TXID_B, TXID_C]), 700,)
                 .expect("unchanged reconciliation"),
             0
         );
@@ -1105,7 +1272,7 @@ mod tests {
         let identity = identity("session-a");
         assert_eq!(
             outbox
-                .reconcile_rpc_snapshot(&identity, BTreeSet::from([TXID_A.to_owned()]), 100)
+                .reconcile_rpc_snapshot(&identity, snapshot(&[TXID_A]), 100)
                 .expect("initial snapshot"),
             1
         );
@@ -1142,7 +1309,7 @@ mod tests {
         );
 
         let correction_count = outbox
-            .reconcile_rpc_snapshot(&identity, BTreeSet::from([TXID_A.to_owned()]), 120)
+            .reconcile_rpc_snapshot(&identity, snapshot(&[TXID_A]), 120)
             .expect("corrective snapshot");
         assert_eq!(correction_count, 1);
         let corrections = reconciliation_batch(
@@ -1155,12 +1322,12 @@ mod tests {
             corrections[0].event.evidence,
             Evidence::MempoolReconciled {
                 txid: TXID_A.to_owned(),
-                present: true,
+                membership: ReconciledMembership::Present { facts: facts() },
             }
         );
         assert_eq!(
             outbox.projected_membership().expect("projection"),
-            BTreeSet::from([TXID_A.to_owned()])
+            BTreeMap::from([(TXID_A.to_owned(), Some(facts()))])
         );
     }
 
@@ -1173,33 +1340,33 @@ mod tests {
             Outbox::open(&path, source("core-a")),
             Err(OutboxError::SchemaVersion {
                 found: 0,
-                expected: 2
+                expected: 3
             })
         ));
 
         let connection = Connection::open(&path).expect("open database");
         connection
-            .pragma_update(None, "user_version", 1)
+            .pragma_update(None, "user_version", 2)
             .expect("set stale version");
         drop(connection);
         assert!(matches!(
             Outbox::migrate(&path),
             Err(OutboxError::SchemaVersion {
-                found: 1,
-                expected: 2
+                found: 2,
+                expected: 3
             })
         ));
 
         let connection = Connection::open(&path).expect("open database");
         connection
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 4)
             .expect("set future version");
         drop(connection);
         assert!(matches!(
             Outbox::migrate(&path),
             Err(OutboxError::SchemaVersion {
-                found: 3,
-                expected: 2
+                found: 4,
+                expected: 3
             })
         ));
     }

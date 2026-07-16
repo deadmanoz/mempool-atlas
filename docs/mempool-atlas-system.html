@@ -302,10 +302,11 @@
       <h1>Swim in one mempool. Compare only when the question requires it.</h1>
       <p class="lede">
         One selected Bitcoin node and its observed mempool form the primary
-        Mempool Atlas experience. peer-observer records the forensic story, RPC
-        reconciles what is actually present, and the central service keeps each
-        source projection independent. A fork comparison can consume multiple
-        source snapshots without turning them into one mixed mempool.
+        Mempool Atlas experience. peer-observer records the forensic story,
+        verbose RPC reconciles what is present and supplies display facts, and
+        the central service keeps each source projection independent. A fork
+        comparison can consume multiple source snapshots without turning them
+        into one mixed mempool.
       </p>
 
       <div
@@ -352,29 +353,29 @@ flowchart TB
   OPTIONAL["OPTIONAL SECOND SOURCE<br/>fork or diagnostic profile"]
   PRIMARYOBS["peer-observer + NATS<br/>mempool evidence · inbound P2P default"]
   OPTIONALOBS["peer-observer + NATS<br/>same generic evidence contract"]
-  PRIMARYAGENT["atlas-agent<br/>capture + RPC reconciliation<br/>one source identity"]
-  OPTIONALAGENT["atlas-agent<br/>capture + RPC reconciliation<br/>one source identity"]
-  PRIMARYOUT[("Source-local SQLite outbox<br/>strict FIFO<br/>single live · bounded RPC prefix")]
+  PRIMARYAGENT["atlas-agent<br/>capture + verbose RPC reconciliation<br/>one source identity"]
+  OPTIONALAGENT["atlas-agent<br/>capture + verbose RPC reconciliation<br/>one source identity"]
+  PRIMARYOUT[("Source-local SQLite outbox<br/>pending or fact-bearing projection<br/>single live · bounded RPC prefix")]
   OPTIONALOUT[("Source-local SQLite outbox<br/>independent delivery")]
 
   PRIMARY -->|"observed activity"| PRIMARYOBS
   PRIMARYOBS -->|"events + capture-gap notices"| PRIMARYAGENT
-  PRIMARY -->|"getrawmempool · fenced reconciliation"| PRIMARYAGENT
+  PRIMARY -->|"getrawmempool true<br/>vsize · base fee · entry time<br/>fenced reconciliation"| PRIMARYAGENT
   PRIMARYAGENT -->|"atomic projection + enqueue"| PRIMARYOUT
 
   OPTIONAL -->|"observed activity"| OPTIONALOBS
   OPTIONALOBS -->|"events + capture-gap notices"| OPTIONALAGENT
-  OPTIONAL -->|"getrawmempool · fenced reconciliation"| OPTIONALAGENT
+  OPTIONAL -->|"same verbose fact contract<br/>fenced reconciliation"| OPTIONALAGENT
   OPTIONALAGENT -->|"atomic projection + enqueue"| OPTIONALOUT
 
   subgraph CENTRAL["Central Atlas service · shared adapter, independent source state"]
     direction TB
     INGEST["POST /api/v1/events<br/>POST /api/v1/events/batch<br/>idempotent · batch atomic"]
     EVENTS[("SQLite event ledger<br/>source-labelled observations")]
-    MEMBERS[("SQLite current_membership<br/>one projection per source")]
+    MEMBERS[("SQLite current_membership<br/>current rows only<br/>awaiting RPC or facts available")]
     CAPTURE[("SQLite source_capture_state<br/>historical evidence integrity")]
     VARIANTS[("SQLite transaction_variant<br/>shared intrinsic transaction facts")]
-    READ["GET /api/v1/sources/{source_id}/mempool<br/>exactly one source snapshot"]
+    READ["GET /api/v1/sources/{source_id}/mempool<br/>one source · explicit fact status"]
 
     INGEST -->|"append once · ordered transaction"| EVENTS
     INGEST -->|"apply membership mutation"| MEMBERS
@@ -388,7 +389,7 @@ flowchart TB
   PRIMARYOUT -->|"live: one event<br/>RPC: ≤512 events · ≤4 MiB<br/>complete ordered 202 ack"| INGEST
   OPTIONALOUT -->|"same source-scoped contract"| INGEST
 
-  SWIM["Single-source browser<br/>swimming in the mempool · primary"]
+  SWIM["Single-source Canvas browser<br/>base-fee-rate × age grid<br/>glyph area = vsize · primary"]
   WARNING["Capture-integrity warning<br/>possible or known historical gap"]
   COMPARE["Optional comparison workspace<br/>consume independent snapshots<br/>derive intersection and differences · planned"]
   CLASSIFIERS["Classifier rule packs<br/>optional interpretation · planned"]
@@ -435,9 +436,11 @@ flowchart TB
         <article class="legend-card state">
           <h2>State plane</h2>
           <p>
-            RPC is authoritative for one node's current mempool at poll time. A
-            projection fence orders snapshot formation against peer-observer
-            capture, so reconciliation repairs drift without overwriting newer
+            RPC is authoritative for one node's current mempool at poll time.
+            Its common Core and Knots subset supplies virtual size, exact base
+            fee in satoshis, and node entry time. A projection fence orders
+            snapshot formation against peer-observer capture, so reconciliation
+            repairs drift and enriches pending entries without overwriting newer
             evidence or storing each complete poll as an event.
           </p>
         </article>
@@ -449,8 +452,8 @@ flowchart TB
             path, while contiguous RPC corrections use an atomic batch of at
             most 512 events and 4 MiB. A complete, same-order 202
             acknowledgement removes the whole prefix; otherwise none of it is
-            removed. Membership and capture integrity remain partitioned by
-            source.
+            removed. Membership facts and capture integrity remain partitioned
+            by source.
           </p>
         </article>
         <article class="legend-card extension">
@@ -470,6 +473,8 @@ flowchart TB
         <span>central storage is not merged state</span>
         <span>no reported gap is not proof of completeness</span>
         <span>RPC repair is not forensic recovery</span>
+        <span>node entry time is not Atlas observation time</span>
+        <span>individual base fee rate is not package mining priority</span>
         <span>pruning does not weaken mempool visibility</span>
         <span>at-least-once delivery is not exactly-once transport</span>
         <span>batching is not event coalescing</span>

@@ -3,13 +3,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atlas_model::{
-    CaptureGapCertainty, CaptureStatus, Evidence, IngestBatchRequest, IngestStatus, MempoolEntry,
-    MempoolSnapshot, NormalizedEvent, SourceHealth, SourceId,
+    CaptureGapCertainty, CaptureStatus, Evidence, IngestBatchRequest, IngestStatus,
+    MembershipMutation, MempoolEntry, MempoolEntryFacts, MempoolEntryFactsStatus, MempoolSnapshot,
+    NormalizedEvent, SourceHealth, SourceId,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use thiserror::Error;
 
-const LATEST_SCHEMA_VERSION: i64 = 2;
+const LATEST_SCHEMA_VERSION: i64 = 3;
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 
 #[derive(Clone, Debug)]
@@ -72,7 +73,7 @@ impl Store {
         }
         let transaction = connection.transaction()?;
         transaction.execute_batch(MIGRATION_1)?;
-        transaction.pragma_update(None, "user_version", 2)?;
+        transaction.pragma_update(None, "user_version", 3)?;
         transaction.commit()?;
         Ok(())
     }
@@ -134,9 +135,10 @@ impl Store {
 
         let memberships = {
             let mut statement = transaction.prepare(
-                "SELECT txid, updated_at_ms, evidence_event_id
+                "SELECT txid, updated_at_ms, evidence_event_id,
+                        vsize, fee_sats, entered_at_ms
                  FROM current_membership
-                 WHERE source_id = ?1 AND present = 1
+                 WHERE source_id = ?1
                  ORDER BY txid",
             )?;
             let rows = statement.query_map([source_id.as_str()], mempool_entry_from_row)?;
@@ -261,7 +263,7 @@ fn apply_evidence(
     event: &NormalizedEvent,
 ) -> Result<(), StoreError> {
     for mutation in event.membership_mutations() {
-        upsert_membership(transaction, event, &mutation.txid, mutation.present)?;
+        apply_membership_mutation(transaction, event, mutation)?;
     }
 
     if let Evidence::P2pTransaction {
@@ -337,36 +339,94 @@ fn apply_evidence(
     Ok(())
 }
 
-fn upsert_membership(
+fn apply_membership_mutation(
     transaction: &Transaction<'_>,
     event: &NormalizedEvent,
-    txid: &str,
-    present: bool,
+    mutation: MembershipMutation,
 ) -> Result<(), StoreError> {
-    transaction.execute(
-        "INSERT INTO current_membership (
-            source_id, txid, present, updated_at_ms, evidence_event_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT (source_id, txid) DO UPDATE SET
-             present = excluded.present,
-             updated_at_ms = excluded.updated_at_ms,
-             evidence_event_id = excluded.evidence_event_id",
-        params![
-            event.source_id.as_str(),
+    match mutation {
+        MembershipMutation::Absent { txid } => {
+            transaction.execute(
+                "DELETE FROM current_membership
+                 WHERE source_id = ?1 AND txid = ?2",
+                params![event.source_id.as_str(), txid],
+            )?;
+        }
+        MembershipMutation::Present { txid, facts: None } => {
+            transaction.execute(
+                "INSERT INTO current_membership (
+                    source_id, txid, updated_at_ms, evidence_event_id
+                 ) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (source_id, txid) DO UPDATE SET
+                    updated_at_ms = excluded.updated_at_ms,
+                    evidence_event_id = excluded.evidence_event_id",
+                params![
+                    event.source_id.as_str(),
+                    txid,
+                    to_sqlite_integer(event.observed_at_ms, "observed_at_ms")?,
+                    event.event_id,
+                ],
+            )?;
+        }
+        MembershipMutation::Present {
             txid,
-            present,
-            to_sqlite_integer(event.observed_at_ms, "observed_at_ms")?,
-            event.event_id,
-        ],
-    )?;
+            facts: Some(facts),
+        } => {
+            transaction.execute(
+                "INSERT INTO current_membership (
+                    source_id, txid, updated_at_ms, evidence_event_id,
+                    vsize, fee_sats, entered_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (source_id, txid) DO UPDATE SET
+                    updated_at_ms = excluded.updated_at_ms,
+                    evidence_event_id = excluded.evidence_event_id,
+                    vsize = excluded.vsize,
+                    fee_sats = excluded.fee_sats,
+                    entered_at_ms = excluded.entered_at_ms",
+                params![
+                    event.source_id.as_str(),
+                    txid,
+                    to_sqlite_integer(event.observed_at_ms, "observed_at_ms")?,
+                    event.event_id,
+                    to_sqlite_integer(facts.vsize, "vsize")?,
+                    to_sqlite_integer(facts.fee_sats, "fee_sats")?,
+                    to_sqlite_integer(facts.entered_at_ms, "entered_at_ms")?,
+                ],
+            )?;
+        }
+    }
     Ok(())
 }
 
 fn mempool_entry_from_row(row: &rusqlite::Row<'_>) -> Result<MempoolEntry, rusqlite::Error> {
+    let vsize = row.get::<_, Option<i64>>(3)?;
+    let fee_sats = row.get::<_, Option<i64>>(4)?;
+    let entered_at_ms = row.get::<_, Option<i64>>(5)?;
+    let facts = match (vsize, fee_sats, entered_at_ms) {
+        (None, None, None) => MempoolEntryFactsStatus::AwaitingRpc,
+        (Some(vsize), Some(fee_sats), Some(entered_at_ms)) => MempoolEntryFactsStatus::Available {
+            facts: MempoolEntryFacts {
+                vsize: nonnegative_integer_from_row(vsize, 3)?,
+                fee_sats: nonnegative_integer_from_row(fee_sats, 4)?,
+                entered_at_ms: nonnegative_integer_from_row(entered_at_ms, 5)?,
+            },
+        },
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Null,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "mempool entry contains incomplete facts",
+                )),
+            ));
+        }
+    };
     Ok(MempoolEntry {
         txid: row.get(0)?,
         updated_at_ms: nonnegative_integer_from_row(row.get(1)?, 1)?,
         evidence_event_id: row.get(2)?,
+        facts,
     })
 }
 
@@ -434,7 +494,8 @@ fn to_sqlite_integer(value: u64, field: &'static str) -> Result<i64, StoreError>
 #[cfg(test)]
 mod tests {
     use atlas_model::{
-        CaptureGapCertainty, CaptureStatus, Evidence, NormalizedEvent, SourceSessionId,
+        CaptureGapCertainty, CaptureStatus, Evidence, NormalizedEvent, ReconciledMembership,
+        SourceSessionId,
     };
     use tempfile::TempDir;
 
@@ -453,6 +514,21 @@ mod tests {
 
     fn source() -> SourceId {
         SourceId::new("source-a").expect("source")
+    }
+
+    fn facts() -> MempoolEntryFacts {
+        MempoolEntryFacts {
+            vsize: 141,
+            fee_sats: 1_200,
+            entered_at_ms: 1_721_234_000_000,
+        }
+    }
+
+    fn reconciled_present(txid: &str) -> Evidence {
+        Evidence::MempoolReconciled {
+            txid: txid.to_owned(),
+            membership: ReconciledMembership::Present { facts: facts() },
+        }
     }
 
     fn added_event() -> NormalizedEvent {
@@ -523,6 +599,111 @@ mod tests {
             .expect("known source");
         assert_eq!(snapshot.memberships.len(), 1);
         assert_eq!(snapshot.memberships[0].txid, TXID);
+        assert_eq!(
+            snapshot.memberships[0].facts,
+            MempoolEntryFactsStatus::AwaitingRpc
+        );
+    }
+
+    #[test]
+    fn reconciliation_exposes_and_updates_available_facts() {
+        let (_temporary, store) = test_store();
+        store
+            .ingest(&event_for("session-a", 1, reconciled_present(TXID)))
+            .expect("initial reconciliation");
+        let entry = store
+            .mempool(&source())
+            .expect("mempool")
+            .expect("known source")
+            .memberships
+            .pop()
+            .expect("membership");
+        assert_eq!(
+            entry.facts,
+            MempoolEntryFactsStatus::Available { facts: facts() }
+        );
+
+        let mut changed = facts();
+        changed.fee_sats += 1;
+        changed.entered_at_ms += 1_000;
+        store
+            .ingest(&event_for(
+                "session-a",
+                2,
+                Evidence::MempoolReconciled {
+                    txid: TXID.to_owned(),
+                    membership: ReconciledMembership::Present {
+                        facts: changed.clone(),
+                    },
+                },
+            ))
+            .expect("fact update");
+        let entry = store
+            .mempool(&source())
+            .expect("mempool")
+            .expect("known source")
+            .memberships
+            .pop()
+            .expect("membership");
+        assert_eq!(
+            entry.facts,
+            MempoolEntryFactsStatus::Available { facts: changed }
+        );
+    }
+
+    #[test]
+    fn live_presence_preserves_known_facts_until_removal_and_readd() {
+        let (_temporary, store) = test_store();
+        store
+            .ingest(&event_for("session-a", 1, reconciled_present(TXID)))
+            .expect("initial reconciliation");
+        store
+            .ingest(&event_for(
+                "session-a",
+                2,
+                Evidence::MempoolAdded {
+                    txid: TXID.to_owned(),
+                },
+            ))
+            .expect("duplicate live presence");
+        assert_eq!(
+            store
+                .mempool(&source())
+                .expect("mempool")
+                .expect("known source")
+                .memberships[0]
+                .facts,
+            MempoolEntryFactsStatus::Available { facts: facts() }
+        );
+
+        store
+            .ingest(&event_for(
+                "session-a",
+                3,
+                Evidence::MempoolRemoved {
+                    txid: TXID.to_owned(),
+                    reason: Some("removed".to_owned()),
+                },
+            ))
+            .expect("removal");
+        store
+            .ingest(&event_for(
+                "session-a",
+                4,
+                Evidence::MempoolAdded {
+                    txid: TXID.to_owned(),
+                },
+            ))
+            .expect("readd");
+        assert_eq!(
+            store
+                .mempool(&source())
+                .expect("mempool")
+                .expect("known source")
+                .memberships[0]
+                .facts,
+            MempoolEntryFactsStatus::AwaitingRpc
+        );
     }
 
     #[test]
@@ -560,23 +741,15 @@ mod tests {
     #[test]
     fn batch_ingest_applies_membership_mutations_in_request_order() {
         let (temporary, store) = test_store();
-        let present = event_for(
-            "session-a",
-            1,
-            Evidence::MempoolReconciled {
-                txid: TXID.to_owned(),
-                present: true,
-            },
-        );
+        let present = event_for("session-a", 1, reconciled_present(TXID));
         let absent = event_for(
             "session-a",
             2,
             Evidence::MempoolReconciled {
                 txid: TXID.to_owned(),
-                present: false,
+                membership: ReconciledMembership::Absent,
             },
         );
-        let absent_event_id = absent.event_id.clone();
 
         store
             .ingest_batch(&IngestBatchRequest {
@@ -592,16 +765,16 @@ mod tests {
                 .memberships
                 .is_empty()
         );
-        let membership = Connection::open(temporary.path().join("atlas.db"))
+        let membership_count = Connection::open(temporary.path().join("atlas.db"))
             .expect("inspect database")
             .query_row(
-                "SELECT present, evidence_event_id FROM current_membership
+                "SELECT COUNT(*) FROM current_membership
                  WHERE source_id = 'source-a' AND txid = ?1",
                 [TXID],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                |row| row.get::<_, i64>(0),
             )
-            .expect("membership");
-        assert_eq!(membership, (0, absent_event_id));
+            .expect("membership count");
+        assert_eq!(membership_count, 0);
     }
 
     #[test]
@@ -843,7 +1016,7 @@ mod tests {
                 401,
                 Evidence::MempoolReconciled {
                     txid: TXID.to_owned(),
-                    present: true,
+                    membership: ReconciledMembership::Present { facts: facts() },
                 },
             ))
             .expect("reconcile");
@@ -950,15 +1123,15 @@ mod tests {
         let path = temporary.path().join("atlas.db");
         let connection = Connection::open(&path).expect("create database");
         connection
-            .pragma_update(None, "user_version", 1)
+            .pragma_update(None, "user_version", 2)
             .expect("schema version");
         drop(connection);
 
         assert!(matches!(
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
-                found: 1,
-                expected: 2
+                found: 2,
+                expected: 3
             })
         ));
     }
@@ -969,15 +1142,15 @@ mod tests {
         let path = temporary.path().join("atlas.db");
         let connection = Connection::open(&path).expect("create database");
         connection
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 4)
             .expect("schema version");
         drop(connection);
 
         assert!(matches!(
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
-                found: 3,
-                expected: 2
+                found: 4,
+                expected: 3
             })
         ));
     }
@@ -991,7 +1164,7 @@ mod tests {
             Store::open(path),
             Err(StoreError::SchemaVersion {
                 found: 0,
-                expected: 2
+                expected: 3
             })
         ));
     }

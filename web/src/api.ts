@@ -1,6 +1,7 @@
 import type {
   CaptureStatus,
   MempoolEntry,
+  MempoolFacts,
   MempoolResponse,
   SourceHealth,
 } from "./types";
@@ -10,6 +11,45 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const isNonNegativeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+const hasOnlyKeys = (
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[],
+): boolean => {
+  const keys = Object.keys(value);
+  return (
+    keys.length === expectedKeys.length &&
+    keys.every((key) => expectedKeys.includes(key))
+  );
+};
+
+const parseMempoolFacts = (value: unknown, index: number): MempoolFacts => {
+  if (!isRecord(value)) {
+    throw new TypeError(`Invalid membership facts at index ${index}`);
+  }
+
+  if (value.status === "awaiting_rpc" && hasOnlyKeys(value, ["status"])) {
+    return { status: "awaiting_rpc" };
+  }
+
+  if (
+    value.status === "available" &&
+    hasOnlyKeys(value, ["status", "vsize", "fee_sats", "entered_at_ms"]) &&
+    isNonNegativeInteger(value.vsize) &&
+    value.vsize > 0 &&
+    isNonNegativeInteger(value.fee_sats) &&
+    isNonNegativeInteger(value.entered_at_ms)
+  ) {
+    return {
+      status: "available",
+      vsize: value.vsize,
+      fee_sats: value.fee_sats,
+      entered_at_ms: value.entered_at_ms,
+    };
+  }
+
+  throw new TypeError(`Invalid membership facts at index ${index}`);
+};
 
 const parseMembership = (value: unknown, index: number): MempoolEntry => {
   if (
@@ -27,6 +67,7 @@ const parseMembership = (value: unknown, index: number): MempoolEntry => {
     txid: value.txid,
     updated_at_ms: value.updated_at_ms,
     evidence_event_id: value.evidence_event_id,
+    facts: parseMempoolFacts(value.facts, index),
   };
 };
 

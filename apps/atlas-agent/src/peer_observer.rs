@@ -420,9 +420,12 @@ mod tests {
             }
         );
         let mutations = event.membership_mutations();
-        assert_eq!(mutations.len(), 1);
-        assert_eq!(mutations[0].txid, TXID);
-        assert!(!mutations[0].present);
+        assert_eq!(
+            mutations,
+            vec![atlas_model::MembershipMutation::Absent {
+                txid: TXID.to_owned(),
+            }]
+        );
     }
 
     #[test]

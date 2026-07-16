@@ -7,9 +7,10 @@ use bitcoin::{Txid, Wtxid};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u16 = 2;
+pub const SCHEMA_VERSION: u16 = 3;
 pub const MAX_INGEST_BATCH_EVENTS: usize = 512;
 pub const MAX_INGEST_BATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ModelError {
@@ -23,6 +24,14 @@ pub enum ModelError {
     InvalidWtxid(String),
     #[error("invalid package hash: {0}")]
     InvalidPackageHash(String),
+    #[error("mempool entry vsize must be greater than zero")]
+    ZeroVsize,
+    #[error("mempool entry {field} value {value} exceeds the exact JSON integer maximum {maximum}")]
+    MempoolEntryFactTooLarge {
+        field: &'static str,
+        value: u64,
+        maximum: u64,
+    },
     #[error("unsupported schema version {found}; expected {expected}")]
     UnsupportedSchemaVersion { found: u16, expected: u16 },
     #[error("event_id does not match source, session, and local sequence")]
@@ -139,11 +148,13 @@ impl NormalizedEvent {
     #[must_use]
     pub fn membership_mutations(&self) -> Vec<MembershipMutation> {
         match &self.evidence {
-            Evidence::MempoolAdded { txid } => vec![MembershipMutation::present(txid)],
-            Evidence::MempoolReconciled { txid, present } => vec![MembershipMutation {
-                txid: txid.to_owned(),
-                present: *present,
-            }],
+            Evidence::MempoolAdded { txid } => vec![MembershipMutation::pending(txid)],
+            Evidence::MempoolReconciled { txid, membership } => match membership {
+                ReconciledMembership::Absent => vec![MembershipMutation::absent(txid)],
+                ReconciledMembership::Present { facts } => {
+                    vec![MembershipMutation::available(txid, facts.clone())]
+                }
+            },
             Evidence::MempoolRemoved { txid, .. } => vec![MembershipMutation::absent(txid)],
             Evidence::MempoolReplaced {
                 replaced_txid,
@@ -151,7 +162,7 @@ impl NormalizedEvent {
             } => {
                 let mut mutations = vec![MembershipMutation::absent(replaced_txid)];
                 if let Replacement::Transaction { txid } = replacement {
-                    mutations.push(MembershipMutation::present(txid));
+                    mutations.push(MembershipMutation::pending(txid));
                 }
                 mutations
             }
@@ -170,7 +181,7 @@ pub enum Evidence {
     },
     MempoolReconciled {
         txid: String,
-        present: bool,
+        membership: ReconciledMembership,
     },
     MempoolRemoved {
         txid: String,
@@ -202,9 +213,12 @@ impl Evidence {
     pub fn validate(&self) -> Result<(), ModelError> {
         match self {
             Self::MempoolAdded { txid }
-            | Self::MempoolReconciled { txid, .. }
             | Self::MempoolRemoved { txid, .. }
             | Self::MempoolRejected { txid, .. } => validate_txid(txid),
+            Self::MempoolReconciled { txid, membership } => {
+                validate_txid(txid)?;
+                membership.validate()
+            }
             Self::MempoolReplaced {
                 replaced_txid,
                 replacement,
@@ -237,6 +251,54 @@ impl Evidence {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MempoolEntryFacts {
+    pub vsize: u64,
+    pub fee_sats: u64,
+    pub entered_at_ms: u64,
+}
+
+impl MempoolEntryFacts {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.vsize == 0 {
+            return Err(ModelError::ZeroVsize);
+        }
+        for (field, value) in [
+            ("vsize", self.vsize),
+            ("fee_sats", self.fee_sats),
+            ("entered_at_ms", self.entered_at_ms),
+        ] {
+            if value > MAX_SAFE_JSON_INTEGER {
+                return Err(ModelError::MempoolEntryFactTooLarge {
+                    field,
+                    value,
+                    maximum: MAX_SAFE_JSON_INTEGER,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReconciledMembership {
+    Absent,
+    Present {
+        #[serde(flatten)]
+        facts: MempoolEntryFacts,
+    },
+}
+
+impl ReconciledMembership {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        match self {
+            Self::Absent => Ok(()),
+            Self::Present { facts } => facts.validate(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureGapCertainty {
@@ -261,23 +323,35 @@ impl Replacement {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct MembershipMutation {
-    pub txid: String,
-    pub present: bool,
+#[serde(tag = "membership", rename_all = "snake_case")]
+pub enum MembershipMutation {
+    Absent {
+        txid: String,
+    },
+    Present {
+        txid: String,
+        facts: Option<MempoolEntryFacts>,
+    },
 }
 
 impl MembershipMutation {
-    fn present(txid: &str) -> Self {
-        Self {
+    fn pending(txid: &str) -> Self {
+        Self::Present {
             txid: txid.to_owned(),
-            present: true,
+            facts: None,
+        }
+    }
+
+    fn available(txid: &str, facts: MempoolEntryFacts) -> Self {
+        Self::Present {
+            txid: txid.to_owned(),
+            facts: Some(facts),
         }
     }
 
     fn absent(txid: &str) -> Self {
-        Self {
+        Self::Absent {
             txid: txid.to_owned(),
-            present: false,
         }
     }
 }
@@ -287,6 +361,17 @@ pub struct MempoolEntry {
     pub txid: String,
     pub updated_at_ms: u64,
     pub evidence_event_id: String,
+    pub facts: MempoolEntryFactsStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MempoolEntryFactsStatus {
+    AwaitingRpc,
+    Available {
+        #[serde(flatten)]
+        facts: MempoolEntryFacts,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -403,6 +488,14 @@ mod tests {
 
     const TXID_A: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const TXID_B: &str = "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+
+    fn facts() -> MempoolEntryFacts {
+        MempoolEntryFacts {
+            vsize: 141,
+            fee_sats: 1_200,
+            entered_at_ms: 1_721_234_000_000,
+        }
+    }
 
     fn event(evidence: Evidence) -> NormalizedEvent {
         event_for("source-a", "session-a", 7, evidence)
@@ -533,13 +626,12 @@ mod tests {
         assert_eq!(
             event.membership_mutations(),
             vec![
-                MembershipMutation {
+                MembershipMutation::Absent {
                     txid: TXID_A.to_owned(),
-                    present: false,
                 },
-                MembershipMutation {
+                MembershipMutation::Present {
                     txid: TXID_B.to_owned(),
-                    present: true,
+                    facts: None,
                 },
             ]
         );
@@ -547,26 +639,35 @@ mod tests {
 
     #[test]
     fn reconciliation_sets_the_requested_membership_state() {
-        for present in [true, false] {
-            let event = event(Evidence::MempoolReconciled {
+        let present = event(Evidence::MempoolReconciled {
+            txid: TXID_A.to_owned(),
+            membership: ReconciledMembership::Present { facts: facts() },
+        });
+        assert_eq!(
+            present.membership_mutations(),
+            vec![MembershipMutation::Present {
                 txid: TXID_A.to_owned(),
-                present,
-            });
-            assert_eq!(
-                event.membership_mutations(),
-                vec![MembershipMutation {
-                    txid: TXID_A.to_owned(),
-                    present,
-                }]
-            );
-        }
+                facts: Some(facts()),
+            }]
+        );
+
+        let absent = event(Evidence::MempoolReconciled {
+            txid: TXID_A.to_owned(),
+            membership: ReconciledMembership::Absent,
+        });
+        assert_eq!(
+            absent.membership_mutations(),
+            vec![MembershipMutation::Absent {
+                txid: TXID_A.to_owned(),
+            }]
+        );
     }
 
     #[test]
     fn reconciliation_remains_distinct_from_removal_and_rejection() {
         let reconciled = Evidence::MempoolReconciled {
             txid: TXID_A.to_owned(),
-            present: false,
+            membership: ReconciledMembership::Absent,
         };
         let removed = Evidence::MempoolRemoved {
             txid: TXID_A.to_owned(),
@@ -596,11 +697,87 @@ mod tests {
                 1_001,
                 Evidence::MempoolReconciled {
                     txid: "not-a-txid".to_owned(),
-                    present: true,
+                    membership: ReconciledMembership::Present { facts: facts() },
                 },
             ),
             Err(ModelError::InvalidTxid(_))
         ));
+    }
+
+    #[test]
+    fn reconciliation_rejects_zero_vsize() {
+        let mut invalid_facts = facts();
+        invalid_facts.vsize = 0;
+        assert_eq!(
+            NormalizedEvent::new(
+                SourceId::new("source-a").expect("source"),
+                SourceSessionId::new("session-a").expect("session"),
+                7,
+                1_000,
+                1_001,
+                Evidence::MempoolReconciled {
+                    txid: TXID_A.to_owned(),
+                    membership: ReconciledMembership::Present {
+                        facts: invalid_facts,
+                    },
+                },
+            ),
+            Err(ModelError::ZeroVsize)
+        );
+    }
+
+    #[test]
+    fn reconciliation_rejects_facts_that_cannot_be_exact_json_integers() {
+        for (field, invalid_facts) in [
+            (
+                "vsize",
+                MempoolEntryFacts {
+                    vsize: MAX_SAFE_JSON_INTEGER + 1,
+                    ..facts()
+                },
+            ),
+            (
+                "fee_sats",
+                MempoolEntryFacts {
+                    fee_sats: MAX_SAFE_JSON_INTEGER + 1,
+                    ..facts()
+                },
+            ),
+            (
+                "entered_at_ms",
+                MempoolEntryFacts {
+                    entered_at_ms: MAX_SAFE_JSON_INTEGER + 1,
+                    ..facts()
+                },
+            ),
+        ] {
+            assert_eq!(
+                invalid_facts.validate(),
+                Err(ModelError::MempoolEntryFactTooLarge {
+                    field,
+                    value: MAX_SAFE_JSON_INTEGER + 1,
+                    maximum: MAX_SAFE_JSON_INTEGER,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn fact_statuses_have_explicit_wire_shapes() {
+        assert_eq!(
+            serde_json::to_value(MempoolEntryFactsStatus::AwaitingRpc).expect("pending facts"),
+            serde_json::json!({ "status": "awaiting_rpc" })
+        );
+        assert_eq!(
+            serde_json::to_value(MempoolEntryFactsStatus::Available { facts: facts() })
+                .expect("available facts"),
+            serde_json::json!({
+                "status": "available",
+                "vsize": 141,
+                "fee_sats": 1_200,
+                "entered_at_ms": 1_721_234_000_000_u64,
+            })
+        );
     }
 
     #[test]
@@ -613,9 +790,8 @@ mod tests {
         });
         assert_eq!(
             event.membership_mutations(),
-            vec![MembershipMutation {
+            vec![MembershipMutation::Absent {
                 txid: TXID_A.to_owned(),
-                present: false,
             }]
         );
     }
@@ -637,7 +813,7 @@ mod tests {
             certainty: CaptureGapCertainty::KnownLoss,
         });
 
-        assert_eq!(event.schema_version, 2);
+        assert_eq!(event.schema_version, 3);
         assert_eq!(event.evidence.kind(), "capture_gap");
         assert!(event.membership_mutations().is_empty());
         assert_eq!(

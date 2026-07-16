@@ -27,17 +27,64 @@
         <p id="capture-status" class="capture-status" role="note" hidden></p>
         <p id="empty" class="empty" hidden>No memberships were returned.</p>
 
-        <div id="table-wrap" class="table-wrap" hidden>
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Transaction ID</th>
-                <th scope="col">Last updated</th>
-              </tr>
-            </thead>
-            <tbody id="memberships"></tbody>
-          </table>
-        </div>
+        <figure id="visual-wrap" class="swim-view" hidden>
+          <canvas
+            id="mempool-canvas"
+            class="swim-canvas"
+            role="img"
+            aria-describedby="swim-description visual-summary"
+          ></canvas>
+          <figcaption id="swim-description" class="swim-description">
+            Each square is one transaction. Rows show individual base fee rate
+            in sat/vB, columns and colour show age, and square area represents
+            vsize. The neutral strip contains transactions awaiting RPC facts.
+          </figcaption>
+          <div class="swim-legend" aria-label="Visual encoding legend">
+            <span><i class="legend-glyph"></i>Area is vsize</span>
+            <span><i class="legend-age"></i>Oldest to newest</span>
+            <span><i class="legend-awaiting"></i>Awaiting RPC facts</span>
+          </div>
+          <p id="visual-summary" class="visual-summary"></p>
+        </figure>
+
+        <details id="inspector" class="inspector" hidden>
+          <summary>Inspect transactions</summary>
+          <div class="inspector-controls">
+            <label for="txid-search">Transaction ID prefix</label>
+            <input
+              id="txid-search"
+              type="search"
+              inputmode="text"
+              autocomplete="off"
+              spellcheck="false"
+              aria-controls="memberships"
+              placeholder="Enter the start of a txid"
+            />
+            <p id="table-summary" class="table-summary" role="status"></p>
+            <div class="pagination" aria-label="Transaction table pages">
+              <button id="previous-page" type="button">Previous</button>
+              <button id="next-page" type="button">Next</button>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption class="visually-hidden">
+                Transactions currently present in the selected source mempool
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Transaction ID</th>
+                  <th scope="col">Base fee rate (sat/vB)</th>
+                  <th scope="col">vsize (vB)</th>
+                  <th scope="col">Age</th>
+                  <th scope="col">Membership updated</th>
+                </tr>
+              </thead>
+              <tbody id="memberships"></tbody>
+            </table>
+          </div>
+        </details>
       </section>
     </main>
 

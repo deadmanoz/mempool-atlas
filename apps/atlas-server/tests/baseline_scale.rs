@@ -1,9 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use atlas_agent::delivery::{DeliveryOutcome, deliver_next};
 use atlas_agent::outbox::{AgentIdentity, Outbox};
-use atlas_model::{MAX_INGEST_BATCH_EVENTS, SourceId, SourceSessionId};
+use atlas_model::{
+    MAX_INGEST_BATCH_EVENTS, MempoolEntryFacts, MempoolEntryFactsStatus, SourceId, SourceSessionId,
+};
 use atlas_server::{Store, router};
 use reqwest::Client;
 
@@ -20,9 +22,17 @@ fn identity() -> AgentIdentity {
     )
 }
 
-fn baseline() -> BTreeSet<String> {
+fn facts() -> MempoolEntryFacts {
+    MempoolEntryFacts {
+        vsize: 141,
+        fee_sats: 1_200,
+        entered_at_ms: 1_721_234_000_000,
+    }
+}
+
+fn baseline() -> BTreeMap<String, MempoolEntryFacts> {
     (1..=BASELINE_TXIDS)
-        .map(|value| format!("{value:064x}"))
+        .map(|value| (format!("{value:064x}"), facts()))
         .collect()
 }
 
@@ -105,8 +115,16 @@ async fn two_hundred_thousand_txid_baseline_drains_in_bounded_batches() {
         format!("{:064x}", 1_u64)
     );
     assert_eq!(
+        snapshot.memberships.first().expect("first").facts,
+        MempoolEntryFactsStatus::Available { facts: facts() }
+    );
+    assert_eq!(
         snapshot.memberships.last().expect("last").txid,
         format!("{BASELINE_TXIDS:064x}")
+    );
+    assert_eq!(
+        snapshot.memberships.last().expect("last").facts,
+        MempoolEntryFactsStatus::Available { facts: facts() }
     );
     drop(snapshot);
     assert_eq!(

@@ -2,7 +2,19 @@ export interface MempoolEntry {
   txid: string;
   updated_at_ms: number;
   evidence_event_id: string;
+  facts: MempoolFacts;
 }
+
+export type MempoolFacts =
+  | {
+      status: "awaiting_rpc";
+    }
+  | {
+      status: "available";
+      vsize: number;
+      fee_sats: number;
+      entered_at_ms: number;
+    };
 
 export type CaptureGapCertainty = "possible_loss" | "known_loss";
 

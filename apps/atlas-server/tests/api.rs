@@ -1,7 +1,8 @@
 use atlas_agent::peer_observer::normalize_payload;
 use atlas_model::{
     CaptureGapCertainty, CaptureStatus, Evidence, IngestBatchRequest, IngestBatchResponse,
-    IngestResponse, IngestStatus, MAX_INGEST_BATCH_BODY_BYTES, MempoolSnapshot, NormalizedEvent,
+    IngestResponse, IngestStatus, MAX_INGEST_BATCH_BODY_BYTES, MempoolEntryFacts,
+    MempoolEntryFactsStatus, MempoolSnapshot, NormalizedEvent, ReconciledMembership,
 };
 use atlas_model::{SourceId, SourceSessionId};
 use atlas_server::{Store, router};
@@ -71,6 +72,67 @@ async fn event_is_idempotent_and_visible_in_read_api() {
     assert_eq!(snapshot.health.capture, CaptureStatus::NoReportedGaps);
     assert_eq!(snapshot.memberships.len(), 1);
     assert_eq!(snapshot.memberships[0].txid, TXID);
+    assert_eq!(
+        snapshot.memberships[0].facts,
+        MempoolEntryFactsStatus::AwaitingRpc
+    );
+}
+
+#[tokio::test]
+async fn source_read_exposes_reconciled_mempool_facts() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let database = temporary.path().join("atlas.db");
+    Store::migrate(&database).expect("migrate");
+    let application = router(Store::open(database).expect("store"));
+    let facts = MempoolEntryFacts {
+        vsize: 141,
+        fee_sats: 1_200,
+        entered_at_ms: 1_721_234_000_000,
+    };
+    let event = NormalizedEvent::new(
+        SourceId::new("source-a").expect("source"),
+        SourceSessionId::new("session-a").expect("session"),
+        1,
+        1_721_234_567_890,
+        1_721_234_567_897,
+        Evidence::MempoolReconciled {
+            txid: TXID.to_owned(),
+            membership: ReconciledMembership::Present {
+                facts: facts.clone(),
+            },
+        },
+    )
+    .expect("reconciliation event");
+
+    let response = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&event).expect("event json")))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let response = application
+        .oneshot(
+            Request::get("/api/v1/sources/source-a/mempool")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let snapshot: MempoolSnapshot = serde_json::from_slice(&bytes).expect("snapshot");
+    assert_eq!(
+        snapshot.memberships[0].facts,
+        MempoolEntryFactsStatus::Available { facts }
+    );
 }
 
 #[tokio::test]
