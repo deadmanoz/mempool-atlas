@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "apps/atlas-agent",
     "apps/atlas-server",
-    "crates/atlas-classifiers",
     "crates/atlas-model",
 ]
 default-members = ["apps/atlas-agent", "apps/atlas-server"]
