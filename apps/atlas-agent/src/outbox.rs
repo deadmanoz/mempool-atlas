@@ -14,7 +14,7 @@ use rusqlite::{
 };
 use thiserror::Error;
 
-const LATEST_SCHEMA_VERSION: i64 = 1;
+const LATEST_SCHEMA_VERSION: i64 = 2;
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,9 +61,7 @@ pub enum OutboxError {
     Model(#[from] atlas_model::ModelError),
     #[error("event serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error(
-        "outbox schema is at version {found}, expected {expected}; run the backup-first migration command"
-    )]
+    #[error("outbox schema is at version {found}, expected {expected}")]
     SchemaVersion { found: i64, expected: i64 },
     #[error("outbox is bound to source {bound}, not configured source {configured}")]
     SourceBinding { bound: String, configured: String },
@@ -140,19 +138,19 @@ impl Outbox {
         let mut connection = Connection::open(path)?;
         configure_connection(&connection)?;
         let version = schema_version(&connection)?;
-        if version > LATEST_SCHEMA_VERSION {
+        if version == LATEST_SCHEMA_VERSION {
+            return Ok(());
+        }
+        if version != 0 {
             return Err(OutboxError::SchemaVersion {
                 found: version,
                 expected: LATEST_SCHEMA_VERSION,
             });
         }
-        if version < 1 {
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute_batch(MIGRATION_1)?;
-            transaction.pragma_update(None, "user_version", 1)?;
-            transaction.commit()?;
-        }
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute_batch(MIGRATION_1)?;
+        transaction.pragma_update(None, "user_version", 2)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -609,7 +607,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use atlas_model::IngestBatchRequest;
+    use atlas_model::{CaptureGapCertainty, IngestBatchRequest};
     use tempfile::TempDir;
 
     use super::*;
@@ -691,6 +689,45 @@ mod tests {
             Outbox::open(&path, source("knots-a")),
             Err(OutboxError::SourceBinding { .. })
         ));
+    }
+
+    #[test]
+    fn capture_gap_survives_reopen_and_is_delivered_once_as_fifo_head() {
+        let (_temporary, path, outbox) = test_outbox();
+        let pending = outbox
+            .enqueue_observation(
+                &identity("session-a"),
+                100,
+                100,
+                Evidence::CaptureGap {
+                    input: "peer_observer_nats".to_owned(),
+                    reason: "slow_consumer".to_owned(),
+                    certainty: CaptureGapCertainty::KnownLoss,
+                },
+                None,
+                None,
+            )
+            .expect("enqueue capture gap");
+        assert!(
+            outbox
+                .projected_membership()
+                .expect("projection")
+                .is_empty()
+        );
+        drop(outbox);
+
+        let reopened = Outbox::open(&path, source("core-a")).expect("reopen");
+        assert_eq!(
+            reopened.next_delivery().expect("next delivery"),
+            Some(PendingDelivery::Single(pending.clone()))
+        );
+        reopened
+            .mark_delivered(pending.outbox_id)
+            .expect("deliver capture gap");
+        assert_eq!(
+            reopened.next_delivery().expect("empty after delivery"),
+            None
+        );
     }
 
     #[test]
@@ -1136,20 +1173,33 @@ mod tests {
             Outbox::open(&path, source("core-a")),
             Err(OutboxError::SchemaVersion {
                 found: 0,
-                expected: 1
+                expected: 2
             })
         ));
 
         let connection = Connection::open(&path).expect("open database");
         connection
-            .pragma_update(None, "user_version", 2)
+            .pragma_update(None, "user_version", 1)
+            .expect("set stale version");
+        drop(connection);
+        assert!(matches!(
+            Outbox::migrate(&path),
+            Err(OutboxError::SchemaVersion {
+                found: 1,
+                expected: 2
+            })
+        ));
+
+        let connection = Connection::open(&path).expect("open database");
+        connection
+            .pragma_update(None, "user_version", 3)
             .expect("set future version");
         drop(connection);
         assert!(matches!(
             Outbox::migrate(&path),
             Err(OutboxError::SchemaVersion {
-                found: 2,
-                expected: 1
+                found: 3,
+                expected: 2
             })
         ));
     }

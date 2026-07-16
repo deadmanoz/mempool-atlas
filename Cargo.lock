@@ -142,6 +142,7 @@ version = "0.1.0"
 dependencies = [
  "bitcoin",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

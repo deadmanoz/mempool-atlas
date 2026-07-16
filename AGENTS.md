@@ -1,17 +1,19 @@
 # Mempool Atlas
 
-Mempool Atlas is a standalone Bitcoin mempool observation and visualization tool. Its first deployment compares Core and Knots for the 2026 fork-monitoring work, but the code and data model must remain implementation-neutral.
+Mempool Atlas is a standalone Bitcoin mempool observation and visualization tool whose primary product view is one selected node's mempool. Its first deployment may place an optional Core and Knots comparison workspace in front for the 2026 fork-monitoring work, but comparison remains a derived consumer of independent source snapshots and the code and data model must remain implementation-neutral.
 
 ## Architecture
 
 - `apps/atlas-agent/` owns peer-observer protobuf decoding, live NATS capture, the inbound-by-default P2P volume policy, periodic RPC reconciliation, the effective local projection, strict FIFO single-event and bounded reconciliation-batch HTTP delivery, and the source-bound SQLite outbox.
-- `apps/atlas-server/` owns the implemented idempotent single and atomic batch ingest, central SQLite state, and read API. The browser checkpoint/delta reducer exists, but server-side stream delivery does not yet.
+- `apps/atlas-server/` owns the implemented idempotent single and atomic batch ingest, source-partitioned central SQLite state, and source-scoped read API. Server-side stream delivery is not implemented.
 - `crates/atlas-model/` contains shared wire and domain types. It must not depend on agent or server internals.
 - `crates/atlas-classifiers/` contains built-in classifiers. It is an in-process trait boundary, not a dynamic plugin system.
 - `proto/peer-observer/` vendors the minimal canonical peer-observer protobuf import closure at a recorded upstream commit.
-- `web/` is a small TypeScript/Vite client. Keep framework and rendering complexity out until the data path is proven.
+- `web/` is a small TypeScript/Vite client for one selected source. Keep framework and rendering complexity out until the data path is proven.
 
 The architectural rule is that RPC reconciliation is the state plane and peer-observer is the low-latency evidence plane. Missing peer-observer events may reduce forensic detail, but must not leave current membership permanently incorrect. Delivery is independent of both inputs, and capture enqueue is ordered against RPC snapshot reconciliation by one shared projection fence.
+
+One source snapshot is the primary read model. Shared storage may co-locate independent source projections, but Atlas never constructs a combined cross-source mempool. A future comparison workspace must fetch two or more source snapshots and derive its result without mutating or owning them.
 
 Full mode retains all supported mempool-subject evidence. P2P transaction capture defaults to explicitly inbound observations, preserving peer evidence from before node admission or rejection; `ATLAS_P2P_POLICY=all` enables the full P2P transaction relay model for a bounded diagnostic run. This is a volume policy over peer sightings, not transaction deduplication, and the generic observation model must remain capable of representing both policies.
 
@@ -36,8 +38,10 @@ Use `just` targets when one exists:
 - `just agent-dev` starts the node-local agent using its configured environment.
 - `just web-dev` starts Vite in a second terminal.
 - `just db-migrate-dev` applies migrations through the backup-first wrapper.
+- `just db-reinitialize-dev` backs up and replaces a stale preproduction central database with the current schema generation.
 - `just db-backup` backs up the configured SQLite database.
 - `just agent-db-migrate-dev` applies node-local outbox migrations through the backup-first wrapper.
+- `just agent-db-reinitialize-dev` backs up and replaces a stale preproduction outbox with the current schema generation.
 - `just agent-db-backup` backs up the configured node-local SQLite database.
 - `just clean` removes generated build output.
 
@@ -49,8 +53,9 @@ Use `just` targets when one exists:
 - Convert peer-observer hash byte arrays through rust-bitcoin hash types. Do not display them by directly hex-encoding the byte array.
 - A peer-observer replacement event opens membership for `replacement_id` only when `replaced_by_transaction` is true. Otherwise it is a package hash.
 - Store explicit `unknown` or `pending` states when evidence is unavailable. Do not infer facts to fill gaps.
+- Treat capture-gap state as historical evidence integrity, not current liveness. RPC may repair current membership but cannot recreate missing peer-observer history. No reported gap is not proof of completeness.
 - Keep source IDs and fork presets configurable. Never commit private hostnames, credentials, peer addresses, or deployment inventory.
-- SQLite migrations are append-only once used against persistent data. Run them only through the backup-first `just` targets.
+- Current preproduction schema generations intentionally reject stale databases instead of carrying cross-generation logic. Replace stale state only through the backup-first `reinitialize` targets and reinitialize central state plus every source outbox together. Once production begins, SQLite migrations become append-only.
 
 ## Repository Etiquette
 
@@ -62,12 +67,12 @@ Use `just` targets when one exists:
 ## Gotchas
 
 - Live peer-observer NATS payloads are unframed protobuf `Event` messages on flat subjects. They carry neither the Atlas source ID nor an event sequence, so the agent must add both.
-- Core NATS is not a durable queue and provides no causal ordering across `mempool` and `netmsg`. Subscribe and flush before consuming, surface slow-consumer drops as forensic evidence loss, then let RPC repair membership gaps.
+- Core NATS is not a durable queue and provides no causal ordering across `mempool` and `netmsg`. Subscribe and flush before consuming, persist slow-consumer drops as known forensic evidence loss, treat disconnects as possible evidence loss, then let RPC repair membership gaps without clearing the capture history.
 - peer-observer mempool events carry only `txid`; P2P transaction events can also carry `wtxid` and raw bytes.
 - `ATLAS_P2P_POLICY` accepts `inbound` or `all` and defaults to `inbound`. The policy affects only P2P transaction observations; never apply it to peer-observer mempool evidence.
 - Core and Knots RPC response shapes may differ. Decode the required subset leniently and preserve an explicit capability state.
 - The guaranteed operating floor is RPC-only. Linux eBPF, BPF permissions, and USDT-enabled node binaries are required for the richer peer-observer feed.
-- Run one agent writer and one persistent agent database per source. The database is source-bound and contains pending evidence plus the effective projection; deleting it is not a supported reset path.
+- Run one agent writer and one persistent agent database per source. The database is source-bound and contains pending evidence plus the effective projection; deleting it is not a supported reset path. A coordinated backup-first preproduction reinitialization of central state and every source outbox is the only current exception.
 - Outbox delivery is strict FIFO. Live and other non-reconciliation evidence is delivered singly. A contiguous `mempool_reconciled` prefix may contain at most 512 events and 4 MiB of encoded JSON.
 - Remove a single head or reconciliation prefix only after HTTP 202 with complete acknowledgements for the same event IDs in the same order. The server must apply a batch in one transaction so a lost response can safely retry the whole prefix.
 

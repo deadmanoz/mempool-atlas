@@ -16,11 +16,13 @@ Capture and RPC use a shared asynchronous projection fence. Capture holds it whi
 
 Outbox rows are ordered globally by their insertion ID, including rows from different process sessions. `Outbox::next_delivery` returns either the single FIFO head or a contiguous prefix containing only `mempool_reconciled` events. The prefix is capped at 512 events and an exact 4 MiB encoded request body. Encountering live or other non-reconciliation evidence ends the prefix, so nothing can overtake it.
 
-Single events continue to use `POST /api/v1/events`. Reconciliation prefixes use `POST /api/v1/events/batch`; the server validates one source and applies every event sequentially in one SQLite transaction. The agent deletes the prefix atomically only when HTTP 202 contains exactly one `applied` or `duplicate` acknowledgement per requested event, with the same IDs in the same order (`delivery::deliver_next`, `Store::ingest_batch`, and `Outbox::mark_delivered_prefix`). Network failures, non-202 responses, malformed, short, or reordered acknowledgements, and event conflicts retain the whole prefix and increment only the head's attempt count.
+Live and capture-gap events use `POST /api/v1/events`. Reconciliation prefixes use `POST /api/v1/events/batch`; the server validates one source and applies every event sequentially in one SQLite transaction. The agent deletes the prefix atomically only when HTTP 202 contains exactly one `applied` or `duplicate` acknowledgement per requested event, with the same IDs in the same order (`delivery::deliver_next`, `Store::ingest_batch`, and `Outbox::mark_delivered_prefix`). Network failures, non-202 responses, malformed, short, or reordered acknowledgements, and event conflicts retain the whole prefix and increment only the head's attempt count.
 
-Delivery starts independently of NATS and RPC availability. Each input retries separately, so already-persisted events can drain during a node or peer-observer outage. If the process crashes or loses the response after central acceptance but before local deletion, the same head or prefix is sent again; central event ingest is idempotent by event ID and returns duplicate acknowledgements. The server must be upgraded before an agent that uses the batch endpoint.
+Delivery starts independently of NATS and RPC availability. Each input retries separately, so already-persisted events can drain during a node or peer-observer outage. If the process crashes or loses the response after central acceptance but before local deletion, the same head or prefix is sent again; central event ingest is idempotent by event ID and returns duplicate acknowledgements. Run matching agent and server event schemas in a controlled preproduction release.
 
-Core NATS is not durable. If the bounded subscriber channel fills, `async-nats` drops the affected message and emits a slow-consumer event. The agent logs this explicitly as lost forensic evidence; RPC can repair membership but cannot reconstruct the missing rejection, peer, timing, or raw-transaction evidence. Persisting this degraded-capture state for the read API and browser is a follow-up rather than something inferred from an RPC correction.
+Core NATS is not durable. If the bounded subscriber channel fills, `async-nats` drops the affected message and emits a slow-consumer event. The NATS callback sends rare control notices to the capture loop, which persists `slow_consumer` as known loss and `disconnected` as possible loss through the ordinary source-bound FIFO. Other NATS lifecycle events remain logs. Intentional P2P policy suppression is not a capture gap.
+
+The central service reduces those events into monotonic source capture state. It records marker times and certainty, not a continuous outage interval or an estimated transaction-loss count. RPC can repair current membership but cannot reconstruct missing rejection, peer, timing, or raw-transaction evidence, so RPC reconciliation never clears or weakens this historical integrity state. A source with no gap marker means only that no gap has been reported, not that capture is proven complete.
 
 Every 30 seconds, capture accounting logs cumulative total NATS messages, supported persisted observations, policy-suppressed P2P observations, ignored unsupported messages, invalid messages, and the current pending outbox depth. Policy suppression is intentional volume control and is distinct from a slow-consumer loss.
 
@@ -46,13 +48,13 @@ Every 30 seconds, capture accounting logs cumulative total NATS messages, suppor
 
 The schema stores the source binding, last successful RPC time, per-session sequence counters, pending events, delivery failure state, and effective membership (`apps/atlas-agent/migrations/0001_initial.sql`). Raw NATS subject and payload bytes are retained with a row only while that event remains pending.
 
-Use one writer and one persistent database per source. Opening an existing database with a different `ATLAS_SOURCE_ID` fails. Initialize or upgrade it only through the backup-first wrapper:
+Use one writer and one persistent database per source. Opening an existing database with a different `ATLAS_SOURCE_ID` fails. Initialize it only through the backup-first wrapper:
 
 ```bash
 just agent-db-migrate-dev
 just agent-dev
 ```
 
-Use `just agent-db-migrate-deploy` in deployment workflows and `just agent-db-backup` for an explicit backup. Put source-specific settings in an untracked `.env`; never commit credentials or deployment inventory.
+Use `just agent-db-migrate-deploy` for a fresh deployment and `just agent-db-backup` for an explicit backup. Schema generation 2 rejects generation 1. During this preproduction phase, replace a stale outbox with `just agent-db-reinitialize-deploy` only as part of the coordinated central and all-source reinitialization described in the architecture guide. Put source-specific settings in an untracked `.env`; never commit credentials or deployment inventory.
 
-Deleting the database is not a supported reset. It loses queued forensic evidence and the effective membership baseline, which can leave central source state without the removals needed to converge. Restore a verified backup after local loss. An explicit central source reset and full rebaseline protocol remains deferred.
+Deleting the database by hand is not a supported reset. It loses queued forensic evidence and the effective membership baseline, which can leave central source state without the removals needed to converge. Restore a verified backup after local loss. The backup-first preproduction reinitialization is safe only because central state and every source outbox are replaced together. A production source reset and full rebaseline protocol remains deferred.

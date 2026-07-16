@@ -92,7 +92,10 @@ async fn two_hundred_thousand_txid_baseline_drains_in_bounded_batches() {
         usize::try_from(BASELINE_TXIDS).expect("count")
     );
     assert_eq!(reopened.pending_count().expect("drained outbox"), 0);
-    let snapshot = store.mempool(Some(&source())).expect("central baseline");
+    let snapshot = store
+        .mempool(&source())
+        .expect("central baseline")
+        .expect("known source");
     assert_eq!(
         snapshot.memberships.len(),
         usize::try_from(BASELINE_TXIDS).expect("count")

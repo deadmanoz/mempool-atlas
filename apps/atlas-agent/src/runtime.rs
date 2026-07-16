@@ -6,9 +6,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use async_nats::{Client as NatsClient, ConnectOptions, Event as NatsEvent, Message, Subscriber};
+use atlas_model::{CaptureGapCertainty, Evidence};
 use futures_util::StreamExt;
 use reqwest::Client as HttpClient;
-use tokio::sync::{Mutex, OwnedMutexGuard, watch};
+use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, info, warn};
@@ -63,6 +64,39 @@ pub struct RuntimeConfig {
     pub delivery_retry_interval: Duration,
     pub nats: Option<NatsConfig>,
     pub rpc: RpcConfig,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CaptureGapNotice {
+    occurred_at_ms: u64,
+    reason: &'static str,
+    certainty: CaptureGapCertainty,
+}
+
+struct NatsCaptureInputs {
+    mempool: Subscriber,
+    netmsg: Subscriber,
+    capture_gaps: mpsc::UnboundedReceiver<CaptureGapNotice>,
+}
+
+impl CaptureGapNotice {
+    fn from_nats_event(event: &NatsEvent, occurred_at_ms: u64) -> Option<Self> {
+        let (reason, certainty) = match event {
+            NatsEvent::SlowConsumer(_) => ("slow_consumer", CaptureGapCertainty::KnownLoss),
+            NatsEvent::Disconnected => ("disconnected", CaptureGapCertainty::PossibleLoss),
+            NatsEvent::Connected
+            | NatsEvent::LameDuckMode
+            | NatsEvent::Draining
+            | NatsEvent::Closed
+            | NatsEvent::ServerError(_)
+            | NatsEvent::ClientError(_) => return None,
+        };
+        Some(Self {
+            occurred_at_ms,
+            reason,
+            certainty,
+        })
+    }
 }
 
 pub async fn run(config: RuntimeConfig, outbox: Outbox) -> anyhow::Result<()> {
@@ -137,7 +171,8 @@ pub async fn run(config: RuntimeConfig, outbox: Outbox) -> anyhow::Result<()> {
     outcome
 }
 
-async fn connect_nats(config: &NatsConfig) -> anyhow::Result<(NatsClient, Subscriber, Subscriber)> {
+async fn connect_nats(config: &NatsConfig) -> anyhow::Result<(NatsClient, NatsCaptureInputs)> {
+    let (capture_gap_tx, capture_gap_rx) = mpsc::unbounded_channel();
     let options = match (&config.username, &config.password) {
         (Some(username), Some(password)) => {
             ConnectOptions::new().user_and_password(username.clone(), password.clone())
@@ -145,25 +180,49 @@ async fn connect_nats(config: &NatsConfig) -> anyhow::Result<(NatsClient, Subscr
         (None, None) => ConnectOptions::new(),
         _ => bail!("NATS username and password must be configured together"),
     };
-    let options = options.event_callback(|event| async move {
-        match event {
-            NatsEvent::SlowConsumer(subscription_id) => {
-                warn!(
-                    subscription_id,
-                    "peer-observer NATS slow consumer; forensic evidence was dropped"
-                );
+    let options = options.event_callback(move |event| {
+        let capture_gap_tx = capture_gap_tx.clone();
+        async move {
+            let capture_gap =
+                if matches!(&event, NatsEvent::SlowConsumer(_) | NatsEvent::Disconnected) {
+                    match unix_time_ms() {
+                        Ok(occurred_at_ms) => {
+                            CaptureGapNotice::from_nats_event(&event, occurred_at_ms)
+                        }
+                        Err(error) => {
+                            warn!(%error, "could not timestamp peer-observer NATS capture gap");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+            match event {
+                NatsEvent::SlowConsumer(subscription_id) => {
+                    warn!(
+                        subscription_id,
+                        "peer-observer NATS slow consumer; forensic evidence was dropped"
+                    );
+                }
+                NatsEvent::Disconnected => warn!("peer-observer NATS disconnected"),
+                NatsEvent::Closed => warn!("peer-observer NATS connection closed"),
+                NatsEvent::ServerError(error) => {
+                    warn!(%error, "peer-observer NATS server error");
+                }
+                NatsEvent::ClientError(error) => {
+                    warn!(%error, "peer-observer NATS client error");
+                }
+                NatsEvent::Connected => info!("peer-observer NATS connected"),
+                NatsEvent::LameDuckMode | NatsEvent::Draining => {
+                    warn!(%event, "peer-observer NATS connection state changed");
+                }
             }
-            NatsEvent::Disconnected => warn!("peer-observer NATS disconnected"),
-            NatsEvent::Closed => warn!("peer-observer NATS connection closed"),
-            NatsEvent::ServerError(error) => {
-                warn!(%error, "peer-observer NATS server error");
-            }
-            NatsEvent::ClientError(error) => {
-                warn!(%error, "peer-observer NATS client error");
-            }
-            NatsEvent::Connected => info!("peer-observer NATS connected"),
-            NatsEvent::LameDuckMode | NatsEvent::Draining => {
-                warn!(%event, "peer-observer NATS connection state changed");
+
+            if let Some(capture_gap) = capture_gap
+                && capture_gap_tx.send(capture_gap).is_err()
+            {
+                warn!("peer-observer NATS capture-gap receiver closed");
             }
         }
     });
@@ -187,7 +246,14 @@ async fn connect_nats(config: &NatsConfig) -> anyhow::Result<(NatsClient, Subscr
         subjects = %format_args!("{MEMPOOL_SUBJECT},{NETMSG_SUBJECT}"),
         "peer-observer NATS subscriptions ready"
     );
-    Ok((client, mempool, netmsg))
+    Ok((
+        client,
+        NatsCaptureInputs {
+            mempool,
+            netmsg,
+            capture_gaps: capture_gap_rx,
+        },
+    ))
 }
 
 fn validate_nats_config(config: &NatsConfig) -> anyhow::Result<()> {
@@ -209,11 +275,11 @@ async fn nats_loop(
     loop {
         let session = connect_nats(&config).await;
         match session {
-            Ok((_client, mempool, netmsg)) => {
+            Ok((_client, inputs)) => {
                 capture_loop(
                     outbox.clone(),
                     identity.clone(),
-                    (mempool, netmsg),
+                    inputs,
                     config.p2p_policy,
                     Arc::clone(&projection_fence),
                     shutdown.clone(),
@@ -239,13 +305,17 @@ async fn nats_loop(
 async fn capture_loop(
     outbox: Outbox,
     identity: AgentIdentity,
-    subscribers: (Subscriber, Subscriber),
+    inputs: NatsCaptureInputs,
     p2p_policy: P2pPolicy,
     projection_fence: Arc<Mutex<()>>,
     mut shutdown: watch::Receiver<bool>,
     accounting: &mut CaptureAccounting,
 ) -> anyhow::Result<()> {
-    let (mut mempool, mut netmsg) = subscribers;
+    let NatsCaptureInputs {
+        mut mempool,
+        mut netmsg,
+        mut capture_gaps,
+    } = inputs;
     let mut accounting_ticker = interval(CAPTURE_ACCOUNTING_INTERVAL);
     accounting_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     accounting_ticker.tick().await;
@@ -283,11 +353,61 @@ async fn capture_loop(
                 ).await?;
                 accounting.record(disposition);
             }
+            capture_gap = capture_gaps.recv() => {
+                let Some(capture_gap) = capture_gap else {
+                    return Ok(());
+                };
+                capture_gap_notice(
+                    &outbox,
+                    &identity,
+                    &projection_fence,
+                    capture_gap,
+                ).await?;
+            }
             _ = accounting_ticker.tick() => {
                 log_capture_accounting(&outbox, accounting).await;
             }
         }
     }
+}
+
+async fn capture_gap_notice(
+    outbox: &Outbox,
+    identity: &AgentIdentity,
+    projection_fence: &Arc<Mutex<()>>,
+    capture_gap: CaptureGapNotice,
+) -> anyhow::Result<()> {
+    let CaptureGapNotice {
+        occurred_at_ms,
+        reason,
+        certainty,
+    } = capture_gap;
+    let outbox = outbox.clone();
+    let identity = identity.clone();
+    let _projection_guard = projection_fence.lock().await;
+    let pending = tokio::task::spawn_blocking(move || {
+        outbox.enqueue_observation(
+            &identity,
+            occurred_at_ms,
+            occurred_at_ms,
+            Evidence::CaptureGap {
+                input: "peer_observer_nats".to_owned(),
+                reason: reason.to_owned(),
+                certainty,
+            },
+            None,
+            None,
+        )
+    })
+    .await
+    .context("joining NATS capture-gap outbox task")??;
+    warn!(
+        outbox_id = pending.outbox_id,
+        event_id = %pending.event.event_id,
+        reason,
+        "peer-observer NATS capture gap queued"
+    );
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -652,6 +772,78 @@ mod tests {
             })),
         };
         nats_message(NETMSG_SUBJECT, event.encode_to_vec())
+    }
+
+    #[test]
+    fn nats_loss_events_map_to_capture_gap_notices() {
+        assert_eq!(
+            CaptureGapNotice::from_nats_event(&NatsEvent::SlowConsumer(17), 123),
+            Some(CaptureGapNotice {
+                occurred_at_ms: 123,
+                reason: "slow_consumer",
+                certainty: CaptureGapCertainty::KnownLoss,
+            })
+        );
+        assert_eq!(
+            CaptureGapNotice::from_nats_event(&NatsEvent::Disconnected, 456),
+            Some(CaptureGapNotice {
+                occurred_at_ms: 456,
+                reason: "disconnected",
+                certainty: CaptureGapCertainty::PossibleLoss,
+            })
+        );
+    }
+
+    #[test]
+    fn other_nats_events_do_not_map_to_capture_gaps() {
+        let events = [
+            NatsEvent::Connected,
+            NatsEvent::Closed,
+            NatsEvent::LameDuckMode,
+            NatsEvent::Draining,
+            NatsEvent::ServerError(async_nats::ServerError::Other("server".to_owned())),
+            NatsEvent::ClientError(async_nats::ClientError::Other("client".to_owned())),
+        ];
+
+        for event in events {
+            assert_eq!(CaptureGapNotice::from_nats_event(&event, 123), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_gap_notice_queues_one_timestamped_non_membership_event() {
+        let (_temporary, outbox, identity, projection_fence) = test_capture();
+
+        capture_gap_notice(
+            &outbox,
+            &identity,
+            &projection_fence,
+            CaptureGapNotice {
+                occurred_at_ms: 123,
+                reason: "slow_consumer",
+                certainty: CaptureGapCertainty::KnownLoss,
+            },
+        )
+        .await
+        .expect("capture gap");
+
+        let pending = outbox.next_pending().expect("next").expect("pending");
+        assert_eq!(pending.event.observed_at_ms, 123);
+        assert_eq!(pending.event.received_at_ms, 123);
+        assert_eq!(
+            pending.event.evidence,
+            Evidence::CaptureGap {
+                input: "peer_observer_nats".to_owned(),
+                reason: "slow_consumer".to_owned(),
+                certainty: CaptureGapCertainty::KnownLoss,
+            }
+        );
+        assert!(
+            outbox
+                .projected_membership()
+                .expect("projection")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

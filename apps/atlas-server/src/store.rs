@@ -3,13 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atlas_model::{
-    Evidence, IngestBatchRequest, IngestStatus, MembershipRow, MempoolSnapshot, NormalizedEvent,
-    SourceId,
+    CaptureGapCertainty, CaptureStatus, Evidence, IngestBatchRequest, IngestStatus, MempoolEntry,
+    MempoolSnapshot, NormalizedEvent, SourceHealth, SourceId,
 };
-use rusqlite::{Connection, OpenFlags, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use thiserror::Error;
 
-const LATEST_SCHEMA_VERSION: i64 = 1;
+const LATEST_SCHEMA_VERSION: i64 = 2;
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 
 #[derive(Clone, Debug)]
@@ -27,9 +27,7 @@ pub enum StoreError {
     Model(#[from] atlas_model::ModelError),
     #[error("event serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error(
-        "database schema is at version {found}, expected {expected}; run the backup-first migration command"
-    )]
+    #[error("database schema is at version {found}, expected {expected}")]
     SchemaVersion { found: i64, expected: i64 },
     #[error("numeric field {field} is too large for SQLite")]
     NumericOverflow { field: &'static str },
@@ -63,18 +61,19 @@ impl Store {
         let mut connection = Connection::open(path)?;
         configure_connection(&connection)?;
         let version = schema_version(&connection)?;
-        if version > LATEST_SCHEMA_VERSION {
+        if version == LATEST_SCHEMA_VERSION {
+            return Ok(());
+        }
+        if version != 0 {
             return Err(StoreError::SchemaVersion {
                 found: version,
                 expected: LATEST_SCHEMA_VERSION,
             });
         }
-        if version < 1 {
-            let transaction = connection.transaction()?;
-            transaction.execute_batch(MIGRATION_1)?;
-            transaction.pragma_update(None, "user_version", 1)?;
-            transaction.commit()?;
-        }
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(MIGRATION_1)?;
+        transaction.pragma_update(None, "user_version", 2)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -108,36 +107,51 @@ impl Store {
         Ok(statuses)
     }
 
-    pub fn mempool(&self, source_id: Option<&SourceId>) -> Result<MempoolSnapshot, StoreError> {
-        let connection = self.connect()?;
-        let mut memberships = Vec::new();
-        if let Some(source_id) = source_id {
-            let mut statement = connection.prepare(
-                "SELECT source_id, txid, present, updated_at_ms, evidence_event_id
+    pub fn mempool(&self, source_id: &SourceId) -> Result<Option<MempoolSnapshot>, StoreError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let source = transaction
+            .query_row(
+                "SELECT
+                    source.last_seen_at_ms,
+                    source_capture_state.first_gap_at_ms,
+                    source_capture_state.latest_gap_at_ms,
+                    source_capture_state.marker_count,
+                    source_capture_state.strongest_certainty,
+                    source_capture_state.latest_input,
+                    source_capture_state.latest_reason
+                 FROM source
+                 LEFT JOIN source_capture_state USING (source_id)
+                 WHERE source.source_id = ?1",
+                [source_id.as_str()],
+                source_health_from_row,
+            )
+            .optional()?;
+        let Some(health) = source else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+
+        let memberships = {
+            let mut statement = transaction.prepare(
+                "SELECT txid, updated_at_ms, evidence_event_id
                  FROM current_membership
                  WHERE source_id = ?1 AND present = 1
                  ORDER BY txid",
             )?;
-            let rows = statement.query_map([source_id.as_str()], membership_from_row)?;
+            let rows = statement.query_map([source_id.as_str()], mempool_entry_from_row)?;
+            let mut memberships = Vec::new();
             for row in rows {
                 memberships.push(row?);
             }
-        } else {
-            let mut statement = connection.prepare(
-                "SELECT source_id, txid, present, updated_at_ms, evidence_event_id
-                 FROM current_membership
-                 WHERE present = 1
-                 ORDER BY source_id, txid",
-            )?;
-            let rows = statement.query_map([], membership_from_row)?;
-            for row in rows {
-                memberships.push(row?);
-            }
-        }
-        Ok(MempoolSnapshot {
-            source_id: source_id.cloned(),
+            memberships
+        };
+        transaction.commit()?;
+        Ok(Some(MempoolSnapshot {
+            source_id: source_id.clone(),
+            health,
             memberships,
-        })
+        }))
     }
 
     fn connect(&self) -> Result<Connection, StoreError> {
@@ -272,6 +286,54 @@ fn apply_evidence(
             params![wtxid, txid, raw_transaction, event.event_id],
         )?;
     }
+
+    if let Evidence::CaptureGap {
+        input,
+        reason,
+        certainty,
+    } = &event.evidence
+    {
+        let gap_at_ms = to_sqlite_integer(event.observed_at_ms, "observed_at_ms")?;
+        transaction.execute(
+            "INSERT INTO source_capture_state (
+                source_id, first_gap_at_ms, latest_gap_at_ms, marker_count,
+                strongest_certainty, latest_input, latest_reason, latest_evidence_event_id
+             ) VALUES (?1, ?2, ?2, 1, ?3, ?4, ?5, ?6)
+             ON CONFLICT (source_id) DO UPDATE SET
+                first_gap_at_ms = MIN(source_capture_state.first_gap_at_ms, excluded.first_gap_at_ms),
+                latest_gap_at_ms = MAX(source_capture_state.latest_gap_at_ms, excluded.latest_gap_at_ms),
+                marker_count = source_capture_state.marker_count + 1,
+                strongest_certainty = CASE
+                    WHEN source_capture_state.strongest_certainty = 'known_loss'
+                        OR excluded.strongest_certainty = 'known_loss'
+                    THEN 'known_loss'
+                    ELSE 'possible_loss'
+                END,
+                latest_input = CASE
+                    WHEN excluded.latest_gap_at_ms >= source_capture_state.latest_gap_at_ms
+                    THEN excluded.latest_input
+                    ELSE source_capture_state.latest_input
+                END,
+                latest_reason = CASE
+                    WHEN excluded.latest_gap_at_ms >= source_capture_state.latest_gap_at_ms
+                    THEN excluded.latest_reason
+                    ELSE source_capture_state.latest_reason
+                END,
+                latest_evidence_event_id = CASE
+                    WHEN excluded.latest_gap_at_ms >= source_capture_state.latest_gap_at_ms
+                    THEN excluded.latest_evidence_event_id
+                    ELSE source_capture_state.latest_evidence_event_id
+                END",
+            params![
+                event.source_id.as_str(),
+                gap_at_ms,
+                capture_gap_certainty_as_str(*certainty),
+                input,
+                reason,
+                event.event_id,
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -300,27 +362,68 @@ fn upsert_membership(
     Ok(())
 }
 
-fn membership_from_row(row: &rusqlite::Row<'_>) -> Result<MembershipRow, rusqlite::Error> {
-    let source_id: String = row.get(0)?;
-    let updated_at_ms: i64 = row.get(3)?;
-    Ok(MembershipRow {
-        source_id: SourceId::new(source_id).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
-        txid: row.get(1)?,
-        present: row.get(2)?,
-        updated_at_ms: u64::try_from(updated_at_ms).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Integer,
-                Box::new(error),
-            )
-        })?,
-        evidence_event_id: row.get(4)?,
+fn mempool_entry_from_row(row: &rusqlite::Row<'_>) -> Result<MempoolEntry, rusqlite::Error> {
+    Ok(MempoolEntry {
+        txid: row.get(0)?,
+        updated_at_ms: nonnegative_integer_from_row(row.get(1)?, 1)?,
+        evidence_event_id: row.get(2)?,
+    })
+}
+
+fn source_health_from_row(row: &rusqlite::Row<'_>) -> Result<SourceHealth, rusqlite::Error> {
+    let last_seen_at_ms = nonnegative_integer_from_row(row.get(0)?, 0)?;
+    let first_gap_at_ms = row.get::<_, Option<i64>>(1)?;
+    let capture = if let Some(first_gap_at_ms) = first_gap_at_ms {
+        let certainty = row.get::<_, String>(4)?;
+        CaptureStatus::ContainsGaps {
+            first_gap_at_ms: nonnegative_integer_from_row(first_gap_at_ms, 1)?,
+            latest_gap_at_ms: nonnegative_integer_from_row(row.get(2)?, 2)?,
+            marker_count: nonnegative_integer_from_row(row.get(3)?, 3)?,
+            strongest_certainty: capture_gap_certainty_from_str(&certainty, 4)?,
+            latest_input: row.get(5)?,
+            latest_reason: row.get(6)?,
+        }
+    } else {
+        CaptureStatus::NoReportedGaps
+    };
+    Ok(SourceHealth {
+        last_seen_at_ms,
+        capture,
+    })
+}
+
+const fn capture_gap_certainty_as_str(certainty: CaptureGapCertainty) -> &'static str {
+    match certainty {
+        CaptureGapCertainty::PossibleLoss => "possible_loss",
+        CaptureGapCertainty::KnownLoss => "known_loss",
+    }
+}
+
+fn capture_gap_certainty_from_str(
+    certainty: &str,
+    column: usize,
+) -> Result<CaptureGapCertainty, rusqlite::Error> {
+    match certainty {
+        "possible_loss" => Ok(CaptureGapCertainty::PossibleLoss),
+        "known_loss" => Ok(CaptureGapCertainty::KnownLoss),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported capture gap certainty {certainty}"),
+            )),
+        )),
+    }
+}
+
+fn nonnegative_integer_from_row(value: i64, column: usize) -> Result<u64, rusqlite::Error> {
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
     })
 }
 
@@ -330,7 +433,9 @@ fn to_sqlite_integer(value: u64, field: &'static str) -> Result<i64, StoreError>
 
 #[cfg(test)]
 mod tests {
-    use atlas_model::{Evidence, NormalizedEvent, SourceSessionId};
+    use atlas_model::{
+        CaptureGapCertainty, CaptureStatus, Evidence, NormalizedEvent, SourceSessionId,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -344,6 +449,10 @@ mod tests {
         Store::migrate(&path).expect("migrate");
         let store = Store::open(path).expect("open");
         (temporary, store)
+    }
+
+    fn source() -> SourceId {
+        SourceId::new("source-a").expect("source")
     }
 
     fn added_event() -> NormalizedEvent {
@@ -361,15 +470,42 @@ mod tests {
         local_sequence: u64,
         evidence: Evidence,
     ) -> NormalizedEvent {
-        NormalizedEvent::new(
-            SourceId::new("source-a").expect("source"),
-            SourceSessionId::new(source_session_id).expect("session"),
+        event_for_source_at(
+            "source-a",
+            source_session_id,
             local_sequence,
             100,
             101,
             evidence,
         )
+    }
+
+    fn event_for_source_at(
+        source_id: &str,
+        source_session_id: &str,
+        local_sequence: u64,
+        observed_at_ms: u64,
+        received_at_ms: u64,
+        evidence: Evidence,
+    ) -> NormalizedEvent {
+        NormalizedEvent::new(
+            SourceId::new(source_id).expect("source"),
+            SourceSessionId::new(source_session_id).expect("session"),
+            local_sequence,
+            observed_at_ms,
+            received_at_ms,
+            evidence,
+        )
         .expect("event")
+    }
+
+    fn capture_status(store: &Store, source_id: &SourceId) -> CaptureStatus {
+        store
+            .mempool(source_id)
+            .expect("mempool")
+            .expect("known source")
+            .health
+            .capture
     }
 
     #[test]
@@ -381,7 +517,10 @@ mod tests {
             store.ingest(&event).expect("duplicate"),
             IngestStatus::Duplicate
         );
-        let snapshot = store.mempool(None).expect("mempool");
+        let snapshot = store
+            .mempool(&source())
+            .expect("mempool")
+            .expect("known source");
         assert_eq!(snapshot.memberships.len(), 1);
         assert_eq!(snapshot.memberships[0].txid, TXID);
     }
@@ -445,7 +584,14 @@ mod tests {
             })
             .expect("ordered batch");
 
-        assert!(store.mempool(None).expect("mempool").memberships.is_empty());
+        assert!(
+            store
+                .mempool(&source())
+                .expect("mempool")
+                .expect("known source")
+                .memberships
+                .is_empty()
+        );
         let membership = Connection::open(temporary.path().join("atlas.db"))
             .expect("inspect database")
             .query_row(
@@ -496,7 +642,14 @@ mod tests {
             store.ingest_batch(&request),
             Err(StoreError::ConflictingEvent { .. })
         ));
-        assert!(store.mempool(None).expect("mempool").memberships.is_empty());
+        assert!(
+            store
+                .mempool(&source())
+                .expect("mempool")
+                .expect("known source")
+                .memberships
+                .is_empty()
+        );
         let event_count = Connection::open(temporary.path().join("atlas.db"))
             .expect("inspect database")
             .query_row("SELECT COUNT(*) FROM event", [], |row| row.get::<_, i64>(0))
@@ -547,7 +700,7 @@ mod tests {
     fn rejection_is_evidence_without_membership() {
         let (_temporary, store) = test_store();
         let event = NormalizedEvent::new(
-            SourceId::new("source-a").expect("source"),
+            source(),
             SourceSessionId::new("session-a").expect("session"),
             2,
             100,
@@ -559,7 +712,274 @@ mod tests {
         )
         .expect("event");
         store.ingest(&event).expect("ingest");
-        assert!(store.mempool(None).expect("mempool").memberships.is_empty());
+        assert!(
+            store
+                .mempool(&source())
+                .expect("mempool")
+                .expect("known source")
+                .memberships
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn known_source_without_gap_markers_reports_no_reported_gaps() {
+        let (_temporary, store) = test_store();
+        store.ingest(&added_event()).expect("ingest");
+
+        let snapshot = store
+            .mempool(&source())
+            .expect("mempool")
+            .expect("known source");
+        assert_eq!(snapshot.source_id, source());
+        assert_eq!(snapshot.health.last_seen_at_ms, 101);
+        assert_eq!(snapshot.health.capture, CaptureStatus::NoReportedGaps);
+        assert_eq!(snapshot.memberships.len(), 1);
+        assert_eq!(
+            store
+                .mempool(&SourceId::new("unknown").expect("source"))
+                .expect("mempool"),
+            None
+        );
+    }
+
+    #[test]
+    fn capture_gap_projection_counts_markers_and_keeps_strongest_certainty() {
+        let (_temporary, store) = test_store();
+        let possible = event_for_source_at(
+            "source-a",
+            "session-a",
+            1,
+            200,
+            201,
+            Evidence::CaptureGap {
+                input: "peer_observer_nats".to_owned(),
+                reason: "disconnected".to_owned(),
+                certainty: CaptureGapCertainty::PossibleLoss,
+            },
+        );
+        let known = event_for_source_at(
+            "source-a",
+            "session-a",
+            2,
+            300,
+            301,
+            Evidence::CaptureGap {
+                input: "peer_observer_nats".to_owned(),
+                reason: "slow_consumer".to_owned(),
+                certainty: CaptureGapCertainty::KnownLoss,
+            },
+        );
+
+        store.ingest(&possible).expect("possible gap");
+        store.ingest(&known).expect("known gap");
+
+        assert_eq!(
+            capture_status(&store, &source()),
+            CaptureStatus::ContainsGaps {
+                first_gap_at_ms: 200,
+                latest_gap_at_ms: 300,
+                marker_count: 2,
+                strongest_certainty: CaptureGapCertainty::KnownLoss,
+                latest_input: "peer_observer_nats".to_owned(),
+                latest_reason: "slow_consumer".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_capture_gap_does_not_increment_marker_count() {
+        let (_temporary, store) = test_store();
+        let gap = event_for_source_at(
+            "source-a",
+            "session-a",
+            1,
+            200,
+            201,
+            Evidence::CaptureGap {
+                input: "peer_observer_nats".to_owned(),
+                reason: "disconnected".to_owned(),
+                certainty: CaptureGapCertainty::PossibleLoss,
+            },
+        );
+
+        assert_eq!(store.ingest(&gap).expect("first"), IngestStatus::Applied);
+        assert_eq!(
+            store.ingest(&gap).expect("duplicate"),
+            IngestStatus::Duplicate
+        );
+        assert!(matches!(
+            capture_status(&store, &source()),
+            CaptureStatus::ContainsGaps {
+                marker_count: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn membership_reconciliation_does_not_change_capture_gap_state() {
+        let (_temporary, store) = test_store();
+        let gap = event_for_source_at(
+            "source-a",
+            "session-a",
+            1,
+            200,
+            201,
+            Evidence::CaptureGap {
+                input: "peer_observer_nats".to_owned(),
+                reason: "disconnected".to_owned(),
+                certainty: CaptureGapCertainty::PossibleLoss,
+            },
+        );
+        store.ingest(&gap).expect("gap");
+        let before = capture_status(&store, &source());
+        store
+            .ingest(&event_for_source_at(
+                "source-a",
+                "session-a",
+                2,
+                400,
+                401,
+                Evidence::MempoolReconciled {
+                    txid: TXID.to_owned(),
+                    present: true,
+                },
+            ))
+            .expect("reconcile");
+
+        assert_eq!(capture_status(&store, &source()), before);
+    }
+
+    #[test]
+    fn gap_only_source_is_visible_empty_and_capture_state_is_source_local() {
+        let (_temporary, store) = test_store();
+        store
+            .ingest(&event_for_source_at(
+                "source-a",
+                "session-a",
+                1,
+                200,
+                201,
+                Evidence::CaptureGap {
+                    input: "peer_observer_nats".to_owned(),
+                    reason: "slow_consumer".to_owned(),
+                    certainty: CaptureGapCertainty::KnownLoss,
+                },
+            ))
+            .expect("gap");
+        store
+            .ingest(&event_for_source_at(
+                "source-b",
+                "session-b",
+                1,
+                300,
+                301,
+                Evidence::MempoolAdded {
+                    txid: TXID.to_owned(),
+                },
+            ))
+            .expect("membership");
+
+        let source_a = store
+            .mempool(&source())
+            .expect("mempool")
+            .expect("source a");
+        assert!(source_a.memberships.is_empty());
+        assert!(matches!(
+            source_a.health.capture,
+            CaptureStatus::ContainsGaps { .. }
+        ));
+        let source_b_id = SourceId::new("source-b").expect("source");
+        let source_b = store
+            .mempool(&source_b_id)
+            .expect("mempool")
+            .expect("source b");
+        assert_eq!(source_b.memberships.len(), 1);
+        assert_eq!(source_b.health.capture, CaptureStatus::NoReportedGaps);
+    }
+
+    #[test]
+    fn latest_capture_details_follow_latest_marker_timestamp() {
+        let (_temporary, store) = test_store();
+        for event in [
+            event_for_source_at(
+                "source-a",
+                "session-a",
+                1,
+                300,
+                301,
+                Evidence::CaptureGap {
+                    input: "newer-input".to_owned(),
+                    reason: "newer-reason".to_owned(),
+                    certainty: CaptureGapCertainty::PossibleLoss,
+                },
+            ),
+            event_for_source_at(
+                "source-a",
+                "session-a",
+                2,
+                100,
+                302,
+                Evidence::CaptureGap {
+                    input: "older-input".to_owned(),
+                    reason: "older-reason".to_owned(),
+                    certainty: CaptureGapCertainty::KnownLoss,
+                },
+            ),
+        ] {
+            store.ingest(&event).expect("gap");
+        }
+
+        assert_eq!(
+            capture_status(&store, &source()),
+            CaptureStatus::ContainsGaps {
+                first_gap_at_ms: 100,
+                latest_gap_at_ms: 300,
+                marker_count: 2,
+                strongest_certainty: CaptureGapCertainty::KnownLoss,
+                latest_input: "newer-input".to_owned(),
+                latest_reason: "newer-reason".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn migration_rejects_stale_schema_version() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join("atlas.db");
+        let connection = Connection::open(&path).expect("create database");
+        connection
+            .pragma_update(None, "user_version", 1)
+            .expect("schema version");
+        drop(connection);
+
+        assert!(matches!(
+            Store::migrate(path),
+            Err(StoreError::SchemaVersion {
+                found: 1,
+                expected: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn migration_rejects_future_schema_version() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join("atlas.db");
+        let connection = Connection::open(&path).expect("create database");
+        connection
+            .pragma_update(None, "user_version", 3)
+            .expect("schema version");
+        drop(connection);
+
+        assert!(matches!(
+            Store::migrate(path),
+            Err(StoreError::SchemaVersion {
+                found: 3,
+                expected: 2
+            })
+        ));
     }
 
     #[test]
@@ -571,7 +991,7 @@ mod tests {
             Store::open(path),
             Err(StoreError::SchemaVersion {
                 found: 0,
-                expected: 1
+                expected: 2
             })
         ));
     }

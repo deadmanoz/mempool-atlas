@@ -6,8 +6,8 @@ mode="${1:-}"
 database="${2:-}"
 component="${3:-server}"
 
-if [[ "$mode" != "migrate" && "$mode" != "backup-only" ]]; then
-    echo "usage: $0 <migrate|backup-only> <database-path> [server|agent]" >&2
+if [[ "$mode" != "migrate" && "$mode" != "reinitialize" && "$mode" != "backup-only" ]]; then
+    echo "usage: $0 <migrate|reinitialize|backup-only> <database-path> [server|agent]" >&2
     exit 2
 fi
 
@@ -46,18 +46,28 @@ if [[ "$mode" == "backup-only" ]]; then
 fi
 
 mkdir -p "$(dirname "$database")"
+if [[ "$mode" == "reinitialize" ]]; then
+    rm -f "$database" "$database-wal" "$database-shm"
+fi
+
 if [[ "$component" == "agent" ]]; then
     migration_command=(cargo run -p atlas-agent -- migrate --database "$database")
 else
     migration_command=(cargo run -p atlas-server -- migrate --database "$database")
 fi
 if "${migration_command[@]}"; then
-    exit 0
+    integrity="$(sqlite3 "$database" 'PRAGMA integrity_check;')"
+    if [[ "$integrity" == "ok" ]]; then
+        exit 0
+    fi
+    echo "migration failed integrity check: $integrity" >&2
 fi
 
 if [[ -n "$backup" ]]; then
     echo "migration failed; restoring $backup" >&2
     rm -f "$database" "$database-wal" "$database-shm"
     cp "$backup" "$database"
+else
+    rm -f "$database" "$database-wal" "$database-shm"
 fi
 exit 1

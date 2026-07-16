@@ -7,14 +7,14 @@ use bitcoin::{Txid, Wtxid};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
 pub const MAX_INGEST_BATCH_EVENTS: usize = 512;
 pub const MAX_INGEST_BATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ModelError {
     #[error("{field} must not be empty")]
-    EmptyIdentifier { field: &'static str },
+    EmptyField { field: &'static str },
     #[error("{field} contains unsupported characters")]
     InvalidIdentifier { field: &'static str },
     #[error("invalid txid: {0}")]
@@ -155,7 +155,9 @@ impl NormalizedEvent {
                 }
                 mutations
             }
-            Evidence::MempoolRejected { .. } | Evidence::P2pTransaction { .. } => Vec::new(),
+            Evidence::MempoolRejected { .. }
+            | Evidence::P2pTransaction { .. }
+            | Evidence::CaptureGap { .. } => Vec::new(),
         }
     }
 }
@@ -189,6 +191,11 @@ pub enum Evidence {
         peer_id: Option<u64>,
         inbound: Option<bool>,
     },
+    CaptureGap {
+        input: String,
+        reason: String,
+        certainty: CaptureGapCertainty,
+    },
 }
 
 impl Evidence {
@@ -209,6 +216,10 @@ impl Evidence {
                 validate_txid(txid)?;
                 validate_wtxid(wtxid)
             }
+            Self::CaptureGap { input, reason, .. } => {
+                ensure_nonempty("input", input)?;
+                ensure_nonempty("reason", reason)
+            }
         }
     }
 
@@ -221,8 +232,16 @@ impl Evidence {
             Self::MempoolRejected { .. } => "mempool_rejected",
             Self::MempoolReplaced { .. } => "mempool_replaced",
             Self::P2pTransaction { .. } => "p2p_transaction",
+            Self::CaptureGap { .. } => "capture_gap",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureGapCertainty {
+    PossibleLoss,
+    KnownLoss,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -264,18 +283,37 @@ impl MembershipMutation {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct MembershipRow {
-    pub source_id: SourceId,
+pub struct MempoolEntry {
     pub txid: String,
-    pub present: bool,
     pub updated_at_ms: u64,
     pub evidence_event_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MempoolSnapshot {
-    pub source_id: Option<SourceId>,
-    pub memberships: Vec<MembershipRow>,
+    pub source_id: SourceId,
+    pub health: SourceHealth,
+    pub memberships: Vec<MempoolEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceHealth {
+    pub last_seen_at_ms: u64,
+    pub capture: CaptureStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CaptureStatus {
+    NoReportedGaps,
+    ContainsGaps {
+        first_gap_at_ms: u64,
+        latest_gap_at_ms: u64,
+        marker_count: u64,
+        strongest_certainty: CaptureGapCertainty,
+        latest_input: String,
+        latest_reason: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -328,7 +366,7 @@ pub struct IngestBatchResponse {
 
 fn ensure_nonempty(field: &'static str, value: &str) -> Result<(), ModelError> {
     if value.trim().is_empty() {
-        return Err(ModelError::EmptyIdentifier { field });
+        return Err(ModelError::EmptyField { field });
     }
     if matches!(field, "source_id" | "source_session_id")
         && !value
@@ -589,6 +627,56 @@ mod tests {
             reason: "policy".to_owned(),
         });
         assert!(event.membership_mutations().is_empty());
+    }
+
+    #[test]
+    fn capture_gap_is_valid_non_membership_evidence() {
+        let event = event(Evidence::CaptureGap {
+            input: "peer_observer_nats".to_owned(),
+            reason: "slow_consumer".to_owned(),
+            certainty: CaptureGapCertainty::KnownLoss,
+        });
+
+        assert_eq!(event.schema_version, 2);
+        assert_eq!(event.evidence.kind(), "capture_gap");
+        assert!(event.membership_mutations().is_empty());
+        assert_eq!(
+            serde_json::to_value(&event.evidence).expect("serialize evidence"),
+            serde_json::json!({
+                "kind": "capture_gap",
+                "input": "peer_observer_nats",
+                "reason": "slow_consumer",
+                "certainty": "known_loss"
+            })
+        );
+    }
+
+    #[test]
+    fn capture_gap_requires_input_and_reason() {
+        for evidence in [
+            Evidence::CaptureGap {
+                input: " ".to_owned(),
+                reason: "disconnected".to_owned(),
+                certainty: CaptureGapCertainty::PossibleLoss,
+            },
+            Evidence::CaptureGap {
+                input: "peer_observer_nats".to_owned(),
+                reason: String::new(),
+                certainty: CaptureGapCertainty::PossibleLoss,
+            },
+        ] {
+            assert!(matches!(
+                NormalizedEvent::new(
+                    SourceId::new("source-a").expect("source"),
+                    SourceSessionId::new("session-a").expect("session"),
+                    7,
+                    1_000,
+                    1_001,
+                    evidence,
+                ),
+                Err(ModelError::EmptyField { .. })
+            ));
+        }
     }
 
     #[test]

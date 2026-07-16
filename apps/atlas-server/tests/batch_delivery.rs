@@ -102,7 +102,10 @@ async fn reconciliation_batches_drain_before_later_live_evidence() {
     assert_eq!(delivered_batch_sizes, [512, 512, 1]);
     assert_eq!(single_deliveries, 1);
     assert_eq!(outbox.pending_count().expect("pending count"), 0);
-    let snapshot = store.mempool(Some(&source())).expect("central mempool");
+    let snapshot = store
+        .mempool(&source())
+        .expect("central mempool")
+        .expect("known source");
     assert_eq!(snapshot.memberships.len(), 1_024);
     server.abort();
 }
@@ -184,8 +187,9 @@ async fn committed_batch_with_lost_response_retries_after_agent_reopen() {
     assert_eq!(outbox.pending_count().expect("pending after loss"), 3);
     assert_eq!(
         store
-            .mempool(Some(&source()))
+            .mempool(&source())
             .expect("central")
+            .expect("known source")
             .memberships
             .len(),
         3

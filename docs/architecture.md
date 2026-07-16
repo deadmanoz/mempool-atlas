@@ -1,6 +1,6 @@
 # Architecture
 
-The self-contained [system architecture visualisation](mempool-atlas-system.html) shows the implemented node-local data path, source-partitioned central state, and the planned comparison and classification layer.
+The self-contained [system architecture visualisation](mempool-atlas-system.html) shows the implemented node-local data path, primary single-source view, source-partitioned central state, and the planned comparison and classification layer.
 
 Mempool Atlas is divided into two Rust process boundaries and one browser client.
 
@@ -16,20 +16,20 @@ Delivery is an independent runtime capability. It starts from the persisted FIFO
 
 The server applies a reconciliation batch sequentially in one SQLite transaction and returns one ordered acknowledgement per event. The agent atomically removes the prefix only after a complete same-order HTTP 202 response. Network errors, non-202 responses, malformed or mismatched acknowledgements, and server conflicts retain the entire prefix. A crash or lost response after central commit retries the same events, which central ingest recognizes as duplicates. No new checkpoint or source-reset semantics are introduced.
 
-Periodic capture accounting makes the volume policy observable by reporting persisted and policy-suppressed observations with the pending outbox depth. An intentional outbound suppression is not reported as evidence loss; slow-consumer drops remain a separate degraded-capture signal.
+Periodic capture accounting makes the volume policy observable by reporting persisted and policy-suppressed observations with the pending outbox depth. An intentional outbound suppression is not reported as evidence loss. A NATS slow-consumer notice is persisted as known capture loss and a disconnect as possible capture loss. These markers describe historical peer-observer evidence integrity. RPC reconciliation may repair current membership, but it never clears or weakens capture-gap history.
 
 The agent database is part of the source's durable identity and must use persistent storage. One agent writer and one database are allowed per source, and an existing database refuses a different source ID. Losing it discards pending evidence and the effective projection, so deleting it is not a supported reset path. An explicit protocol for resetting or rebaselining central source state after database loss remains deferred.
 
 ## Central service and browser
 
-`atlas-server` ingests normalized events idempotently through a single-event endpoint and an atomic reconciliation-batch endpoint, reduces current membership into SQLite, and exposes read-only browser data. The browser fetches a membership checkpoint, and its isolated state reducer rejects sequence gaps in preparation for streamed deltas.
+`atlas-server` ingests normalized events idempotently through a single-event endpoint and an atomic reconciliation-batch endpoint, reduces current membership and capture-gap state into SQLite, and exposes read-only browser data. `GET /api/v1/sources/{source_id}/mempool` returns one source snapshot containing current membership, last accepted evidence time, and historical capture integrity. The browser fetches and renders that selected-source snapshot. Streaming and delta reduction will be designed only when the product needs them.
 
-Central storage is shared operationally, not semantically. Every event remains labelled with its `source_id`, and `current_membership` is keyed by `(source_id, txid)`, so the same transaction in Core and Knots produces two independent membership records. Transaction variants can be deduplicated by `wtxid` because the serialized transaction is an intrinsic fact rather than source state.
+Central storage is shared operationally, not semantically. Every event remains labelled with its `source_id`, `current_membership` is keyed by `(source_id, txid)`, and capture integrity is projected per source, so the same transaction or capture condition in Core and Knots produces independent source state. Transaction variants can be deduplicated by `wtxid` because the serialized transaction is an intrinsic fact rather than source state.
 
-There is no canonical Atlas mempool. Shared, source-only, and divergent sets are derived comparison views over a selected group of source projections. A short-lived fork therefore does not require Atlas to manufacture or persist mixed membership state.
+One selected source is the primary Atlas mempool view. Atlas never constructs a combined cross-source mempool. Shared, source-only, and divergent sets will be computed by an optional comparison workspace that consumes two or more independent source snapshots. A fork deployment may make that workspace the landing view without changing Atlas storage semantics or the long-lived single-source product.
 
 The shared model never hard-codes Core, Knots, fork heights, or deployment hostnames. Fork-specific source profiles and optional classifiers are configuration layered on top of the generic observation model.
 
 ## Operations
 
-Both central and agent SQLite migrations run through `scripts/migrate-safe.sh`, which creates and validates a backup before changing an existing database. Use `just db-migrate-dev` for the central service and `just agent-db-migrate-dev` for the node-local agent. After configuring the required environment values in an untracked `.env`, start them with `just dev` and `just agent-dev` respectively. Deploy a batch-capable server before upgrading an agent; the newer server retains the single endpoint for older agents.
+Both central and agent SQLite operations run through `scripts/migrate-safe.sh`, which creates and validates a backup before changing an existing database. The current clean preproduction schema is generation 2. Fresh databases use `just db-migrate-dev` and `just agent-db-migrate-dev`; generation 1 is rejected. Replace an existing preproduction deployment by stopping every Atlas process, running `just db-reinitialize-deploy` centrally and `just agent-db-reinitialize-deploy` for every source, then restarting matching server and agent binaries. The reinitialization commands preserve verified backups and central plus source state must be replaced as one coordinated operation.

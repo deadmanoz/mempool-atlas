@@ -1,7 +1,7 @@
 use atlas_agent::peer_observer::normalize_payload;
 use atlas_model::{
-    Evidence, IngestBatchRequest, IngestBatchResponse, IngestResponse, IngestStatus,
-    MAX_INGEST_BATCH_BODY_BYTES, MempoolSnapshot, NormalizedEvent,
+    CaptureGapCertainty, CaptureStatus, Evidence, IngestBatchRequest, IngestBatchResponse,
+    IngestResponse, IngestStatus, MAX_INGEST_BATCH_BODY_BYTES, MempoolSnapshot, NormalizedEvent,
 };
 use atlas_model::{SourceId, SourceSessionId};
 use atlas_server::{Store, router};
@@ -56,7 +56,7 @@ async fn event_is_idempotent_and_visible_in_read_api() {
 
     let response = application
         .oneshot(
-            Request::get("/api/v1/mempool?source=source-a")
+            Request::get("/api/v1/sources/source-a/mempool")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -67,6 +67,8 @@ async fn event_is_idempotent_and_visible_in_read_api() {
         .await
         .expect("response body");
     let snapshot: MempoolSnapshot = serde_json::from_slice(&bytes).expect("snapshot");
+    assert_eq!(snapshot.source_id.as_str(), "source-a");
+    assert_eq!(snapshot.health.capture, CaptureStatus::NoReportedGaps);
     assert_eq!(snapshot.memberships.len(), 1);
     assert_eq!(snapshot.memberships[0].txid, TXID);
 }
@@ -150,7 +152,12 @@ async fn event_batch_rejects_mixed_sources_before_ingest() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(store.mempool(None).expect("mempool").memberships.is_empty());
+    assert_eq!(
+        store
+            .mempool(&SourceId::new("source-a").expect("source"))
+            .expect("mempool"),
+        None
+    );
 }
 
 #[tokio::test]
@@ -174,7 +181,7 @@ async fn event_batch_rejects_a_body_above_the_wire_limit() {
 }
 
 #[tokio::test]
-async fn same_txid_from_two_sources_remains_two_memberships() {
+async fn same_txid_from_two_sources_remains_isolated_by_source_endpoint() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let database = temporary.path().join("atlas.db");
     Store::migrate(&database).expect("migrate");
@@ -197,9 +204,85 @@ async fn same_txid_from_two_sources_remains_two_memberships() {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
+    for source_id in ["source-a", "source-b"] {
+        let response = application
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/sources/{source_id}/mempool"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let snapshot: MempoolSnapshot = serde_json::from_slice(&bytes).expect("snapshot");
+        assert_eq!(snapshot.source_id.as_str(), source_id);
+        assert_eq!(snapshot.memberships.len(), 1);
+        assert_eq!(snapshot.memberships[0].txid, TXID);
+    }
+}
+
+#[tokio::test]
+async fn source_read_rejects_invalid_source_id_and_returns_not_found_for_unknown_source() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let database = temporary.path().join("atlas.db");
+    Store::migrate(&database).expect("migrate");
+    let application = router(Store::open(database).expect("store"));
+
+    for (path, expected_status) in [
+        ("/api/v1/sources/source!/mempool", StatusCode::BAD_REQUEST),
+        (
+            "/api/v1/sources/unknown-source/mempool",
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let response = application
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), expected_status);
+    }
+}
+
+#[tokio::test]
+async fn gap_only_source_exposes_capture_integrity_with_an_empty_mempool() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let database = temporary.path().join("atlas.db");
+    Store::migrate(&database).expect("migrate");
+    let application = router(Store::open(database).expect("store"));
+    let gap = NormalizedEvent::new(
+        SourceId::new("source-a").expect("source"),
+        SourceSessionId::new("session-a").expect("session"),
+        1,
+        1_721_234_567_897,
+        1_721_234_567_897,
+        Evidence::CaptureGap {
+            input: "peer_observer_nats".to_owned(),
+            reason: "slow_consumer".to_owned(),
+            certainty: CaptureGapCertainty::KnownLoss,
+        },
+    )
+    .expect("gap event");
+
+    let response = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&gap).expect("event json")))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
     let response = application
         .oneshot(
-            Request::get("/api/v1/mempool")
+            Request::get("/api/v1/sources/source-a/mempool")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -210,17 +293,17 @@ async fn same_txid_from_two_sources_remains_two_memberships() {
         .await
         .expect("response body");
     let snapshot: MempoolSnapshot = serde_json::from_slice(&bytes).expect("snapshot");
-
-    assert_eq!(snapshot.source_id, None);
-    assert_eq!(snapshot.memberships.len(), 2);
-    assert!(snapshot.memberships.iter().all(|row| row.txid == TXID));
+    assert!(snapshot.memberships.is_empty());
     assert_eq!(
-        snapshot
-            .memberships
-            .iter()
-            .map(|row| row.source_id.as_str())
-            .collect::<Vec<_>>(),
-        ["source-a", "source-b"]
+        snapshot.health.capture,
+        CaptureStatus::ContainsGaps {
+            first_gap_at_ms: 1_721_234_567_897,
+            latest_gap_at_ms: 1_721_234_567_897,
+            marker_count: 1,
+            strongest_certainty: CaptureGapCertainty::KnownLoss,
+            latest_input: "peer_observer_nats".to_owned(),
+            latest_reason: "slow_consumer".to_owned(),
+        }
     );
 }
 

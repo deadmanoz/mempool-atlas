@@ -103,7 +103,8 @@ button:disabled {
 }
 
 .status,
-.empty {
+.empty,
+.capture-status {
   margin: 0;
   padding: 1rem 1.25rem;
   color: #9aacbf;
@@ -111,6 +112,25 @@ button:disabled {
 
 .status[data-state="error"] {
   color: #ff9a9a;
+}
+
+.capture-status {
+  border-top: 1px solid #263444;
+  border-bottom: 1px solid #263444;
+  background: rgb(25 34 45 / 72%);
+  line-height: 1.55;
+}
+
+.capture-status[data-certainty="possible_loss"] {
+  color: #ffd38a;
+  border-color: #7d5b26;
+  background: rgb(95 64 17 / 28%);
+}
+
+.capture-status[data-certainty="known_loss"] {
+  color: #ffc0c0;
+  border-color: #853f3f;
+  background: rgb(105 34 34 / 32%);
 }
 
 .table-wrap {
@@ -135,11 +155,6 @@ th {
   font-size: 0.72rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-}
-
-td:first-child {
-  color: #56c7d9;
-  font-weight: 650;
 }
 
 code {

@@ -299,25 +299,23 @@
   <body>
     <main>
       <p class="eyebrow">Mempool Atlas · system architecture</p>
-      <h1>Evidence arrives fast. RPC keeps membership honest.</h1>
+      <h1>Swim in one mempool. Compare only when the question requires it.</h1>
       <p class="lede">
-        Each monitored Bitcoin implementation gets the same node-local
-        collector. peer-observer records the forensic story, RPC reconciles what
-        is actually present, and the central service keeps one source-labelled
-        projection per node. Cross-source comparisons are derived on demand,
-        never stored as a merged Atlas mempool.
+        One selected Bitcoin node and its observed mempool form the primary
+        Mempool Atlas experience. peer-observer records the forensic story, RPC
+        reconciles what is actually present, and the central service keeps each
+        source projection independent. A fork comparison can consume multiple
+        source snapshots without turning them into one mixed mempool.
       </p>
 
       <div
         class="status-row"
         aria-label="Architecture guarantees and implementation status"
       >
-        <span class="status partitioned">no canonical Atlas mempool</span>
-        <span class="status built"
-          >solid border · live vertical slice built</span
-        >
+        <span class="status partitioned">one source · primary view</span>
+        <span class="status built">solid border · source path built</span>
         <span class="status next"
-          >dashed border · comparison and classifiers planned</span
+          >dashed border · optional consumers planned</span
         >
       </div>
 
@@ -350,60 +348,64 @@
         </div>
         <pre class="mermaid">
 flowchart TB
-  CORE["CORE SOURCE<br/>Bitcoin Core v31.1 · pruned"]
-  KNOTS["KNOTS SOURCE<br/>Bitcoin Knots · pruned"]
-  COREOBS["peer-observer + NATS<br/>all mempool · inbound P2P default<br/>all P2P for bounded diagnostics"]
-  KNOTSOBS["peer-observer + NATS<br/>all mempool · inbound P2P default<br/>all P2P for bounded diagnostics"]
-  COREAGENT["atlas-agent<br/>capture + RPC reconciliation<br/>ordered local projection"]
-  KNOTSAGENT["atlas-agent<br/>capture + RPC reconciliation<br/>ordered local projection"]
-  COREOUT[("Core durable SQLite outbox<br/>strict FIFO<br/>single live · bounded RPC prefix")]
-  KNOTSOUT[("Knots durable SQLite outbox<br/>strict FIFO<br/>single live · bounded RPC prefix")]
+  PRIMARY["SELECTED SOURCE<br/>one Bitcoin node · primary"]
+  OPTIONAL["OPTIONAL SECOND SOURCE<br/>fork or diagnostic profile"]
+  PRIMARYOBS["peer-observer + NATS<br/>mempool evidence · inbound P2P default"]
+  OPTIONALOBS["peer-observer + NATS<br/>same generic evidence contract"]
+  PRIMARYAGENT["atlas-agent<br/>capture + RPC reconciliation<br/>one source identity"]
+  OPTIONALAGENT["atlas-agent<br/>capture + RPC reconciliation<br/>one source identity"]
+  PRIMARYOUT[("Source-local SQLite outbox<br/>strict FIFO<br/>single live · bounded RPC prefix")]
+  OPTIONALOUT[("Source-local SQLite outbox<br/>independent delivery")]
 
-  CORE -->|"observed activity"| COREOBS
-  COREOBS -->|"unframed protobuf Event"| COREAGENT
-  CORE -->|"getrawmempool · fenced reconciliation"| COREAGENT
-  COREAGENT -->|"atomic projection + enqueue"| COREOUT
+  PRIMARY -->|"observed activity"| PRIMARYOBS
+  PRIMARYOBS -->|"events + capture-gap notices"| PRIMARYAGENT
+  PRIMARY -->|"getrawmempool · fenced reconciliation"| PRIMARYAGENT
+  PRIMARYAGENT -->|"atomic projection + enqueue"| PRIMARYOUT
 
-  KNOTS -->|"observed activity"| KNOTSOBS
-  KNOTSOBS -->|"unframed protobuf Event"| KNOTSAGENT
-  KNOTS -->|"getrawmempool · fenced reconciliation"| KNOTSAGENT
-  KNOTSAGENT -->|"atomic projection + enqueue"| KNOTSOUT
+  OPTIONAL -->|"observed activity"| OPTIONALOBS
+  OPTIONALOBS -->|"events + capture-gap notices"| OPTIONALAGENT
+  OPTIONAL -->|"getrawmempool · fenced reconciliation"| OPTIONALAGENT
+  OPTIONALAGENT -->|"atomic projection + enqueue"| OPTIONALOUT
 
-  subgraph CENTRAL["Central Atlas service · co-located, source-partitioned storage"]
+  subgraph CENTRAL["Central Atlas service · shared adapter, independent source state"]
     direction TB
     INGEST["POST /api/v1/events<br/>POST /api/v1/events/batch<br/>idempotent · batch atomic"]
     EVENTS[("SQLite event ledger<br/>source-labelled observations")]
     MEMBERS[("SQLite current_membership<br/>one projection per source")]
+    CAPTURE[("SQLite source_capture_state<br/>historical evidence integrity")]
     VARIANTS[("SQLite transaction_variant<br/>shared intrinsic transaction facts")]
-    CLASSIFIERS["Classifier registry + rule packs<br/>planned extension"]
-    READ["GET /api/v1/mempool<br/>labelled rows · optional source filter"]
+    READ["GET /api/v1/sources/{source_id}/mempool<br/>exactly one source snapshot"]
 
     INGEST -->|"append once · ordered transaction"| EVENTS
     INGEST -->|"apply membership mutation"| MEMBERS
+    INGEST -->|"project capture gaps"| CAPTURE
     INGEST -->|"preserve raw variant"| VARIANTS
-    EVENTS -.->|"evidence inputs"| CLASSIFIERS
     MEMBERS --> READ
+    CAPTURE --> READ
     VARIANTS -.-> READ
-    CLASSIFIERS -.-> READ
   end
 
-  COREOUT -->|"live: one event<br/>RPC: ≤512 events · ≤4 MiB<br/>complete ordered 202 ack"| INGEST
-  KNOTSOUT -->|"live: one event<br/>RPC: ≤512 events · ≤4 MiB<br/>complete ordered 202 ack"| INGEST
+  PRIMARYOUT -->|"live: one event<br/>RPC: ≤512 events · ≤4 MiB<br/>complete ordered 202 ack"| INGEST
+  OPTIONALOUT -->|"same source-scoped contract"| INGEST
 
-  TABLE["Browser table<br/>request and refresh · built"]
-  COMPARE["Derived comparison view<br/>intersection · Core-only · Knots-only<br/>never a merged mempool · next"]
-  READ --> TABLE
-  READ -.->|"derive for selected sources"| COMPARE
+  SWIM["Single-source browser<br/>swimming in the mempool · primary"]
+  WARNING["Capture-integrity warning<br/>possible or known historical gap"]
+  COMPARE["Optional comparison workspace<br/>consume independent snapshots<br/>derive intersection and differences · planned"]
+  CLASSIFIERS["Classifier rule packs<br/>optional interpretation · planned"]
 
-  class CORE,KNOTS bitcoinNode
-  class COREOBS,KNOTSOBS evidenceBuilt
-  class COREAGENT,KNOTSAGENT serviceBuilt
-  class COREOUT,KNOTSOUT dataBuilt
+  READ -->|"selected source"| SWIM
+  READ --> WARNING
+  READ -.->|"fetch each selected source"| COMPARE
+  EVENTS -.->|"evidence inputs"| CLASSIFIERS
+
+  class PRIMARY,OPTIONAL bitcoinNode
+  class PRIMARYOBS,OPTIONALOBS evidenceBuilt
+  class PRIMARYAGENT,OPTIONALAGENT serviceBuilt
+  class PRIMARYOUT,OPTIONALOUT dataBuilt
   class INGEST,READ serviceBuilt
-  class EVENTS,MEMBERS,VARIANTS dataBuilt
-  class CLASSIFIERS extensionNext
-  class TABLE uiBuilt
-  class COMPARE uiNext
+  class EVENTS,MEMBERS,CAPTURE,VARIANTS dataBuilt
+  class SWIM,WARNING uiBuilt
+  class COMPARE,CLASSIFIERS uiNext
 
   classDef bitcoinNode fill:#3d3200,stroke:#f0c040,stroke-width:2px
   classDef evidenceBuilt fill:#3d2a1a,stroke:#fb923c,stroke-width:2px
@@ -425,8 +427,9 @@ flowchart TB
             peer context, and raw transaction evidence. Mempool evidence is
             fully retained, while P2P capture defaults to inbound sightings.
             Those sightings preserve pre-validation peer evidence. Full raw
-            relay capture remains available for bounded diagnostics. Collector
-            downtime can still leave an unrecoverable forensic gap.
+            relay capture remains available for bounded diagnostics. NATS slow
+            consumption and disconnects become durable source-scoped gap markers
+            because missing forensic history cannot be recreated.
           </p>
         </article>
         <article class="legend-card state">
@@ -446,15 +449,16 @@ flowchart TB
             path, while contiguous RPC corrections use an atomic batch of at
             most 512 events and 4 MiB. A complete, same-order 202
             acknowledgement removes the whole prefix; otherwise none of it is
-            removed. Central membership remains partitioned by source.
+            removed. Membership and capture integrity remain partitioned by
+            source.
           </p>
         </article>
         <article class="legend-card extension">
           <h2>Extensible interpretation</h2>
           <p>
-            Transaction facts and classifiers remain optional layers. Fork
-            policy, data carriage, and future heuristics can evolve without
-            changing the underlying observation model.
+            Comparison and classifiers remain optional consumers. Fork policy,
+            data carriage, and future heuristics can evolve without changing a
+            source snapshot or the underlying observation model.
           </p>
         </article>
       </div>
@@ -464,15 +468,17 @@ flowchart TB
         <span>inbound-only capture is not transaction deduplication</span>
         <span>absence is not organic rejection</span>
         <span>central storage is not merged state</span>
+        <span>no reported gap is not proof of completeness</span>
+        <span>RPC repair is not forensic recovery</span>
         <span>pruning does not weaken mempool visibility</span>
         <span>at-least-once delivery is not exactly-once transport</span>
         <span>batching is not event coalescing</span>
       </div>
 
       <footer>
-        Architecture and implementation status as of 15 July 2026. Comparisons
-        are computed views over source-partitioned state. No ZMQ dependency is
-        required.
+        Architecture and implementation status as of 16 July 2026. One source is
+        the primary view; comparison is an optional derived consumer. No ZMQ
+        dependency is required.
       </footer>
     </main>
 

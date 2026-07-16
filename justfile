@@ -61,6 +61,12 @@ db-migrate-dev:
 db-migrate-deploy:
     ./scripts/migrate-safe.sh migrate "$ATLAS_DATABASE"
 
+db-reinitialize-dev:
+    ./scripts/migrate-safe.sh reinitialize "$ATLAS_DATABASE"
+
+db-reinitialize-deploy:
+    ./scripts/migrate-safe.sh reinitialize "$ATLAS_DATABASE"
+
 db-backup:
     ./scripts/migrate-safe.sh backup-only "$ATLAS_DATABASE"
 
@@ -69,6 +75,12 @@ agent-db-migrate-dev:
 
 agent-db-migrate-deploy:
     ./scripts/migrate-safe.sh migrate "$ATLAS_AGENT_DATABASE" agent
+
+agent-db-reinitialize-dev:
+    ./scripts/migrate-safe.sh reinitialize "$ATLAS_AGENT_DATABASE" agent
+
+agent-db-reinitialize-deploy:
+    ./scripts/migrate-safe.sh reinitialize "$ATLAS_AGENT_DATABASE" agent
 
 agent-db-backup:
     ./scripts/migrate-safe.sh backup-only "$ATLAS_AGENT_DATABASE" agent
