@@ -5,11 +5,12 @@ Mempool Atlas is a standalone Bitcoin mempool observation and visualization tool
 ## Architecture
 
 - `apps/atlas-agent/` owns peer-observer protobuf decoding, live NATS capture, the inbound-by-default P2P volume policy, periodic RPC reconciliation, the effective local projection, strict FIFO single-event and bounded reconciliation-batch HTTP delivery, and the source-bound SQLite outbox.
-- `apps/atlas-server/` owns the implemented idempotent single and atomic batch ingest, source-partitioned central SQLite state, and source-scoped read API. Server-side stream delivery is not implemented.
-- `crates/atlas-classifiers/` defines the required MVP classifier contract and will contain in-process rule packs. It is not a dynamic plugin system.
+- `apps/atlas-server/` owns the implemented idempotent single and atomic batch ingest, source-partitioned central SQLite state, and the source-scoped read API: source discovery, the full membership snapshot, and the aggregate mempool summary that backs the visualization workbench. Server-side stream delivery is not implemented.
+- `fixtures/` holds the peer-observer protobuf test fixture and the golden read-API response fixtures under `fixtures/api/`, which a contract test keeps equal to live router responses; regenerate them with `just regen-api-fixtures`.
+- `crates/atlas-classifiers/` defines the required MVP classifier contract, transaction shape derivation with the documented dominant-script-type rule, and the ordered baseline heuristic rule pack. Classifiers receive a parsed `bitcoin::Transaction`; the server parses raw bytes once. It is not a dynamic plugin system.
 - `crates/atlas-model/` contains shared wire and domain types. It must not depend on agent or server internals.
 - `proto/peer-observer/` vendors the minimal canonical peer-observer protobuf import closure at a recorded upstream commit.
-- `web/` is a dependency-free TypeScript/Vite client for one selected source. Its primary overview uses Canvas 2D so large mempools do not create one DOM element per transaction.
+- `web/` is a dependency-free TypeScript/Vite client for one selected source. Its primary view is the aggregate workbench over the summary endpoint, so DOM size is bounded by the bin catalog regardless of mempool depth; the per-transaction Canvas 2D swim view and membership table are an on-demand inspector.
 
 The architectural rule is that RPC reconciliation is the state plane and peer-observer is the low-latency evidence plane. Missing peer-observer events may reduce forensic detail, but must not leave current membership permanently incorrect. Delivery is independent of both inputs, and capture enqueue is ordered against RPC snapshot reconciliation by one shared projection fence. The local projection distinguishes absent, present while awaiting RPC facts, and present with fact-bearing RPC state.
 
@@ -32,6 +33,8 @@ Use `just` targets when one exists:
 - `just build` builds the Rust workspace and web client.
 - `just test` runs Rust and web tests.
 - `just test-baseline-scale` runs the explicit 200,000-transaction reconciliation-batch acceptance test in release mode.
+- `just regen-api-fixtures` rewrites the golden read-API fixtures from the deterministic seed store; review the diff before keeping it.
+- `just seed-dev` refreshes a deterministic synthetic mempool (default source `demo-node`, 20,000 transactions) through the real batch-ingest path of the running dev server; txids derive from the seed, so re-running refreshes facts instead of growing the pool.
 - `just lint` runs formatting checks, Clippy, and TypeScript checks.
 - `just proto-check` verifies the vendored peer-observer schemas against the recorded local commit.
 - `just format` formats Rust and the web client.
@@ -56,8 +59,10 @@ Use `just` targets when one exists:
 - Store explicit `unknown` or `pending` states when evidence is unavailable. Do not infer facts to fill gaps.
 - Treat node-reported mempool entry time as source state, not Atlas observation time. Derive individual base fee rate from `fee_sats / vsize` only for presentation; it is not ancestor-package mining priority.
 - Treat capture-gap state as historical evidence integrity, not current liveness. RPC may repair current membership but cannot recreate missing peer-observer history. No reported gap is not proof of completeness.
+- The aggregate summary read model never ships per-transaction rows. Canonical bins live in `atlas-model` and travel on the wire with every summary, entries awaiting RPC facts appear only as a separate count, and filter facets use known-to-match semantics instead of guessing.
+- Shape facts and classifier verdicts derive server-side, only from observed raw transaction bytes, once per txid (they are intrinsic across witness variants). Bytes that fail to decode or contradict their claimed identifiers leave the transaction underived. Each available histogram carries an explicit `underived` bucket for matching rows without shape evidence; classification instead gives such rows the honest verdict `unknown`. The agent stays evidence-only and never classifies.
 - Keep source IDs and fork presets configurable. Never commit private hostnames, credentials, peer addresses, or deployment inventory.
-- Current preproduction schema generations intentionally reject stale databases instead of carrying cross-generation logic. Replace stale state only through the backup-first `reinitialize` targets and reinitialize central state plus every source outbox together. Once production begins, SQLite migrations become append-only.
+- Current preproduction schema generations intentionally reject stale databases instead of carrying cross-generation logic. The central schema is generation 4 (adds `transaction_shape`). Replace stale state only through the backup-first `reinitialize` targets and reinitialize central state plus every source outbox together. Once production begins, SQLite migrations become append-only.
 
 ## Repository Etiquette
 

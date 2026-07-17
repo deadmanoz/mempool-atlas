@@ -4,6 +4,10 @@ All notable changes to Mempool Atlas will be documented in this file.
 
 ## [Unreleased]
 
+- Derive transaction shape facts and first classifier verdicts server-side from observed raw P2P transaction bytes: total output value, input and output counts, a documented dominant-script-type rule, and an ordered baseline heuristic rule pack (coinjoin, consolidation, batch, data, lightning, payment), persisted per txid in schema generation 4 and surfaced through every summary dimension with explicit per-histogram underived buckets instead of guesses.
+- Add a source-scoped aggregate mempool summary endpoint with canonical shared bins, server-side filter facets, optional ECDF and joint fee-size detail blocks, explicitly unavailable underived dimensions, and a source discovery endpoint, backed by golden read-API fixtures that a contract test keeps equal to live responses.
+- Add a feature-gated deterministic dev-seed tool that refreshes a synthetic per-classification mempool through the real batch-ingest path so local development has realistic data without live nodes.
+- Make an aggregate visualization workbench the primary browser view, with source discovery and switching, classification and script filter chips, switchable composition and treemap heroes, a per-class fee-rate ECDF, a joint fee-by-size heatmap with marginals, an in-payload capture-honesty banner, and five-second polling, while moving per-transaction detail behind an on-demand inspector.
 - Enrich source-local membership with exact verbose RPC virtual size, base fee, and node entry time while representing peer-observer admissions awaiting those facts explicitly.
 - Render large selected-source snapshots as a dependency-free Canvas fee-by-age swim view with bounded transaction inspection.
 - Preserve the in-process classifier contract as a required MVP extension point.
