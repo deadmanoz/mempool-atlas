@@ -1,0 +1,44 @@
+{
+  "fixtures": [
+    {
+      "body": "sources",
+      "method": "GET",
+      "path": "sources.json",
+      "request": "/api/v1/sources",
+      "scenario": "two sources with fact-bearing and awaiting-RPC memberships",
+      "status": 200
+    },
+    {
+      "body": "mempool_summary",
+      "method": "GET",
+      "path": "mempool-summary-default.json",
+      "request": "/api/v1/sources/source-a/mempool/summary",
+      "scenario": "unfiltered summary without detail blocks, over a source with derived and underived rows, awaiting-RPC entries, and a possible capture gap",
+      "status": 200
+    },
+    {
+      "body": "mempool_summary",
+      "method": "GET",
+      "path": "mempool-summary-filtered.json",
+      "request": "/api/v1/sources/source-a/mempool/summary?class=unknown&feerate_min=1&feerate_max=64",
+      "scenario": "classification facet plus inclusive fee-rate bounds shrink the matching set while totals.all is unchanged",
+      "status": 200
+    },
+    {
+      "body": "mempool_summary",
+      "method": "GET",
+      "path": "mempool-summary-detail.json",
+      "request": "/api/v1/sources/source-a/mempool/summary?detail=ecdf,joint",
+      "scenario": "optional ECDF and joint fee-size detail blocks",
+      "status": 200
+    },
+    {
+      "body": "error",
+      "method": "GET",
+      "path": "error-unknown-source.json",
+      "request": "/api/v1/sources/absent-node/mempool/summary",
+      "scenario": "summary for an unknown source",
+      "status": 404
+    }
+  ]
+}

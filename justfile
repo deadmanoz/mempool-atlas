@@ -31,6 +31,9 @@ test-web:
 test-baseline-scale:
     cargo test --release -p atlas-server --test baseline_scale -- --ignored --nocapture
 
+regen-api-fixtures:
+    cargo test -p atlas-server --test api_fixture_contract regenerate_api_fixtures -- --ignored
+
 proto-check:
     ./scripts/check-peer-observer-protos.sh
 

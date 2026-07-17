@@ -1,0 +1,337 @@
+{
+  "as_of_ms": 1752710400000,
+  "bins": {
+    "age_ms_edges": [
+      600000,
+      3600000,
+      21600000,
+      86400000,
+      259200000
+    ],
+    "classification_keys": [
+      "payment",
+      "consolidation",
+      "batch",
+      "coinjoin",
+      "data",
+      "lightning",
+      "unknown"
+    ],
+    "feerate_sat_per_vb_edges": [
+      1.0,
+      2.0,
+      4.0,
+      8.0,
+      16.0,
+      32.0,
+      64.0,
+      128.0
+    ],
+    "input_count_uppers": [
+      1,
+      5,
+      20,
+      100
+    ],
+    "output_count_uppers": [
+      1,
+      2,
+      10,
+      50
+    ],
+    "script_keys": [
+      "p2tr",
+      "p2wpkh",
+      "p2wsh",
+      "p2sh",
+      "p2pkh",
+      "op_return",
+      "other"
+    ],
+    "value_sats_edges": [
+      100000,
+      1000000,
+      10000000,
+      100000000,
+      1000000000
+    ]
+  },
+  "filter_echo": {
+    "classes": [
+      "unknown"
+    ],
+    "feerate_max": 64.0,
+    "feerate_min": 1.0
+  },
+  "health": {
+    "capture": {
+      "first_gap_at_ms": 1752706860000,
+      "latest_gap_at_ms": 1752706860000,
+      "latest_input": "peer_observer_nats",
+      "latest_reason": "disconnected",
+      "marker_count": 1,
+      "status": "contains_gaps",
+      "strongest_certainty": "possible_loss"
+    },
+    "last_seen_at_ms": 1752707580005
+  },
+  "histograms": {
+    "age": {
+      "bins": [
+        {
+          "count": 1,
+          "vsize": 141
+        },
+        {
+          "count": 1,
+          "vsize": 250
+        },
+        {
+          "count": 1,
+          "vsize": 3400
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 1,
+          "vsize": 500
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        }
+      ],
+      "status": "available",
+      "underived": {
+        "count": 0,
+        "vsize": 0
+      }
+    },
+    "classification": {
+      "bins": [
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 4,
+          "vsize": 4291
+        }
+      ],
+      "status": "available",
+      "underived": {
+        "count": 0,
+        "vsize": 0
+      }
+    },
+    "feerate": {
+      "bins": [
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 2,
+          "vsize": 3650
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 1,
+          "vsize": 141
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 1,
+          "vsize": 500
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        }
+      ],
+      "status": "available",
+      "underived": {
+        "count": 0,
+        "vsize": 0
+      }
+    },
+    "inputs": {
+      "bins": [
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        }
+      ],
+      "status": "available",
+      "underived": {
+        "count": 4,
+        "vsize": 4291
+      }
+    },
+    "outputs": {
+      "bins": [
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        }
+      ],
+      "status": "available",
+      "underived": {
+        "count": 4,
+        "vsize": 4291
+      }
+    },
+    "script": {
+      "bins": [
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        }
+      ],
+      "status": "available",
+      "underived": {
+        "count": 4,
+        "vsize": 4291
+      }
+    },
+    "value": {
+      "bins": [
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        },
+        {
+          "count": 0,
+          "vsize": 0
+        }
+      ],
+      "status": "available",
+      "underived": {
+        "count": 4,
+        "vsize": 4291
+      }
+    }
+  },
+  "source_id": "source-a",
+  "totals": {
+    "all": {
+      "count": 8,
+      "vsize": 5575
+    },
+    "awaiting_rpc": {
+      "count": 2
+    },
+    "matching": {
+      "count": 4,
+      "vsize": 4291
+    }
+  }
+}

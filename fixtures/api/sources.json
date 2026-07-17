@@ -1,0 +1,14 @@
+{
+  "sources": [
+    {
+      "last_seen_at_ms": 1752707580005,
+      "membership_count": 10,
+      "source_id": "source-a"
+    },
+    {
+      "last_seen_at_ms": 1752706860005,
+      "membership_count": 1,
+      "source_id": "source-b"
+    }
+  ]
+}

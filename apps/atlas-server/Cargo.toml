@@ -6,13 +6,16 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+atlas-classifiers = { path = "../../crates/atlas-classifiers" }
 atlas-model = { path = "../../crates/atlas-model" }
 axum.workspace = true
+bitcoin.workspace = true
 clap.workspace = true
 hex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_urlencoded.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

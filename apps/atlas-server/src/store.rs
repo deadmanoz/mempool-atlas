@@ -2,15 +2,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use atlas_classifiers::{
+    BaselineHeuristics, ClassificationInput, ClassificationStatus, Classifier, TransactionShape,
+};
 use atlas_model::{
-    CaptureGapCertainty, CaptureStatus, Evidence, IngestBatchRequest, IngestStatus,
+    CaptureGapCertainty, CaptureStatus, Classification, Evidence, IngestBatchRequest, IngestStatus,
     MembershipMutation, MempoolEntry, MempoolEntryFacts, MempoolEntryFactsStatus, MempoolSnapshot,
-    NormalizedEvent, SourceHealth, SourceId,
+    NormalizedEvent, ScriptType, SourceDescriptor, SourceHealth, SourceId,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use thiserror::Error;
+use tracing::warn;
 
-const LATEST_SCHEMA_VERSION: i64 = 3;
+use crate::summary::{FactsRow, ShapeRow, SourceMembershipFacts};
+
+const LATEST_SCHEMA_VERSION: i64 = 4;
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 
 #[derive(Clone, Debug)]
@@ -73,7 +79,7 @@ impl Store {
         }
         let transaction = connection.transaction()?;
         transaction.execute_batch(MIGRATION_1)?;
-        transaction.pragma_update(None, "user_version", 3)?;
+        transaction.pragma_update(None, "user_version", LATEST_SCHEMA_VERSION)?;
         transaction.commit()?;
         Ok(())
     }
@@ -154,6 +160,95 @@ impl Store {
             health,
             memberships,
         }))
+    }
+
+    /// Reads only what the aggregate summary needs: source health, the fact
+    /// triples of fact-bearing memberships, and the awaiting-RPC count.
+    pub fn mempool_facts(
+        &self,
+        source_id: &SourceId,
+    ) -> Result<Option<SourceMembershipFacts>, StoreError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let health = transaction
+            .query_row(
+                "SELECT
+                    source.last_seen_at_ms,
+                    source_capture_state.first_gap_at_ms,
+                    source_capture_state.latest_gap_at_ms,
+                    source_capture_state.marker_count,
+                    source_capture_state.strongest_certainty,
+                    source_capture_state.latest_input,
+                    source_capture_state.latest_reason
+                 FROM source
+                 LEFT JOIN source_capture_state USING (source_id)
+                 WHERE source.source_id = ?1",
+                [source_id.as_str()],
+                source_health_from_row,
+            )
+            .optional()?;
+        let Some(health) = health else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+
+        let mut available = Vec::new();
+        let mut awaiting_rpc_count = 0;
+        {
+            let mut statement = transaction.prepare(
+                "SELECT current_membership.vsize, current_membership.fee_sats,
+                        current_membership.entered_at_ms,
+                        transaction_shape.total_output_sats, transaction_shape.input_count,
+                        transaction_shape.output_count, transaction_shape.script_type,
+                        transaction_shape.classification
+                 FROM current_membership
+                 LEFT JOIN transaction_shape USING (txid)
+                 WHERE current_membership.source_id = ?1",
+            )?;
+            let mut rows = statement.query([source_id.as_str()])?;
+            while let Some(row) = rows.next()? {
+                match facts_row_from_row(row)? {
+                    Some(facts) => available.push(facts),
+                    None => awaiting_rpc_count += 1,
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(Some(SourceMembershipFacts {
+            health,
+            available,
+            awaiting_rpc_count,
+        }))
+    }
+
+    /// Lists every known source with its current membership count, ordered by
+    /// source ID for stable discovery responses.
+    pub fn sources(&self) -> Result<Vec<SourceDescriptor>, StoreError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT source.source_id, source.last_seen_at_ms, COUNT(current_membership.txid)
+             FROM source
+             LEFT JOIN current_membership USING (source_id)
+             GROUP BY source.source_id, source.last_seen_at_ms
+             ORDER BY source.source_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                nonnegative_integer_from_row(row.get(1)?, 1)?,
+                nonnegative_integer_from_row(row.get(2)?, 2)?,
+            ))
+        })?;
+        let mut sources = Vec::new();
+        for row in rows {
+            let (source_id, last_seen_at_ms, membership_count) = row?;
+            sources.push(SourceDescriptor {
+                source_id: SourceId::new(source_id)?,
+                last_seen_at_ms,
+                membership_count,
+            });
+        }
+        Ok(sources)
     }
 
     fn connect(&self) -> Result<Connection, StoreError> {
@@ -287,6 +382,9 @@ fn apply_evidence(
                  raw_transaction = COALESCE(transaction_variant.raw_transaction, excluded.raw_transaction)",
             params![wtxid, txid, raw_transaction, event.event_id],
         )?;
+        if let Some(raw_transaction) = raw_transaction {
+            derive_transaction_shape(transaction, event, txid, wtxid, &raw_transaction)?;
+        }
     }
 
     if let Evidence::CaptureGap {
@@ -337,6 +435,82 @@ fn apply_evidence(
         )?;
     }
     Ok(())
+}
+
+/// Derives intrinsic shape facts and a classifier verdict from observed raw
+/// transaction bytes, once per txid. Bytes that fail to decode or that do not
+/// match the claimed identifiers leave the transaction underived rather than
+/// guessing; the evidence row itself is always retained.
+fn derive_transaction_shape(
+    db: &Transaction<'_>,
+    event: &NormalizedEvent,
+    txid: &str,
+    wtxid: &str,
+    raw_transaction: &[u8],
+) -> Result<(), StoreError> {
+    let already_derived = db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM transaction_shape WHERE txid = ?1)",
+        [txid],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if already_derived {
+        return Ok(());
+    }
+    let Ok(parsed) = bitcoin::consensus::deserialize::<bitcoin::Transaction>(raw_transaction)
+    else {
+        warn!(
+            event_id = %event.event_id,
+            %txid,
+            "raw transaction bytes do not decode; shape not derived"
+        );
+        return Ok(());
+    };
+    if parsed.compute_txid().to_string() != txid || parsed.compute_wtxid().to_string() != wtxid {
+        warn!(
+            event_id = %event.event_id,
+            %txid,
+            "raw transaction bytes do not match their claimed identifiers; shape not derived"
+        );
+        return Ok(());
+    }
+    let shape = TransactionShape::derive(&parsed);
+    let result = BaselineHeuristics.classify(&ClassificationInput {
+        txid,
+        wtxid: Some(wtxid),
+        transaction: Some(&parsed),
+    });
+    let classification = result.verdict.unwrap_or(Classification::Unknown);
+    db.execute(
+        "INSERT INTO transaction_shape (
+            txid, total_output_sats, input_count, output_count, script_type,
+            classification, classification_status, classifier_id,
+            classifier_version, classifier_evidence_json, derived_from_event_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            txid,
+            to_sqlite_integer(shape.total_output_sats, "total_output_sats")?,
+            to_sqlite_integer(shape.input_count, "input_count")?,
+            to_sqlite_integer(shape.output_count, "output_count")?,
+            shape.script_type.key(),
+            classification.key(),
+            classification_status_as_str(result.status),
+            result.classifier_id,
+            result.classifier_version,
+            serde_json::to_string(&result.evidence)?,
+            event.event_id,
+        ],
+    )?;
+    Ok(())
+}
+
+const fn classification_status_as_str(status: ClassificationStatus) -> &'static str {
+    match status {
+        ClassificationStatus::Complete => "complete",
+        ClassificationStatus::Partial => "partial",
+        ClassificationStatus::Unknown => "unknown",
+        ClassificationStatus::NotApplicable => "not_applicable",
+        ClassificationStatus::Error => "error",
+    }
 }
 
 fn apply_membership_mutation(
@@ -428,6 +602,62 @@ fn mempool_entry_from_row(row: &rusqlite::Row<'_>) -> Result<MempoolEntry, rusql
         evidence_event_id: row.get(2)?,
         facts,
     })
+}
+
+fn facts_row_from_row(row: &rusqlite::Row<'_>) -> Result<Option<FactsRow>, rusqlite::Error> {
+    let vsize = row.get::<_, Option<i64>>(0)?;
+    let fee_sats = row.get::<_, Option<i64>>(1)?;
+    let entered_at_ms = row.get::<_, Option<i64>>(2)?;
+    match (vsize, fee_sats, entered_at_ms) {
+        (None, None, None) => Ok(None),
+        (Some(vsize), Some(fee_sats), Some(entered_at_ms)) => Ok(Some(FactsRow {
+            vsize: nonnegative_integer_from_row(vsize, 0)?,
+            fee_sats: nonnegative_integer_from_row(fee_sats, 1)?,
+            entered_at_ms: nonnegative_integer_from_row(entered_at_ms, 2)?,
+            shape: shape_row_from_row(row)?,
+        })),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Null,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "mempool entry contains incomplete facts",
+            )),
+        )),
+    }
+}
+
+fn shape_row_from_row(row: &rusqlite::Row<'_>) -> Result<Option<ShapeRow>, rusqlite::Error> {
+    let Some(total_output_sats) = row.get::<_, Option<i64>>(3)? else {
+        return Ok(None);
+    };
+    let script_type = row.get::<_, String>(6)?;
+    let classification = row.get::<_, String>(7)?;
+    Ok(Some(ShapeRow {
+        total_output_sats: nonnegative_integer_from_row(total_output_sats, 3)?,
+        input_count: nonnegative_integer_from_row(row.get(4)?, 4)?,
+        output_count: nonnegative_integer_from_row(row.get(5)?, 5)?,
+        script_type: ScriptType::from_key(&script_type).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                6,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unsupported script type {script_type}"),
+                )),
+            )
+        })?,
+        classification: Classification::from_key(&classification).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unsupported classification {classification}"),
+                )),
+            )
+        })?,
+    }))
 }
 
 fn source_health_from_row(row: &rusqlite::Row<'_>) -> Result<SourceHealth, rusqlite::Error> {
@@ -1117,21 +1347,169 @@ mod tests {
         );
     }
 
+    fn raw_transaction() -> bitcoin::Transaction {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::hashes::Hash;
+        use bitcoin::transaction::Version;
+        use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, WPubkeyHash, Witness};
+
+        bitcoin::Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x44; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::from_slice(&[vec![0xab; 107]]),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(4_000_000),
+                    script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x55; 20])),
+                },
+                TxOut {
+                    value: Amount::from_sat(900_000),
+                    script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x66; 20])),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn p2p_raw_bytes_derive_shape_facts_visible_in_membership_facts() {
+        let (_temporary, store) = test_store();
+        let transaction = raw_transaction();
+        let txid = transaction.compute_txid().to_string();
+        store
+            .ingest(&event_for(
+                "session-a",
+                1,
+                Evidence::P2pTransaction {
+                    txid: txid.clone(),
+                    wtxid: transaction.compute_wtxid().to_string(),
+                    raw_transaction_hex: Some(hex::encode(bitcoin::consensus::encode::serialize(
+                        &transaction,
+                    ))),
+                    peer_id: Some(3),
+                    inbound: Some(true),
+                },
+            ))
+            .expect("p2p evidence");
+        store
+            .ingest(&event_for(
+                "session-a",
+                2,
+                Evidence::MempoolReconciled {
+                    txid,
+                    membership: ReconciledMembership::Present { facts: facts() },
+                },
+            ))
+            .expect("reconciled facts");
+
+        let membership = store
+            .mempool_facts(&source())
+            .expect("facts")
+            .expect("known source");
+        assert_eq!(membership.available.len(), 1);
+        let shape = membership.available[0].shape.expect("derived shape");
+        assert_eq!(shape.total_output_sats, 4_900_000);
+        assert_eq!(shape.input_count, 1);
+        assert_eq!(shape.output_count, 2);
+        assert_eq!(shape.script_type, atlas_model::ScriptType::P2wpkh);
+        assert_eq!(shape.classification, atlas_model::Classification::Payment);
+    }
+
+    #[test]
+    fn p2p_evidence_without_raw_bytes_leaves_membership_underived() {
+        let (_temporary, store) = test_store();
+        store
+            .ingest(&event_for(
+                "session-a",
+                1,
+                Evidence::P2pTransaction {
+                    txid: TXID.to_owned(),
+                    wtxid: TXID_B.to_owned(),
+                    raw_transaction_hex: None,
+                    peer_id: Some(3),
+                    inbound: Some(true),
+                },
+            ))
+            .expect("p2p evidence");
+        store
+            .ingest(&event_for(
+                "session-a",
+                2,
+                Evidence::MempoolReconciled {
+                    txid: TXID.to_owned(),
+                    membership: ReconciledMembership::Present { facts: facts() },
+                },
+            ))
+            .expect("reconciled facts");
+
+        let membership = store
+            .mempool_facts(&source())
+            .expect("facts")
+            .expect("known source");
+        assert_eq!(membership.available.len(), 1);
+        assert!(membership.available[0].shape.is_none());
+    }
+
+    #[test]
+    fn mismatched_raw_bytes_are_kept_as_evidence_but_never_derived() {
+        let (_temporary, store) = test_store();
+        let transaction = raw_transaction();
+        // Claimed identifiers do not match the bytes.
+        store
+            .ingest(&event_for(
+                "session-a",
+                1,
+                Evidence::P2pTransaction {
+                    txid: TXID.to_owned(),
+                    wtxid: TXID_B.to_owned(),
+                    raw_transaction_hex: Some(hex::encode(bitcoin::consensus::encode::serialize(
+                        &transaction,
+                    ))),
+                    peer_id: None,
+                    inbound: Some(true),
+                },
+            ))
+            .expect("p2p evidence");
+        store
+            .ingest(&event_for(
+                "session-a",
+                2,
+                Evidence::MempoolReconciled {
+                    txid: TXID.to_owned(),
+                    membership: ReconciledMembership::Present { facts: facts() },
+                },
+            ))
+            .expect("reconciled facts");
+
+        let membership = store
+            .mempool_facts(&source())
+            .expect("facts")
+            .expect("known source");
+        assert!(membership.available[0].shape.is_none());
+    }
+
     #[test]
     fn migration_rejects_stale_schema_version() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let path = temporary.path().join("atlas.db");
         let connection = Connection::open(&path).expect("create database");
         connection
-            .pragma_update(None, "user_version", 2)
+            .pragma_update(None, "user_version", 3)
             .expect("schema version");
         drop(connection);
 
         assert!(matches!(
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
-                found: 2,
-                expected: 3
+                found: 3,
+                expected: 4
             })
         ));
     }
@@ -1142,15 +1520,15 @@ mod tests {
         let path = temporary.path().join("atlas.db");
         let connection = Connection::open(&path).expect("create database");
         connection
-            .pragma_update(None, "user_version", 4)
+            .pragma_update(None, "user_version", 5)
             .expect("schema version");
         drop(connection);
 
         assert!(matches!(
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
-                found: 4,
-                expected: 3
+                found: 5,
+                expected: 4
             })
         ));
     }
@@ -1164,7 +1542,7 @@ mod tests {
             Store::open(path),
             Err(StoreError::SchemaVersion {
                 found: 0,
-                expected: 3
+                expected: 4
             })
         ));
     }
