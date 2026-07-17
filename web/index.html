@@ -12,18 +12,106 @@
   <body>
     <main class="page">
       <header class="page-header">
-        <p class="eyebrow">Swimming in the mempool</p>
+        <p class="eyebrow">One node's mempool, honestly</p>
         <h1>Mempool Atlas</h1>
-        <p>Explore the transactions currently visible to one selected node.</p>
+        <p>
+          Explore the constituency of the transactions currently visible to one
+          selected node.
+        </p>
       </header>
 
-      <section class="panel" aria-labelledby="membership-heading">
+      <section class="panel workbench" aria-labelledby="workbench-heading">
+        <div class="workbench-header">
+          <div class="workbench-title">
+            <i id="live-dot" class="live-dot" aria-hidden="true"></i>
+            <h2 id="workbench-heading">Workbench</h2>
+            <select id="source-select" aria-label="Selected source"></select>
+          </div>
+          <div class="workbench-metrics">
+            <span class="metric"
+              ><strong id="metric-total" class="mono">–</strong> tx</span
+            >
+            <span class="metric metric-accent"
+              ><strong id="metric-matching" class="mono">–</strong> match ·
+              <span id="metric-share">–</span></span
+            >
+            <span class="awaiting-pill"
+              ><i aria-hidden="true"></i
+              ><span id="metric-awaiting">–</span> awaiting RPC</span
+            >
+            <button id="workbench-reset" type="button">Reset</button>
+          </div>
+        </div>
+
+        <p id="workbench-status" class="status" role="status">
+          Loading summary…
+        </p>
+        <p id="workbench-banner" class="capture-status" role="note" hidden></p>
+
+        <div class="workbench-body">
+          <aside class="workbench-sidebar" aria-label="Filters">
+            <div>
+              <h3 class="sidebar-heading">Classification</h3>
+              <div id="class-chips" class="chip-column"></div>
+            </div>
+            <div>
+              <h3 class="sidebar-heading">Script type</h3>
+              <div id="script-chips" class="chip-wrap"></div>
+            </div>
+            <p id="sidebar-note" class="sidebar-note"></p>
+          </aside>
+
+          <div class="workbench-hero">
+            <div class="hero-tabs">
+              <div id="primary-tabs" class="tab-group"></div>
+              <div id="group-tabs" class="tab-group" hidden></div>
+              <div id="metric-tabs" class="tab-group" hidden></div>
+            </div>
+            <div id="treemap" class="treemap" hidden></div>
+            <div id="composition" class="composition"></div>
+          </div>
+
+          <div class="workbench-rail">
+            <div>
+              <h3 class="rail-heading">Fee-rate ECDF</h3>
+              <p class="rail-sub">cumulative vsize share by class</p>
+              <svg
+                id="ecdf"
+                viewBox="0 0 480 172"
+                role="img"
+                aria-label="Cumulative fee-rate distribution per classification"
+              ></svg>
+              <div id="ecdf-axis" class="axis-row mono"></div>
+            </div>
+            <div>
+              <h3 class="rail-heading">Joint · fee × size</h3>
+              <p class="rail-sub">summed vsize with marginals</p>
+              <div class="joint-layout">
+                <div id="joint-top" class="joint-top"></div>
+                <div></div>
+                <div id="joint-cells" class="joint-cells"></div>
+                <div id="joint-right" class="joint-right"></div>
+              </div>
+              <div id="joint-axis" class="axis-row mono"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <details id="membership-panel" class="panel membership-panel">
+        <summary>
+          <span id="membership-heading">Per-transaction detail</span>
+        </summary>
+
         <div class="panel-heading">
-          <h2 id="membership-heading">Mempool membership</h2>
+          <p class="panel-note">
+            Bounded inspection of individual memberships; the workbench above
+            only ever sees aggregates.
+          </p>
           <button id="refresh" type="button">Refresh</button>
         </div>
 
-        <p id="status" class="status" role="status">Loading memberships…</p>
+        <p id="status" class="status" role="status">Open to load.</p>
         <p id="capture-status" class="capture-status" role="note" hidden></p>
         <p id="empty" class="empty" hidden>No memberships were returned.</p>
 
@@ -85,7 +173,7 @@
             </table>
           </div>
         </details>
-      </section>
+      </details>
     </main>
 
     <script type="module" src="/src/main.ts"></script>

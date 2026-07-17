@@ -108,7 +108,7 @@ const parseCaptureStatus = (value: unknown): CaptureStatus => {
   };
 };
 
-const parseSourceHealth = (value: unknown): SourceHealth => {
+export const parseSourceHealth = (value: unknown): SourceHealth => {
   if (!isRecord(value) || !isNonNegativeInteger(value.last_seen_at_ms)) {
     throw new TypeError("Invalid source health");
   }

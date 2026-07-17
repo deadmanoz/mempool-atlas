@@ -1,6 +1,7 @@
 import { fetchMempool } from "./api";
 import { formatMembershipAge, membershipPage } from "./membership-table";
 import { renderSwimView } from "./swim-view";
+import { initWorkbench } from "./workbench";
 import "./styles.css";
 import type { CaptureStatus, MempoolEntry } from "./types";
 
@@ -25,14 +26,10 @@ const tableBody = requiredElement<HTMLTableSectionElement>("memberships");
 const previousPage = requiredElement<HTMLButtonElement>("previous-page");
 const nextPage = requiredElement<HTMLButtonElement>("next-page");
 const refresh = requiredElement<HTMLButtonElement>("refresh");
-const membershipHeading =
-  requiredElement<HTMLHeadingElement>("membership-heading");
+const membershipHeading = requiredElement<HTMLElement>("membership-heading");
+const membershipPanel = requiredElement<HTMLDetailsElement>("membership-panel");
 
-const querySource = new URL(window.location.href).searchParams
-  .get("source")
-  ?.trim();
-const configuredSource = import.meta.env.VITE_ATLAS_SOURCE_ID?.trim();
-const selectedSource = querySource || configuredSource || null;
+const workbench = initWorkbench();
 
 const countFormat = new Intl.NumberFormat();
 const decimalFormat = new Intl.NumberFormat(undefined, {
@@ -163,14 +160,14 @@ const loadMemberships = async (): Promise<void> => {
   status.dataset.state = "loading";
   status.textContent = "Loading memberships…";
 
+  const selectedSource = workbench.getSelectedSource();
   if (selectedSource === null) {
     clearMemberships();
     empty.hidden = true;
     captureStatus.hidden = true;
     status.dataset.state = "error";
-    status.textContent =
-      "Choose a source with ?source=<source-id> or configure VITE_ATLAS_SOURCE_ID.";
-    refresh.disabled = true;
+    status.textContent = "Waiting for a source to be selected.";
+    refresh.disabled = false;
     return;
   }
 
@@ -179,7 +176,7 @@ const loadMemberships = async (): Promise<void> => {
     currentMemberships = response.memberships;
     renderedAtMs = Date.now();
     tablePageIndex = 0;
-    membershipHeading.textContent = `${response.source_id} mempool`;
+    membershipHeading.textContent = `Per-transaction detail · ${response.source_id}`;
     renderCaptureStatus(response.source_id, response.health.capture);
     empty.textContent = `No transactions are currently present in ${response.source_id}.`;
     empty.hidden = currentMemberships.length !== 0;
@@ -226,4 +223,19 @@ nextPage.addEventListener("click", () => {
 
 new ResizeObserver(scheduleVisualRender).observe(canvas);
 
-void loadMemberships();
+// Per-transaction detail is on-demand: the workbench above is aggregate-only,
+// so the full membership snapshot is only fetched when the panel is opened.
+membershipPanel.addEventListener("toggle", () => {
+  if (membershipPanel.open && currentMemberships.length === 0) {
+    void loadMemberships();
+  }
+});
+
+workbench.onSourceChange(() => {
+  clearMemberships();
+  status.dataset.state = "ready";
+  status.textContent = "Open to load.";
+  if (membershipPanel.open) {
+    void loadMemberships();
+  }
+});
