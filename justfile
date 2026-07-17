@@ -23,7 +23,7 @@ test:
     just test-web
 
 test-rust:
-    cargo test --workspace
+    cargo test --workspace --all-features
 
 test-web:
     npm --prefix web test
@@ -33,6 +33,9 @@ test-baseline-scale:
 
 regen-api-fixtures:
     cargo test -p atlas-server --test api_fixture_contract regenerate_api_fixtures -- --ignored
+
+seed-dev source="demo-node" count="20000":
+    cargo run -p atlas-server --features seed-tool --bin atlas-seed -- --server "http://${ATLAS_BIND}" --source {{source}} --count {{count}} --capture-gap
 
 proto-check:
     ./scripts/check-peer-observer-protos.sh
