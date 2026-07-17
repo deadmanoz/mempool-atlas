@@ -1,11 +1,15 @@
 //! Shared Mempool Atlas domain and wire types.
 
+mod summary;
+
 use std::fmt;
 use std::str::FromStr;
 
 use bitcoin::{Txid, Wtxid};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use summary::*;
 
 pub const SCHEMA_VERSION: u16 = 3;
 pub const MAX_INGEST_BATCH_EVENTS: usize = 512;
@@ -42,6 +46,16 @@ pub enum ModelError {
     IngestBatchTooLarge { found: usize, maximum: usize },
     #[error("ingest batch mixes source {found} with source {expected}")]
     IngestBatchSourceMismatch { expected: String, found: String },
+    #[error("filter facet {facet} must select at least one value")]
+    EmptyFilterFacet { facet: &'static str },
+    #[error("filter bound {field} must be a finite, non-negative number")]
+    InvalidFilterBound { field: &'static str },
+    #[error("feerate_min must not exceed feerate_max")]
+    InvertedFeerateBounds,
+    #[error("unknown {facet} filter value {value}")]
+    UnknownFilterValue { facet: &'static str, value: String },
+    #[error("unknown detail selection {value}; expected ecdf or joint")]
+    UnknownDetailSelection { value: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
