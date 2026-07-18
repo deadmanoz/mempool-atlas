@@ -45,11 +45,11 @@ CREATE TABLE transaction_variant (
 CREATE INDEX transaction_variant_txid_idx
     ON transaction_variant (txid);
 
--- Shape facts and classifier verdicts derived server-side from raw
--- transaction bytes. Keyed by txid because outputs, input count, and the
--- dominant script type are intrinsic to the transaction and identical across
--- witness variants. A missing row means no raw transaction has been observed;
--- shape is never inferred without bytes.
+-- Shape facts derived server-side from raw transaction bytes. Keyed by txid
+-- because outputs, input count, and the dominant script type are intrinsic to
+-- the transaction and identical across witness variants. A missing row means
+-- no raw transaction has been observed; shape is never inferred without
+-- bytes.
 CREATE TABLE transaction_shape (
     txid TEXT PRIMARY KEY NOT NULL,
     total_output_sats INTEGER NOT NULL CHECK (total_output_sats >= 0),
@@ -58,17 +58,24 @@ CREATE TABLE transaction_shape (
     script_type TEXT NOT NULL CHECK (script_type IN (
         'p2tr', 'p2wpkh', 'p2wsh', 'p2sh', 'p2pkh', 'op_return', 'other'
     )),
-    classification TEXT NOT NULL CHECK (classification IN (
-        'payment', 'consolidation', 'batch', 'coinjoin',
-        'data', 'lightning', 'unknown'
-    )),
-    classification_status TEXT NOT NULL CHECK (classification_status IN (
-        'complete', 'partial', 'unknown', 'not_applicable', 'error'
-    )),
-    classifier_id TEXT NOT NULL CHECK (length(trim(classifier_id)) > 0),
-    classifier_version TEXT NOT NULL CHECK (length(trim(classifier_version)) > 0),
-    classifier_evidence_json TEXT NOT NULL,
     derived_from_event_id TEXT NOT NULL REFERENCES event(event_id)
+) STRICT;
+
+-- One classifier verdict per taxonomy per transaction, derived server-side
+-- from the same observed raw bytes as transaction_shape. A missing row means
+-- the taxonomy's pack produced no verdict (its honest reading is `unknown`);
+-- verdicts are intrinsic across witness variants, so the first derivation
+-- wins.
+CREATE TABLE transaction_classification (
+    txid TEXT NOT NULL,
+    taxonomy TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    classifier_id TEXT NOT NULL,
+    classifier_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    derived_from_event_id TEXT NOT NULL REFERENCES event (event_id),
+    PRIMARY KEY (txid, taxonomy)
 ) STRICT;
 
 CREATE TABLE source_capture_state (

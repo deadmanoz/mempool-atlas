@@ -73,11 +73,11 @@ const SPECS: [FixtureSpec; 5] = [
         path: "mempool-summary-filtered.json",
         method: "GET",
         request: "/api/v1/sources/source-a/mempool/summary\
-                  ?class=unknown&feerate_min=1&feerate_max=64",
+                  ?t.behavior=unknown&feerate_min=1&feerate_max=64",
         status: 200,
         body: BodyKind::MempoolSummary,
-        scenario: "classification facet plus inclusive fee-rate bounds shrink the \
-                   matching set while totals.all is unchanged",
+        scenario: "behavior-taxonomy verdict facet plus inclusive fee-rate bounds \
+                   shrink the matching set while totals.all is unchanged",
     },
     FixtureSpec {
         path: "mempool-summary-detail.json",

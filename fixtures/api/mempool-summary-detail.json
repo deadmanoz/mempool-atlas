@@ -8,15 +8,6 @@
       86400000,
       259200000
     ],
-    "classification_keys": [
-      "payment",
-      "consolidation",
-      "batch",
-      "coinjoin",
-      "data",
-      "lightning",
-      "unknown"
-    ],
     "feerate_sat_per_vb_edges": [
       1.0,
       2.0,
@@ -47,6 +38,42 @@
       "p2pkh",
       "op_return",
       "other"
+    ],
+    "taxonomies": [
+      {
+        "key": "behavior",
+        "label": "Behavior",
+        "verdicts": [
+          {
+            "key": "payment",
+            "label": "Payment"
+          },
+          {
+            "key": "consolidation",
+            "label": "Consolidation"
+          },
+          {
+            "key": "batch",
+            "label": "Batch payout"
+          },
+          {
+            "key": "coinjoin",
+            "label": "CoinJoin"
+          },
+          {
+            "key": "data",
+            "label": "Data / inscription"
+          },
+          {
+            "key": "lightning",
+            "label": "Lightning"
+          },
+          {
+            "key": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      }
     ],
     "value_sats_edges": [
       100000,
@@ -332,7 +359,8 @@
         ],
         "key": "unknown"
       }
-    ]
+    ],
+    "taxonomy": "behavior"
   },
   "filter_echo": {},
   "health": {
@@ -373,43 +401,6 @@
         {
           "count": 1,
           "vsize": 800
-        }
-      ],
-      "status": "available",
-      "underived": {
-        "count": 0,
-        "vsize": 0
-      }
-    },
-    "classification": {
-      "bins": [
-        {
-          "count": 1,
-          "vsize": 209
-        },
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 1,
-          "vsize": 134
-        },
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 6,
-          "vsize": 5232
         }
       ],
       "status": "available",
@@ -558,6 +549,46 @@
         "vsize": 5232
       }
     },
+    "taxonomies": [
+      {
+        "bins": [
+          {
+            "count": 1,
+            "vsize": 209
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 1,
+            "vsize": 134
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 6,
+            "vsize": 5232
+          }
+        ],
+        "key": "behavior",
+        "status": "available",
+        "underived": {
+          "count": 0,
+          "vsize": 0
+        }
+      }
+    ],
     "value": {
       "bins": [
         {

@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atlas_classifiers::{
-    BaselineHeuristics, ClassificationInput, ClassificationStatus, Classifier, TransactionShape,
+    ClassificationInput, ClassificationStatus, TransactionShape, registered_packs,
 };
 use atlas_model::{
-    CaptureGapCertainty, CaptureStatus, Classification, Evidence, IngestBatchRequest, IngestStatus,
+    CaptureGapCertainty, CaptureStatus, Evidence, IngestBatchRequest, IngestStatus,
     MembershipMutation, MempoolEntry, MempoolEntryFacts, MempoolEntryFactsStatus, MempoolSnapshot,
     NormalizedEvent, ScriptType, SourceDescriptor, SourceHealth, SourceId,
 };
@@ -16,7 +16,7 @@ use tracing::warn;
 
 use crate::summary::{FactsRow, ShapeRow, SourceMembershipFacts};
 
-const LATEST_SCHEMA_VERSION: i64 = 4;
+const LATEST_SCHEMA_VERSION: i64 = 5;
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 
 #[derive(Clone, Debug)]
@@ -194,13 +194,16 @@ impl Store {
 
         let mut available = Vec::new();
         let mut awaiting_rpc_count = 0;
+        // Correlates the classification rows onto the fact rows by txid
+        // internally; the txid itself never leaves this method.
+        let mut row_index_by_txid = std::collections::HashMap::new();
         {
             let mut statement = transaction.prepare(
                 "SELECT current_membership.vsize, current_membership.fee_sats,
                         current_membership.entered_at_ms,
                         transaction_shape.total_output_sats, transaction_shape.input_count,
                         transaction_shape.output_count, transaction_shape.script_type,
-                        transaction_shape.classification
+                        current_membership.txid
                  FROM current_membership
                  LEFT JOIN transaction_shape USING (txid)
                  WHERE current_membership.source_id = ?1",
@@ -208,8 +211,32 @@ impl Store {
             let mut rows = statement.query([source_id.as_str()])?;
             while let Some(row) = rows.next()? {
                 match facts_row_from_row(row)? {
-                    Some(facts) => available.push(facts),
+                    Some(facts) => {
+                        row_index_by_txid.insert(row.get::<_, String>(7)?, available.len());
+                        available.push(facts);
+                    }
                     None => awaiting_rpc_count += 1,
+                }
+            }
+        }
+        {
+            let mut statement = transaction.prepare(
+                "SELECT current_membership.txid, transaction_classification.taxonomy,
+                        transaction_classification.verdict
+                 FROM current_membership
+                 JOIN transaction_classification
+                     ON transaction_classification.txid = current_membership.txid
+                 WHERE current_membership.source_id = ?1",
+            )?;
+            let mut rows = statement.query([source_id.as_str()])?;
+            while let Some(row) = rows.next()? {
+                let txid = row.get::<_, String>(0)?;
+                // Verdicts for awaiting-RPC memberships have no fact row to
+                // land on; they surface once RPC facts arrive.
+                if let Some(&index) = row_index_by_txid.get(&txid) {
+                    available[index]
+                        .verdicts
+                        .push((row.get::<_, String>(1)?, row.get::<_, String>(2)?));
                 }
             }
         }
@@ -437,10 +464,11 @@ fn apply_evidence(
     Ok(())
 }
 
-/// Derives intrinsic shape facts and a classifier verdict from observed raw
-/// transaction bytes, once per txid. Bytes that fail to decode or that do not
-/// match the claimed identifiers leave the transaction underived rather than
-/// guessing; the evidence row itself is always retained.
+/// Derives intrinsic shape facts and one classifier verdict per registered
+/// taxonomy from observed raw transaction bytes, once per txid. Bytes that
+/// fail to decode or that do not match the claimed identifiers leave the
+/// transaction underived rather than guessing; the evidence row itself is
+/// always retained.
 fn derive_transaction_shape(
     db: &Transaction<'_>,
     event: &NormalizedEvent,
@@ -474,32 +502,50 @@ fn derive_transaction_shape(
         return Ok(());
     }
     let shape = TransactionShape::derive(&parsed);
-    let result = BaselineHeuristics.classify(&ClassificationInput {
-        txid,
-        wtxid: Some(wtxid),
-        transaction: Some(&parsed),
-    });
-    let classification = result.verdict.unwrap_or(Classification::Unknown);
     db.execute(
         "INSERT INTO transaction_shape (
             txid, total_output_sats, input_count, output_count, script_type,
-            classification, classification_status, classifier_id,
-            classifier_version, classifier_evidence_json, derived_from_event_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            derived_from_event_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             txid,
             to_sqlite_integer(shape.total_output_sats, "total_output_sats")?,
             to_sqlite_integer(shape.input_count, "input_count")?,
             to_sqlite_integer(shape.output_count, "output_count")?,
             shape.script_type.key(),
-            classification.key(),
-            classification_status_as_str(result.status),
-            result.classifier_id,
-            result.classifier_version,
-            serde_json::to_string(&result.evidence)?,
             event.event_id,
         ],
     )?;
+    let input = ClassificationInput {
+        txid,
+        wtxid: Some(wtxid),
+        transaction: Some(&parsed),
+    };
+    for pack in registered_packs() {
+        let taxonomy = pack.taxonomy();
+        let result = pack.classify(&input);
+        // A missing verdict stores nothing: absence is the honest `unknown`.
+        let Some(verdict) = result.verdict else {
+            continue;
+        };
+        db.execute(
+            "INSERT INTO transaction_classification (
+                txid, taxonomy, verdict, classifier_id, classifier_version,
+                status, evidence_json, derived_from_event_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (txid, taxonomy) DO NOTHING",
+            params![
+                txid,
+                taxonomy.key,
+                verdict,
+                result.classifier_id,
+                result.classifier_version,
+                classification_status_as_str(result.status),
+                serde_json::to_string(&result.evidence)?,
+                event.event_id,
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -615,6 +661,7 @@ fn facts_row_from_row(row: &rusqlite::Row<'_>) -> Result<Option<FactsRow>, rusql
             fee_sats: nonnegative_integer_from_row(fee_sats, 1)?,
             entered_at_ms: nonnegative_integer_from_row(entered_at_ms, 2)?,
             shape: shape_row_from_row(row)?,
+            verdicts: Vec::new(),
         })),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             0,
@@ -632,7 +679,6 @@ fn shape_row_from_row(row: &rusqlite::Row<'_>) -> Result<Option<ShapeRow>, rusql
         return Ok(None);
     };
     let script_type = row.get::<_, String>(6)?;
-    let classification = row.get::<_, String>(7)?;
     Ok(Some(ShapeRow {
         total_output_sats: nonnegative_integer_from_row(total_output_sats, 3)?,
         input_count: nonnegative_integer_from_row(row.get(4)?, 4)?,
@@ -644,16 +690,6 @@ fn shape_row_from_row(row: &rusqlite::Row<'_>) -> Result<Option<ShapeRow>, rusql
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("unsupported script type {script_type}"),
-                )),
-            )
-        })?,
-        classification: Classification::from_key(&classification).ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                7,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("unsupported classification {classification}"),
                 )),
             )
         })?,
@@ -1419,7 +1455,11 @@ mod tests {
         assert_eq!(shape.input_count, 1);
         assert_eq!(shape.output_count, 2);
         assert_eq!(shape.script_type, atlas_model::ScriptType::P2wpkh);
-        assert_eq!(shape.classification, atlas_model::Classification::Payment);
+        // One stored verdict per registered pack, in registry order.
+        assert_eq!(
+            membership.available[0].verdicts,
+            vec![("behavior".to_owned(), "payment".to_owned())]
+        );
     }
 
     #[test]
@@ -1455,6 +1495,7 @@ mod tests {
             .expect("known source");
         assert_eq!(membership.available.len(), 1);
         assert!(membership.available[0].shape.is_none());
+        assert!(membership.available[0].verdicts.is_empty());
     }
 
     #[test]
@@ -1493,6 +1534,7 @@ mod tests {
             .expect("facts")
             .expect("known source");
         assert!(membership.available[0].shape.is_none());
+        assert!(membership.available[0].verdicts.is_empty());
     }
 
     #[test]
@@ -1501,15 +1543,15 @@ mod tests {
         let path = temporary.path().join("atlas.db");
         let connection = Connection::open(&path).expect("create database");
         connection
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 4)
             .expect("schema version");
         drop(connection);
 
         assert!(matches!(
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
-                found: 3,
-                expected: 4
+                found: 4,
+                expected: 5
             })
         ));
     }
@@ -1520,15 +1562,15 @@ mod tests {
         let path = temporary.path().join("atlas.db");
         let connection = Connection::open(&path).expect("create database");
         connection
-            .pragma_update(None, "user_version", 5)
+            .pragma_update(None, "user_version", 6)
             .expect("schema version");
         drop(connection);
 
         assert!(matches!(
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
-                found: 5,
-                expected: 4
+                found: 6,
+                expected: 5
             })
         ));
     }
@@ -1542,7 +1584,7 @@ mod tests {
             Store::open(path),
             Err(StoreError::SchemaVersion {
                 found: 0,
-                expected: 4
+                expected: 5
             })
         ));
     }

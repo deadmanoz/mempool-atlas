@@ -8,6 +8,12 @@
 //! Aggregates only ever cover fact-bearing memberships. Entries still awaiting
 //! RPC facts have no virtual size, fee, or entry time, so they are reported as
 //! a separate count and never folded into any histogram or vsize sum.
+//!
+//! Classification is not one hardcoded dimension. Each classifier pack owns a
+//! taxonomy — a keyed verdict vocabulary described by [`TaxonomyDescriptor`] —
+//! and the catalog, histograms, and filters carry one entry per taxonomy.
+//! Verdict vocabularies are per-pack data on the wire, so clients never
+//! hardcode them.
 
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +43,7 @@ pub const INPUT_BIN_COUNT: usize = INPUT_COUNT_UPPERS.len() + 1;
 pub const OUTPUT_COUNT_UPPERS: [u64; 4] = [1, 2, 10, 50];
 pub const OUTPUT_BIN_COUNT: usize = OUTPUT_COUNT_UPPERS.len() + 1;
 
-/// Fine log-spaced fee-rate bins backing the per-classification ECDF.
+/// Fine log-spaced fee-rate bins backing the per-verdict fee-rate ECDF.
 pub const ECDF_FEE_BIN_COUNT: usize = 64;
 pub const ECDF_FEE_MIN_SAT_PER_VB: f64 = 0.5;
 pub const ECDF_FEE_MAX_SAT_PER_VB: f64 = 512.0;
@@ -50,9 +56,11 @@ pub const JOINT_SIZE_BIN_COUNT: usize = 14;
 pub const JOINT_SIZE_MIN_VB: f64 = 100.0;
 pub const JOINT_SIZE_MAX_VB: f64 = 100_000.0;
 
-/// Classifier verdict facets. `Unknown` is a first-class verdict: it states
-/// that no classifier produced evidence, never that a classifier ran and
-/// failed to match.
+/// The behavior taxonomy's verdict vocabulary, shared by the baseline
+/// heuristics pack and the seed tooling. `Unknown` is a first-class verdict:
+/// it states that no classifier produced evidence, never that a classifier
+/// ran and failed to match. Other taxonomies declare their own vocabularies
+/// as [`TaxonomyDescriptor`] data instead of a shared enum.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Classification {
@@ -86,6 +94,19 @@ impl Classification {
             Self::Data => "data",
             Self::Lightning => "lightning",
             Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Payment => "Payment",
+            Self::Consolidation => "Consolidation",
+            Self::Batch => "Batch payout",
+            Self::Coinjoin => "CoinJoin",
+            Self::Data => "Data / inscription",
+            Self::Lightning => "Lightning",
+            Self::Unknown => "Unknown",
         }
     }
 
@@ -166,14 +187,50 @@ impl ScriptType {
     }
 }
 
+/// One verdict a taxonomy can assign, with its human-readable label.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VerdictDescriptor {
+    pub key: String,
+    pub label: String,
+}
+
+/// One classifier pack's verdict vocabulary. Verdict order defines bin order
+/// on the wire: a [`TaxonomyHistogram`] for this taxonomy has exactly one bin
+/// per descriptor, in this order. Every taxonomy must include an `unknown`
+/// verdict as the honest no-evidence/no-match bucket. Keys are lowercase
+/// `[a-z0-9_]+`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaxonomyDescriptor {
+    pub key: String,
+    pub label: String,
+    pub verdicts: Vec<VerdictDescriptor>,
+}
+
+/// One taxonomy's histogram over the matching set. The flattened histogram's
+/// bins align with the verdict order the catalog declares for `key`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaxonomyHistogram {
+    pub key: String,
+    #[serde(flatten)]
+    pub histogram: DimensionHistogram,
+}
+
+/// A filter over one taxonomy: match transactions whose verdict for the
+/// taxonomy `key` is one of `verdicts`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaxonomyFilter {
+    pub key: String,
+    pub verdicts: Vec<String>,
+}
+
 /// Server-side filter facets. Facets use known-to-match semantics: a facet
 /// selects only transactions whose evidence actually carries a matching value,
 /// so filtering on a dimension without derived evidence matches nothing rather
 /// than guessing. Fee-rate bounds are inclusive.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SummaryFilter {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub classes: Option<Vec<Classification>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taxonomies: Vec<TaxonomyFilter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<Vec<ScriptType>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,8 +241,18 @@ pub struct SummaryFilter {
 
 impl SummaryFilter {
     pub fn validate(&self) -> Result<(), ModelError> {
-        if self.classes.as_ref().is_some_and(Vec::is_empty) {
-            return Err(ModelError::EmptyFilterFacet { facet: "class" });
+        let mut seen_taxonomies = std::collections::HashSet::new();
+        for taxonomy in &self.taxonomies {
+            if taxonomy.verdicts.is_empty() {
+                return Err(ModelError::EmptyTaxonomyFilter {
+                    taxonomy: taxonomy.key.clone(),
+                });
+            }
+            if !seen_taxonomies.insert(taxonomy.key.as_str()) {
+                return Err(ModelError::DuplicateTaxonomyFilter {
+                    taxonomy: taxonomy.key.clone(),
+                });
+            }
         }
         if self.scripts.as_ref().is_some_and(Vec::is_empty) {
             return Err(ModelError::EmptyFilterFacet { facet: "script" });
@@ -250,28 +317,30 @@ pub struct AwaitingRpcTotal {
 }
 
 /// The canonical bins, emitted with every summary as the single source of
-/// truth for axis labels and bin alignment.
+/// truth for axis labels and bin alignment. Static dimensions keep fixed
+/// edges; taxonomy bins are whatever the registered classifier packs declare.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BinCatalog {
+    pub taxonomies: Vec<TaxonomyDescriptor>,
     pub feerate_sat_per_vb_edges: Vec<f64>,
     pub age_ms_edges: Vec<u64>,
     pub value_sats_edges: Vec<u64>,
     pub input_count_uppers: Vec<u64>,
     pub output_count_uppers: Vec<u64>,
-    pub classification_keys: Vec<Classification>,
     pub script_keys: Vec<ScriptType>,
 }
 
 impl BinCatalog {
+    /// The canonical static edges plus the given taxonomy vocabularies.
     #[must_use]
-    pub fn canonical() -> Self {
+    pub fn for_taxonomies(taxonomies: Vec<TaxonomyDescriptor>) -> Self {
         Self {
+            taxonomies,
             feerate_sat_per_vb_edges: FEERATE_EDGES_SAT_PER_VB.to_vec(),
             age_ms_edges: AGE_EDGES_MS.to_vec(),
             value_sats_edges: VALUE_EDGES_SATS.to_vec(),
             input_count_uppers: INPUT_COUNT_UPPERS.to_vec(),
             output_count_uppers: OUTPUT_COUNT_UPPERS.to_vec(),
-            classification_keys: Classification::ALL.to_vec(),
             script_keys: ScriptType::ALL.to_vec(),
         }
     }
@@ -282,10 +351,11 @@ impl BinCatalog {
 /// align with the canonical bin order of [`BinCatalog`] and include zero
 /// bins. `underived` aggregates matching rows whose evidence does not carry
 /// this dimension (no raw transaction was observed for them); those rows are
-/// never guessed into a bin. Classification is the exception: a row without
-/// classifier evidence has the explicit verdict `unknown`, so it lands in
-/// the `unknown` bin and classification's `underived` stays zero.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// never guessed into a bin. Taxonomy histograms are the exception: a row
+/// without classifier evidence has the explicit verdict `unknown`, so it
+/// lands in the taxonomy's `unknown` bin and the taxonomy's `underived`
+/// stays zero.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DimensionHistogram {
     Available {
@@ -303,9 +373,11 @@ pub enum UnavailableReason {
     RequiresRawTransaction,
 }
 
+/// One [`TaxonomyHistogram`] per registered taxonomy, in catalog order,
+/// followed by the static dimensions.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SummaryHistograms {
-    pub classification: DimensionHistogram,
+    pub taxonomies: Vec<TaxonomyHistogram>,
     pub script: DimensionHistogram,
     pub value: DimensionHistogram,
     pub inputs: DimensionHistogram,
@@ -314,21 +386,24 @@ pub struct SummaryHistograms {
     pub feerate: DimensionHistogram,
 }
 
-/// Cumulative vsize per classification over fine log-spaced fee-rate bins.
-/// `cum_vsize[i]` is the summed vsize of the class at fee rates up to and
-/// including bin `i`; clients normalize against the final element.
+/// Cumulative vsize per verdict of one taxonomy over fine log-spaced
+/// fee-rate bins. `cum_vsize[i]` is the summed vsize of the verdict at fee
+/// rates up to and including bin `i`; clients normalize against the final
+/// element.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct FeeRateEcdf {
+    /// The taxonomy whose verdict keys the series belong to.
+    pub taxonomy: String,
     /// `ECDF_FEE_BIN_COUNT + 1` edges in sat/vB; values outside the range
     /// clamp into the first or last bin.
     pub fee_edges: Vec<f64>,
-    /// One series per classification with matching weight, in canonical order.
+    /// One series per verdict with matching weight, in declared verdict order.
     pub series: Vec<EcdfSeries>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EcdfSeries {
-    pub key: Classification,
+    pub key: String,
     pub cum_vsize: Vec<u64>,
 }
 
@@ -447,6 +522,30 @@ pub fn log_bin(value: f64, min: f64, max: f64, bin_count: usize) -> usize {
 mod tests {
     use super::*;
 
+    fn behavior_taxonomy() -> TaxonomyDescriptor {
+        TaxonomyDescriptor {
+            key: "behavior".to_owned(),
+            label: "Behavior".to_owned(),
+            verdicts: Classification::ALL
+                .into_iter()
+                .map(|classification| VerdictDescriptor {
+                    key: classification.key().to_owned(),
+                    label: classification.label().to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    fn taxonomy_filter(key: &str, verdicts: &[&str]) -> TaxonomyFilter {
+        TaxonomyFilter {
+            key: key.to_owned(),
+            verdicts: verdicts
+                .iter()
+                .map(|verdict| (*verdict).to_owned())
+                .collect(),
+        }
+    }
+
     #[test]
     fn facet_keys_round_trip_between_wire_and_lookup() {
         for classification in Classification::ALL {
@@ -473,8 +572,33 @@ mod tests {
     }
 
     #[test]
-    fn canonical_catalog_matches_declared_bin_counts() {
-        let catalog = BinCatalog::canonical();
+    fn classification_labels_are_human_readable() {
+        let labels: Vec<&str> = Classification::ALL
+            .into_iter()
+            .map(Classification::label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Payment",
+                "Consolidation",
+                "Batch payout",
+                "CoinJoin",
+                "Data / inscription",
+                "Lightning",
+                "Unknown",
+            ]
+        );
+    }
+
+    #[test]
+    fn catalog_for_taxonomies_carries_them_with_the_static_edges() {
+        let catalog = BinCatalog::for_taxonomies(vec![behavior_taxonomy()]);
+        assert_eq!(catalog.taxonomies, vec![behavior_taxonomy()]);
+        assert_eq!(
+            catalog.taxonomies[0].verdicts.len(),
+            Classification::ALL.len()
+        );
         assert_eq!(
             catalog.feerate_sat_per_vb_edges.len() + 1,
             FEERATE_BIN_COUNT
@@ -483,8 +607,14 @@ mod tests {
         assert_eq!(catalog.value_sats_edges.len() + 1, VALUE_BIN_COUNT);
         assert_eq!(catalog.input_count_uppers.len() + 1, INPUT_BIN_COUNT);
         assert_eq!(catalog.output_count_uppers.len() + 1, OUTPUT_BIN_COUNT);
-        assert_eq!(catalog.classification_keys.len(), Classification::ALL.len());
         assert_eq!(catalog.script_keys.len(), ScriptType::ALL.len());
+
+        let empty = BinCatalog::for_taxonomies(Vec::new());
+        assert!(empty.taxonomies.is_empty());
+        assert_eq!(
+            empty.feerate_sat_per_vb_edges,
+            catalog.feerate_sat_per_vb_edges
+        );
     }
 
     #[test]
@@ -549,13 +679,38 @@ mod tests {
 
     #[test]
     fn filter_validation_rejects_degenerate_requests() {
-        let empty_classes = SummaryFilter {
-            classes: Some(Vec::new()),
+        let empty_verdicts = SummaryFilter {
+            taxonomies: vec![taxonomy_filter("behavior", &[])],
             ..SummaryFilter::default()
         };
         assert_eq!(
-            empty_classes.validate(),
-            Err(ModelError::EmptyFilterFacet { facet: "class" })
+            empty_verdicts.validate(),
+            Err(ModelError::EmptyTaxonomyFilter {
+                taxonomy: "behavior".to_owned(),
+            })
+        );
+
+        let duplicate_taxonomies = SummaryFilter {
+            taxonomies: vec![
+                taxonomy_filter("behavior", &["payment"]),
+                taxonomy_filter("behavior", &["unknown"]),
+            ],
+            ..SummaryFilter::default()
+        };
+        assert_eq!(
+            duplicate_taxonomies.validate(),
+            Err(ModelError::DuplicateTaxonomyFilter {
+                taxonomy: "behavior".to_owned(),
+            })
+        );
+
+        let empty_scripts = SummaryFilter {
+            scripts: Some(Vec::new()),
+            ..SummaryFilter::default()
+        };
+        assert_eq!(
+            empty_scripts.validate(),
+            Err(ModelError::EmptyFilterFacet { facet: "script" })
         );
 
         let negative = SummaryFilter {
@@ -586,6 +741,16 @@ mod tests {
             ..SummaryFilter::default()
         };
         assert_eq!(inverted.validate(), Err(ModelError::InvertedFeerateBounds));
+
+        let distinct_taxonomies = SummaryFilter {
+            taxonomies: vec![
+                taxonomy_filter("behavior", &["payment", "unknown"]),
+                taxonomy_filter("data_protocol", &["unknown"]),
+            ],
+            ..SummaryFilter::default()
+        };
+        assert_eq!(distinct_taxonomies.validate(), Ok(()));
+        assert!(!distinct_taxonomies.is_empty());
 
         assert_eq!(SummaryFilter::default().validate(), Ok(()));
         assert!(SummaryFilter::default().is_empty());
@@ -624,20 +789,67 @@ mod tests {
     }
 
     #[test]
+    fn taxonomy_histograms_flatten_their_histogram_onto_the_key() {
+        let histogram = TaxonomyHistogram {
+            key: "behavior".to_owned(),
+            histogram: DimensionHistogram::Available {
+                bins: vec![AggregateBin {
+                    count: 2,
+                    vsize: 300,
+                }],
+                underived: AggregateBin { count: 0, vsize: 0 },
+            },
+        };
+        let wire = serde_json::json!({
+            "key": "behavior",
+            "status": "available",
+            "bins": [{ "count": 2, "vsize": 300 }],
+            "underived": { "count": 0, "vsize": 0 },
+        });
+        assert_eq!(serde_json::to_value(&histogram).expect("serialize"), wire);
+        assert_eq!(
+            serde_json::from_value::<TaxonomyHistogram>(wire).expect("deserialize"),
+            histogram
+        );
+    }
+
+    #[test]
+    fn taxonomy_descriptors_have_explicit_wire_shapes() {
+        assert_eq!(
+            serde_json::to_value(TaxonomyDescriptor {
+                key: "behavior".to_owned(),
+                label: "Behavior".to_owned(),
+                verdicts: vec![VerdictDescriptor {
+                    key: "unknown".to_owned(),
+                    label: "Unknown".to_owned(),
+                }],
+            })
+            .expect("serialize"),
+            serde_json::json!({
+                "key": "behavior",
+                "label": "Behavior",
+                "verdicts": [{ "key": "unknown", "label": "Unknown" }],
+            })
+        );
+    }
+
+    #[test]
     fn empty_filter_echo_serializes_without_facets() {
         assert_eq!(
             serde_json::to_value(SummaryFilter::default()).expect("filter"),
             serde_json::json!({})
         );
         let filter = SummaryFilter {
-            classes: Some(vec![Classification::Payment, Classification::Unknown]),
+            taxonomies: vec![taxonomy_filter("behavior", &["payment", "unknown"])],
             feerate_min: Some(4.0),
             ..SummaryFilter::default()
         };
         assert_eq!(
             serde_json::to_value(filter).expect("filter"),
             serde_json::json!({
-                "classes": ["payment", "unknown"],
+                "taxonomies": [
+                    { "key": "behavior", "verdicts": ["payment", "unknown"] },
+                ],
                 "feerate_min": 4.0,
             })
         );

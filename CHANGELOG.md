@@ -4,6 +4,7 @@ All notable changes to Mempool Atlas will be documented in this file.
 
 ## [Unreleased]
 
+- Generalize classification into multiple classifier-pack-backed taxonomies: taxonomy and verdict descriptors travel on the wire, summaries carry one histogram per registered taxonomy, filters use per-taxonomy `t.<key>` facets validated against the pack registry, and the workbench renders any number of taxonomies without frontend changes, persisted per txid in schema generation 5.
 - Derive transaction shape facts and first classifier verdicts server-side from observed raw P2P transaction bytes: total output value, input and output counts, a documented dominant-script-type rule, and an ordered baseline heuristic rule pack (coinjoin, consolidation, batch, data, lightning, payment), persisted per txid in schema generation 4 and surfaced through every summary dimension with explicit per-histogram underived buckets instead of guesses.
 - Add a source-scoped aggregate mempool summary endpoint with canonical shared bins, server-side filter facets, optional ECDF and joint fee-size detail blocks, explicitly unavailable underived dimensions, and a source discovery endpoint, backed by golden read-API fixtures that a contract test keeps equal to live responses.
 - Add a feature-gated deterministic dev-seed tool that refreshes a synthetic per-classification mempool through the real batch-ingest path so local development has realistic data without live nodes.

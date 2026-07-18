@@ -5,31 +5,26 @@
 import { fetchSources, fetchSummary } from "./summary-api";
 import type {
   CaptureStatus,
-  ClassificationKey,
   MempoolSummary,
   ScriptTypeKey,
-  SummaryDimension,
   SummaryFilter,
+  TaxonomyFilterSelection,
 } from "./types";
 import {
-  CLASSIFICATION_META,
   SCRIPT_META,
   compositionRows,
-  dimensionBinMeta,
   ecdfPaths,
   formatCompact,
   formatCount,
   jointViewModel,
   ramp,
   squarify,
+  treemapGroups,
+  treemapNodes,
+  verdictMeta,
 } from "./workbench-model";
 
 const POLL_INTERVAL_MS = 5_000;
-const TREEMAP_GROUPS: readonly SummaryDimension[] = [
-  "classification",
-  "script",
-  "value",
-];
 
 interface WorkbenchElements {
   sourceSelect: HTMLSelectElement;
@@ -41,7 +36,7 @@ interface WorkbenchElements {
   metricShare: HTMLElement;
   metricAwaiting: HTMLElement;
   reset: HTMLButtonElement;
-  classChips: HTMLElement;
+  taxonomyGroups: HTMLElement;
   scriptChips: HTMLElement;
   sidebarNote: HTMLParagraphElement;
   primaryTabs: HTMLElement;
@@ -50,6 +45,7 @@ interface WorkbenchElements {
   treemap: HTMLElement;
   composition: HTMLElement;
   ecdf: SVGSVGElement;
+  ecdfSubtitle: HTMLElement;
   ecdfAxis: HTMLElement;
   jointTop: HTMLElement;
   jointCells: HTMLElement;
@@ -64,10 +60,12 @@ export interface WorkbenchHandle {
 
 interface WorkbenchState {
   source: string | null;
-  classes: Set<ClassificationKey>;
+  /** Selected verdict keys per taxonomy key, e.g. "behavior" -> {"payment"}. */
+  taxonomies: Map<string, Set<string>>;
   scripts: Set<ScriptTypeKey>;
   primaryView: "composition" | "treemap";
-  treeGroup: SummaryDimension;
+  /** A taxonomy key, or the literal "script"/"value" shape-dimension keys. */
+  treeGroup: string | null;
   compMetric: "count" | "vsize";
 }
 
@@ -89,7 +87,7 @@ const workbenchElements = (): WorkbenchElements => ({
   metricShare: requiredElement("metric-share"),
   metricAwaiting: requiredElement("metric-awaiting"),
   reset: requiredElement("workbench-reset"),
-  classChips: requiredElement("class-chips"),
+  taxonomyGroups: requiredElement("taxonomy-groups"),
   scriptChips: requiredElement("script-chips"),
   sidebarNote: requiredElement("sidebar-note"),
   primaryTabs: requiredElement("primary-tabs"),
@@ -98,6 +96,7 @@ const workbenchElements = (): WorkbenchElements => ({
   treemap: requiredElement("treemap"),
   composition: requiredElement("composition"),
   ecdf: requiredElement("ecdf"),
+  ecdfSubtitle: requiredElement("ecdf-subtitle"),
   ecdfAxis: requiredElement("ecdf-axis"),
   jointTop: requiredElement("joint-top"),
   jointCells: requiredElement("joint-cells"),
@@ -107,8 +106,14 @@ const workbenchElements = (): WorkbenchElements => ({
 
 const stateFilter = (state: WorkbenchState): SummaryFilter => {
   const filter: SummaryFilter = {};
-  if (state.classes.size > 0) {
-    filter.classes = [...state.classes];
+  const taxonomies: TaxonomyFilterSelection[] = [];
+  for (const [key, verdicts] of state.taxonomies) {
+    if (verdicts.size > 0) {
+      taxonomies.push({ key, verdicts: [...verdicts] });
+    }
+  }
+  if (taxonomies.length > 0) {
+    filter.taxonomies = taxonomies;
   }
   if (state.scripts.size > 0) {
     filter.scripts = [...state.scripts];
@@ -137,10 +142,10 @@ export const initWorkbench = (): WorkbenchHandle => {
   const elements = workbenchElements();
   const state: WorkbenchState = {
     source: null,
-    classes: new Set(),
+    taxonomies: new Map(),
     scripts: new Set(),
     primaryView: "composition",
-    treeGroup: "classification",
+    treeGroup: null,
     compMetric: "vsize",
   };
   const sourceListeners: ((sourceId: string) => void)[] = [];
@@ -194,25 +199,25 @@ export const initWorkbench = (): WorkbenchHandle => {
       }),
     );
 
+    const groups = treemapGroups(summary);
+    if (state.treeGroup === null) {
+      state.treeGroup = groups[0]?.key ?? null;
+    }
+
     elements.groupTabs.hidden = state.primaryView !== "treemap";
     elements.groupTabs.replaceChildren(
-      ...TREEMAP_GROUPS.map((dimension) => {
-        const available = summary.histograms[dimension].status === "available";
-        return tabButton(
-          dimension === "classification"
-            ? "Class"
-            : dimension === "script"
-              ? "Script"
-              : "Value",
-          state.treeGroup === dimension,
+      ...groups.map((group) =>
+        tabButton(
+          group.label,
+          state.treeGroup === group.key,
           () => {
-            state.treeGroup = dimension;
+            state.treeGroup = group.key;
             render();
           },
-          !available,
-          available ? undefined : "Awaiting raw-transaction derivation",
-        );
-      }),
+          !group.available,
+          group.available ? undefined : "Awaiting raw-transaction derivation",
+        ),
+      ),
     );
 
     elements.metricTabs.hidden = state.primaryView !== "composition";
@@ -229,38 +234,57 @@ export const initWorkbench = (): WorkbenchHandle => {
   };
 
   const renderChips = (summary: MempoolSummary): void => {
-    const classification = summary.histograms.classification;
-    const counts = new Map<string, number>();
-    if (classification.status === "available") {
-      summary.bins.classification_keys.forEach((key, index) => {
-        counts.set(key, classification.bins[index]?.count ?? 0);
-      });
-    }
-    elements.classChips.replaceChildren(
-      ...summary.bins.classification_keys.map((key) => {
-        const meta = CLASSIFICATION_META[key];
-        const active = state.classes.has(key);
-        const chip = document.createElement("button");
-        chip.type = "button";
-        chip.className = "chip chip-row";
-        chip.dataset.active = String(active);
-        chip.style.setProperty("--chip-color", meta.color);
-        const dot = document.createElement("i");
-        const label = document.createElement("span");
-        label.textContent = meta.label;
-        const count = document.createElement("span");
-        count.className = "chip-count mono";
-        count.textContent = formatCompact(counts.get(key) ?? 0);
-        chip.append(dot, label, count);
-        chip.addEventListener("click", () => {
-          if (active) {
-            state.classes.delete(key);
-          } else {
-            state.classes.add(key);
-          }
-          void load();
-        });
-        return chip;
+    elements.taxonomyGroups.replaceChildren(
+      ...summary.bins.taxonomies.map((taxonomy) => {
+        const histogram = summary.histograms.taxonomies.find(
+          (entry) => entry.key === taxonomy.key,
+        );
+        const counts = new Map<string, number>();
+        if (histogram?.status === "available") {
+          taxonomy.verdicts.forEach((verdict, index) => {
+            counts.set(verdict.key, histogram.bins[index]?.count ?? 0);
+          });
+        }
+        const selected =
+          state.taxonomies.get(taxonomy.key) ?? new Set<string>();
+
+        const group = document.createElement("div");
+        const heading = document.createElement("h3");
+        heading.className = "sidebar-heading";
+        heading.textContent = taxonomy.label;
+        const chips = document.createElement("div");
+        chips.className = "chip-column";
+        chips.append(
+          ...verdictMeta(taxonomy).map((meta) => {
+            const active = selected.has(meta.key);
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "chip chip-row";
+            chip.dataset.active = String(active);
+            chip.style.setProperty("--chip-color", meta.color);
+            const dot = document.createElement("i");
+            const label = document.createElement("span");
+            label.textContent = meta.label;
+            const count = document.createElement("span");
+            count.className = "chip-count mono";
+            count.textContent = formatCompact(counts.get(meta.key) ?? 0);
+            chip.append(dot, label, count);
+            chip.addEventListener("click", () => {
+              const current =
+                state.taxonomies.get(taxonomy.key) ?? new Set<string>();
+              if (current.has(meta.key)) {
+                current.delete(meta.key);
+              } else {
+                current.add(meta.key);
+              }
+              state.taxonomies.set(taxonomy.key, current);
+              void load();
+            });
+            return chip;
+          }),
+        );
+        group.append(heading, chips);
+        return group;
       }),
     );
 
@@ -299,26 +323,11 @@ export const initWorkbench = (): WorkbenchHandle => {
   };
 
   const renderTreemap = (summary: MempoolSummary): void => {
-    const histogram = summary.histograms[state.treeGroup];
-    if (histogram.status !== "available") {
+    if (state.treeGroup === null) {
       elements.treemap.replaceChildren();
       return;
     }
-    const meta = dimensionBinMeta(state.treeGroup, summary.bins);
-    const nodes = histogram.bins.flatMap((bin, index) =>
-      bin.vsize === 0 || index >= meta.length
-        ? []
-        : [{ ...meta[index]!, count: bin.count, vsize: bin.vsize }],
-    );
-    if (histogram.underived.vsize > 0) {
-      nodes.push({
-        key: "underived",
-        label: "Underived",
-        color: "#38434f",
-        count: histogram.underived.count,
-        vsize: histogram.underived.vsize,
-      });
-    }
+    const nodes = treemapNodes(summary, state.treeGroup);
     const tiles = squarify(nodes, 1_000, 620);
     const total = nodes.reduce((sum, node) => sum + node.vsize, 0);
     elements.treemap.replaceChildren(
@@ -414,10 +423,28 @@ export const initWorkbench = (): WorkbenchHandle => {
       element.textContent = label.text;
       return element;
     });
+
+    const ecdf = summary.ecdf;
+    const taxonomyLabel =
+      ecdf === undefined
+        ? undefined
+        : summary.bins.taxonomies.find((entry) => entry.key === ecdf.taxonomy)
+            ?.label;
+    elements.ecdfSubtitle.textContent =
+      taxonomyLabel === undefined
+        ? "cumulative vsize share"
+        : `cumulative vsize share by ${taxonomyLabel.toLowerCase()} verdict`;
+    elements.ecdf.setAttribute(
+      "aria-label",
+      taxonomyLabel === undefined
+        ? "Cumulative fee-rate distribution"
+        : `Cumulative fee-rate distribution per ${taxonomyLabel.toLowerCase()} verdict`,
+    );
+
     const paths =
-      summary.ecdf === undefined
+      ecdf === undefined
         ? []
-        : ecdfPaths(summary.ecdf, {
+        : ecdfPaths(ecdf, summary.bins, {
             left: 32,
             top: 8,
             width: 432,
@@ -433,8 +460,8 @@ export const initWorkbench = (): WorkbenchHandle => {
           });
     elements.ecdf.replaceChildren(...frame, ...labels, ...paths);
 
-    if (summary.ecdf !== undefined && summary.ecdf.fee_edges.length >= 2) {
-      const edges = summary.ecdf.fee_edges;
+    if (ecdf !== undefined && ecdf.fee_edges.length >= 2) {
+      const edges = ecdf.fee_edges;
       const middle = edges[Math.floor((edges.length - 1) / 2)]!;
       elements.ecdfAxis.replaceChildren(
         ...[
@@ -564,7 +591,7 @@ export const initWorkbench = (): WorkbenchHandle => {
   };
 
   elements.reset.addEventListener("click", () => {
-    state.classes.clear();
+    state.taxonomies.clear();
     state.scripts.clear();
     void load();
   });

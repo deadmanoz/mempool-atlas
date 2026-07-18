@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use atlas_model::Classification;
+use atlas_model::{Classification, TaxonomyDescriptor, VerdictDescriptor};
 use bitcoin::Transaction;
 use serde_json::{Value, json};
 
@@ -35,10 +35,10 @@ const BATCH_MIN_OUTPUTS: u64 = 20;
 const PAYMENT_MAX_INPUTS: u64 = 3;
 const PAYMENT_MAX_OUTPUTS: u64 = 2;
 
-/// The built-in shape rule pack. Without a parsed transaction it reports
-/// [`ClassificationStatus::Unknown`]; with one it always completes, falling
-/// back to the explicit verdict [`Classification::Unknown`] when no rule
-/// matches.
+/// The built-in shape rule pack, owner of the `behavior` taxonomy. Without a
+/// parsed transaction it reports [`ClassificationStatus::Unknown`]; with one
+/// it always completes, falling back to the explicit `unknown` verdict when
+/// no rule matches.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BaselineHeuristics;
 
@@ -48,6 +48,20 @@ impl Classifier for BaselineHeuristics {
             id: CLASSIFIER_ID.to_owned(),
             version: CLASSIFIER_VERSION.to_owned(),
             required_facts: vec!["raw_transaction".to_owned()],
+        }
+    }
+
+    fn taxonomy(&self) -> TaxonomyDescriptor {
+        TaxonomyDescriptor {
+            key: "behavior".to_owned(),
+            label: "Behavior".to_owned(),
+            verdicts: Classification::ALL
+                .into_iter()
+                .map(|classification| VerdictDescriptor {
+                    key: classification.key().to_owned(),
+                    label: classification.label().to_owned(),
+                })
+                .collect(),
         }
     }
 
@@ -61,7 +75,11 @@ impl Classifier for BaselineHeuristics {
         };
         let (verdict, evidence) =
             first_matching_rule(transaction, TransactionShape::derive(transaction));
-        result(ClassificationStatus::Complete, Some(verdict), evidence)
+        result(
+            ClassificationStatus::Complete,
+            Some(verdict.key()),
+            evidence,
+        )
     }
 }
 
@@ -177,14 +195,14 @@ fn anchor_output(transaction: &Transaction) -> Option<usize> {
 
 fn result(
     status: ClassificationStatus,
-    verdict: Option<Classification>,
+    verdict: Option<&str>,
     evidence: Value,
 ) -> ClassificationResult {
     ClassificationResult {
         classifier_id: CLASSIFIER_ID.to_owned(),
         classifier_version: CLASSIFIER_VERSION.to_owned(),
         status,
-        verdict,
+        verdict: verdict.map(str::to_owned),
         evidence,
     }
 }
@@ -216,6 +234,21 @@ mod tests {
     }
 
     #[test]
+    fn taxonomy_is_the_behavior_vocabulary_in_canonical_order() {
+        let taxonomy = BaselineHeuristics.taxonomy();
+        assert_eq!(taxonomy.key, "behavior");
+        assert_eq!(taxonomy.label, "Behavior");
+        let expected: Vec<VerdictDescriptor> = Classification::ALL
+            .into_iter()
+            .map(|classification| VerdictDescriptor {
+                key: classification.key().to_owned(),
+                label: classification.label().to_owned(),
+            })
+            .collect();
+        assert_eq!(taxonomy.verdicts, expected);
+    }
+
+    #[test]
     fn missing_transaction_yields_unknown_status_without_verdict() {
         let result = BaselineHeuristics.classify(&ClassificationInput {
             txid: TXID,
@@ -241,7 +274,7 @@ mod tests {
         );
         let result = classify(&transaction);
         assert_eq!(result.status, ClassificationStatus::Complete);
-        assert_eq!(result.verdict, Some(Classification::Coinjoin));
+        assert_eq!(result.verdict.as_deref(), Some("coinjoin"));
         assert_eq!(
             result.evidence,
             json!({
@@ -266,27 +299,21 @@ mod tests {
                 output(3_300, p2wpkh_script()),
             ],
         );
-        assert_eq!(
-            classify(&transaction).verdict,
-            Some(Classification::Unknown)
-        );
+        assert_eq!(classify(&transaction).verdict.as_deref(), Some("unknown"));
     }
 
     #[test]
     fn rule_order_prefers_coinjoin_over_batch() {
         let transaction =
             transaction_with(5, (0..20).map(|_| output(5_000, p2wpkh_script())).collect());
-        assert_eq!(
-            classify(&transaction).verdict,
-            Some(Classification::Coinjoin)
-        );
+        assert_eq!(classify(&transaction).verdict.as_deref(), Some("coinjoin"));
     }
 
     #[test]
     fn consolidation_matches_many_inputs_into_few_outputs() {
         let transaction = transaction_with(10, vec![output(1_000_000, p2wpkh_script())]);
         let result = classify(&transaction);
-        assert_eq!(result.verdict, Some(Classification::Consolidation));
+        assert_eq!(result.verdict.as_deref(), Some("consolidation"));
         assert_eq!(
             result.evidence,
             json!({ "rule": "consolidation", "input_count": 10, "output_count": 1 })
@@ -302,7 +329,7 @@ mod tests {
                 .collect(),
         );
         let result = classify(&transaction);
-        assert_eq!(result.verdict, Some(Classification::Batch));
+        assert_eq!(result.verdict.as_deref(), Some("batch"));
         assert_eq!(
             result.evidence,
             json!({ "rule": "batch", "output_count": 20 })
@@ -316,7 +343,7 @@ mod tests {
             vec![output(900, p2wpkh_script()), output(0, op_return_script())],
         );
         let result = classify(&transaction);
-        assert_eq!(result.verdict, Some(Classification::Data));
+        assert_eq!(result.verdict.as_deref(), Some("data"));
         assert_eq!(
             result.evidence,
             json!({ "rule": "data", "op_return_output_count": 1 })
@@ -333,7 +360,7 @@ mod tests {
             vec![output(546, p2tr_script())],
         );
         let result = classify(&transaction);
-        assert_eq!(result.verdict, Some(Classification::Data));
+        assert_eq!(result.verdict.as_deref(), Some("data"));
         assert_eq!(
             result.evidence,
             json!({ "rule": "data", "inscription_envelope_input": 0 })
@@ -347,7 +374,7 @@ mod tests {
             vec![output(250_000, p2wpkh_script()), output(330, p2tr_script())],
         );
         let result = classify(&p2tr_anchor);
-        assert_eq!(result.verdict, Some(Classification::Lightning));
+        assert_eq!(result.verdict.as_deref(), Some("lightning"));
         assert_eq!(
             result.evidence,
             json!({
@@ -365,8 +392,8 @@ mod tests {
             ],
         );
         assert_eq!(
-            classify(&p2wsh_anchor).verdict,
-            Some(Classification::Lightning)
+            classify(&p2wsh_anchor).verdict.as_deref(),
+            Some("lightning")
         );
     }
 
@@ -376,13 +403,10 @@ mod tests {
             1,
             vec![output(250_000, p2wpkh_script()), output(331, p2tr_script())],
         );
-        assert_eq!(classify(&off_by_one).verdict, Some(Classification::Payment));
+        assert_eq!(classify(&off_by_one).verdict.as_deref(), Some("payment"));
 
         let wrong_script = transaction_with(1, vec![output(330, p2wpkh_script())]);
-        assert_eq!(
-            classify(&wrong_script).verdict,
-            Some(Classification::Payment)
-        );
+        assert_eq!(classify(&wrong_script).verdict.as_deref(), Some("payment"));
     }
 
     #[test]
@@ -396,7 +420,7 @@ mod tests {
         );
         let result = classify(&transaction);
         assert_eq!(result.status, ClassificationStatus::Complete);
-        assert_eq!(result.verdict, Some(Classification::Payment));
+        assert_eq!(result.verdict.as_deref(), Some("payment"));
         assert_eq!(
             result.evidence,
             json!({ "rule": "payment", "input_count": 2, "output_count": 2 })
@@ -413,7 +437,7 @@ mod tests {
         );
         let result = classify(&transaction);
         assert_eq!(result.status, ClassificationStatus::Complete);
-        assert_eq!(result.verdict, Some(Classification::Unknown));
+        assert_eq!(result.verdict.as_deref(), Some("unknown"));
         assert_eq!(result.evidence, json!({ "rule": "no_match" }));
     }
 }

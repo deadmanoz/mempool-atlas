@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { FeeRateEcdf, JointFeeSize, MempoolSummary } from "./types";
+import type {
+  BinCatalog,
+  FeeRateEcdf,
+  JointFeeSize,
+  MempoolSummary,
+  TaxonomyDescriptor,
+} from "./types";
 import {
   ageBinLabels,
   compositionRows,
@@ -10,9 +16,19 @@ import {
   rangeBinLabels,
   squarify,
   valueBinLabels,
+  verdictMeta,
 } from "./workbench-model";
 
-const summaryWithClassificationUnderived = (underived: {
+const behaviorTaxonomy = (): TaxonomyDescriptor => ({
+  key: "behavior",
+  label: "Behavior",
+  verdicts: [
+    { key: "payment", label: "Payment" },
+    { key: "unknown", label: "Unknown" },
+  ],
+});
+
+const summaryWithTaxonomyUnderived = (underived: {
   count: number;
   vsize: number;
 }): MempoolSummary => ({
@@ -25,23 +41,26 @@ const summaryWithClassificationUnderived = (underived: {
     awaiting_rpc: { count: 0 },
   },
   bins: {
+    taxonomies: [behaviorTaxonomy()],
     feerate_sat_per_vb_edges: [],
     age_ms_edges: [],
     value_sats_edges: [],
     input_count_uppers: [],
     output_count_uppers: [],
-    classification_keys: ["payment", "unknown"],
     script_keys: [],
   },
   histograms: {
-    classification: {
-      status: "available",
-      bins: [
-        { count: 6, vsize: 600 },
-        { count: 2, vsize: 200 },
-      ],
-      underived,
-    },
+    taxonomies: [
+      {
+        key: "behavior",
+        status: "available",
+        bins: [
+          { count: 6, vsize: 600 },
+          { count: 2, vsize: 200 },
+        ],
+        underived,
+      },
+    ],
     script: { status: "unavailable", reason: "requires_raw_transaction" },
     value: { status: "unavailable", reason: "requires_raw_transaction" },
     inputs: { status: "unavailable", reason: "requires_raw_transaction" },
@@ -93,6 +112,54 @@ describe("ramp", () => {
   });
 });
 
+describe("verdictMeta", () => {
+  it("uses the named behavior colours for its known verdicts", () => {
+    expect(verdictMeta(behaviorTaxonomy())).toEqual([
+      { key: "payment", label: "Payment", color: "#56c7d9" },
+      { key: "unknown", label: "Unknown", color: "#6b7a8d" },
+    ]);
+  });
+
+  it("assigns the fallback palette deterministically for other taxonomies", () => {
+    const taxonomy: TaxonomyDescriptor = {
+      key: "bip110",
+      label: "BIP110",
+      verdicts: [
+        { key: "eligible", label: "Eligible" },
+        { key: "ineligible", label: "Ineligible" },
+        { key: "unknown", label: "Unknown" },
+      ],
+    };
+    const first = verdictMeta(taxonomy);
+    const second = verdictMeta(taxonomy);
+    expect(first).toEqual(second);
+    expect(first[0]?.color).not.toBe(first[1]?.color);
+    expect(first[2]?.color).toBe("#6b7a8d");
+  });
+
+  it("gives verdicts at the same index the same fallback colour across taxonomies", () => {
+    const taxonomyA: TaxonomyDescriptor = {
+      key: "bip110",
+      label: "BIP110",
+      verdicts: [
+        { key: "eligible", label: "Eligible" },
+        { key: "unknown", label: "Unknown" },
+      ],
+    };
+    const taxonomyB: TaxonomyDescriptor = {
+      key: "data_protocol",
+      label: "Data protocol",
+      verdicts: [
+        { key: "ordinal", label: "Ordinal" },
+        { key: "unknown", label: "Unknown" },
+      ],
+    };
+    expect(verdictMeta(taxonomyA)[0]?.color).toBe(
+      verdictMeta(taxonomyB)[0]?.color,
+    );
+  });
+});
+
 describe("squarify", () => {
   it("tiles cover the canvas area proportionally", () => {
     const tiles = squarify(
@@ -130,14 +197,29 @@ describe("squarify", () => {
 
 describe("ecdfPaths", () => {
   it("normalizes each series to its own total and skips empty series", () => {
+    const bins: BinCatalog = {
+      taxonomies: [behaviorTaxonomy()],
+      feerate_sat_per_vb_edges: [],
+      age_ms_edges: [],
+      value_sats_edges: [],
+      input_count_uppers: [],
+      output_count_uppers: [],
+      script_keys: [],
+    };
     const ecdf: FeeRateEcdf = {
+      taxonomy: "behavior",
       fee_edges: [0.5, 1, 2, 4],
       series: [
         { key: "unknown", cum_vsize: [0, 50, 100] },
         { key: "payment", cum_vsize: [0, 0, 0] },
       ],
     };
-    const paths = ecdfPaths(ecdf, { left: 0, top: 0, width: 100, height: 100 });
+    const paths = ecdfPaths(ecdf, bins, {
+      left: 0,
+      top: 0,
+      width: 100,
+      height: 100,
+    });
     expect(paths).toHaveLength(1);
     expect(paths[0]?.key).toBe("unknown");
     // Starts at zero share (bottom) and ends at full share (top).
@@ -148,20 +230,18 @@ describe("ecdfPaths", () => {
 
 describe("compositionRows", () => {
   it("appends a trailing underived segment when the active metric is nonzero", () => {
-    const summary = summaryWithClassificationUnderived({
+    const summary = summaryWithTaxonomyUnderived({
       count: 2,
       vsize: 200,
     });
     const rows = compositionRows(summary, "vsize");
-    const classification = rows.find(
-      (row) => row.dimension === "classification",
-    );
-    expect(classification?.status).toBe("available");
-    if (classification?.status !== "available") {
-      throw new Error("expected available classification row");
+    const behavior = rows.find((row) => row.key === "behavior");
+    expect(behavior?.status).toBe("available");
+    if (behavior?.status !== "available") {
+      throw new Error("expected available behavior row");
     }
-    expect(classification.segments).toHaveLength(3);
-    const underived = classification.segments[2]!;
+    expect(behavior.segments).toHaveLength(3);
+    const underived = behavior.segments[2]!;
     expect(underived.key).toBe("underived");
     expect(underived.label).toBe("Underived");
     expect(underived.color).toBe("#38434f");
@@ -169,27 +249,39 @@ describe("compositionRows", () => {
     expect(underived.count).toBe(2);
     expect(underived.vsize).toBe(200);
     // Denominator includes underived: bin fractions shrink accordingly.
-    expect(classification.segments[0]!.fraction).toBeCloseTo(0.6, 5);
-    expect(classification.segments[1]!.fraction).toBeCloseTo(0.2, 5);
+    expect(behavior.segments[0]!.fraction).toBeCloseTo(0.6, 5);
+    expect(behavior.segments[1]!.fraction).toBeCloseTo(0.2, 5);
   });
 
   it("omits the underived segment when underived is zero", () => {
-    const summary = summaryWithClassificationUnderived({
+    const summary = summaryWithTaxonomyUnderived({
       count: 0,
       vsize: 0,
     });
     const rows = compositionRows(summary, "vsize");
-    const classification = rows.find(
-      (row) => row.dimension === "classification",
-    );
-    expect(classification?.status).toBe("available");
-    if (classification?.status !== "available") {
-      throw new Error("expected available classification row");
+    const behavior = rows.find((row) => row.key === "behavior");
+    expect(behavior?.status).toBe("available");
+    if (behavior?.status !== "available") {
+      throw new Error("expected available behavior row");
     }
-    expect(classification.segments).toHaveLength(2);
+    expect(behavior.segments).toHaveLength(2);
     expect(
-      classification.segments.some((segment) => segment.key === "underived"),
+      behavior.segments.some((segment) => segment.key === "underived"),
     ).toBe(false);
+  });
+
+  it("lists every taxonomy ahead of the six fixed shape dimensions", () => {
+    const summary = summaryWithTaxonomyUnderived({ count: 0, vsize: 0 });
+    const rows = compositionRows(summary, "vsize");
+    expect(rows.map((row) => row.key)).toEqual([
+      "behavior",
+      "script",
+      "value",
+      "inputs",
+      "outputs",
+      "age",
+      "feerate",
+    ]);
   });
 });
 

@@ -8,15 +8,6 @@
       86400000,
       259200000
     ],
-    "classification_keys": [
-      "payment",
-      "consolidation",
-      "batch",
-      "coinjoin",
-      "data",
-      "lightning",
-      "unknown"
-    ],
     "feerate_sat_per_vb_edges": [
       1.0,
       2.0,
@@ -48,6 +39,42 @@
       "op_return",
       "other"
     ],
+    "taxonomies": [
+      {
+        "key": "behavior",
+        "label": "Behavior",
+        "verdicts": [
+          {
+            "key": "payment",
+            "label": "Payment"
+          },
+          {
+            "key": "consolidation",
+            "label": "Consolidation"
+          },
+          {
+            "key": "batch",
+            "label": "Batch payout"
+          },
+          {
+            "key": "coinjoin",
+            "label": "CoinJoin"
+          },
+          {
+            "key": "data",
+            "label": "Data / inscription"
+          },
+          {
+            "key": "lightning",
+            "label": "Lightning"
+          },
+          {
+            "key": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      }
+    ],
     "value_sats_edges": [
       100000,
       1000000,
@@ -57,11 +84,16 @@
     ]
   },
   "filter_echo": {
-    "classes": [
-      "unknown"
-    ],
     "feerate_max": 64.0,
-    "feerate_min": 1.0
+    "feerate_min": 1.0,
+    "taxonomies": [
+      {
+        "key": "behavior",
+        "verdicts": [
+          "unknown"
+        ]
+      }
+    ]
   },
   "health": {
     "capture": {
@@ -101,43 +133,6 @@
         {
           "count": 0,
           "vsize": 0
-        }
-      ],
-      "status": "available",
-      "underived": {
-        "count": 0,
-        "vsize": 0
-      }
-    },
-    "classification": {
-      "bins": [
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 0,
-          "vsize": 0
-        },
-        {
-          "count": 4,
-          "vsize": 4291
         }
       ],
       "status": "available",
@@ -286,6 +281,46 @@
         "vsize": 4291
       }
     },
+    "taxonomies": [
+      {
+        "bins": [
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 4,
+            "vsize": 4291
+          }
+        ],
+        "key": "behavior",
+        "status": "available",
+        "underived": {
+          "count": 0,
+          "vsize": 0
+        }
+      }
+    ],
     "value": {
       "bins": [
         {

@@ -1,17 +1,18 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use atlas_classifiers::registered_packs;
 use atlas_model::{
-    Classification, IngestBatchRequest, IngestBatchResponse, IngestResponse,
-    MAX_INGEST_BATCH_BODY_BYTES, MempoolSnapshot, MempoolSummary, ModelError, NormalizedEvent,
-    ScriptType, SourceId, SourcesResponse, SummaryDetail, SummaryFilter,
+    IngestBatchRequest, IngestBatchResponse, IngestResponse, MAX_INGEST_BATCH_BODY_BYTES,
+    MempoolSnapshot, MempoolSummary, ModelError, NormalizedEvent, ScriptType, SourceId,
+    SourcesResponse, SummaryDetail, SummaryFilter, TaxonomyDescriptor, TaxonomyFilter,
 };
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::store::{Store, StoreError};
 use crate::summary::compute_summary;
@@ -129,70 +130,139 @@ async fn sources(State(state): State<AppState>) -> Result<Json<SourcesResponse>,
     Ok(Json(SourcesResponse { sources }))
 }
 
-/// Raw summary query grammar. Facet lists are comma-separated; unknown
-/// parameters are rejected so typos never silently widen a filter.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SummaryQuery {
-    class: Option<String>,
-    script: Option<String>,
-    feerate_min: Option<f64>,
-    feerate_max: Option<f64>,
-    detail: Option<String>,
-}
+/// The prefix that scopes a query parameter to one taxonomy's verdict filter,
+/// as in `t.behavior=payment,data`.
+const TAXONOMY_PARAMETER_PREFIX: &str = "t.";
 
-fn parse_summary_query(query: Option<&str>) -> Result<(SummaryFilter, SummaryDetail), ApiError> {
-    let query: SummaryQuery = serde_urlencoded::from_str(query.unwrap_or(""))
+/// Parses the raw summary query grammar. The accepted parameters are exactly
+/// `script`, `feerate_min`, `feerate_max`, `detail`, and one `t.<taxonomy>`
+/// verdict list per registered taxonomy; facet lists are comma-separated.
+/// Unknown or repeated parameters are rejected so typos never silently widen
+/// a filter, and taxonomy keys and verdicts must exist in the registry.
+fn parse_summary_query(
+    query: Option<&str>,
+    taxonomies: &[TaxonomyDescriptor],
+) -> Result<(SummaryFilter, SummaryDetail), ApiError> {
+    let parameters: Vec<(String, String)> = serde_urlencoded::from_str(query.unwrap_or(""))
         .map_err(|error| ApiError::InvalidQuery(error.to_string()))?;
 
-    let classes = query
-        .class
-        .as_deref()
-        .map(|list| {
-            parse_facet_list(list, "class", |key| {
-                Classification::from_key(key).ok_or_else(|| ModelError::UnknownFilterValue {
-                    facet: "class",
-                    value: key.to_owned(),
-                })
-            })
-        })
-        .transpose()?;
-    let scripts = query
-        .script
-        .as_deref()
-        .map(|list| {
-            parse_facet_list(list, "script", |key| {
-                ScriptType::from_key(key).ok_or_else(|| ModelError::UnknownFilterValue {
-                    facet: "script",
-                    value: key.to_owned(),
-                })
-            })
-        })
-        .transpose()?;
-    let filter = SummaryFilter {
-        classes,
-        scripts,
-        feerate_min: query.feerate_min,
-        feerate_max: query.feerate_max,
-    };
-    filter.validate()?;
-
+    let mut taxonomy_filters: Vec<TaxonomyFilter> = Vec::new();
+    let mut scripts = None;
+    let mut feerate_min = None;
+    let mut feerate_max = None;
     let mut detail = SummaryDetail::default();
-    if let Some(selections) = query.detail.as_deref() {
-        for selection in selections.split(',') {
-            match selection {
-                "ecdf" => detail.ecdf = true,
-                "joint" => detail.joint_fee_size = true,
-                other => {
-                    return Err(ModelError::UnknownDetailSelection {
-                        value: other.to_owned(),
+    let mut detail_seen = false;
+    for (parameter, value) in parameters {
+        if let Some(taxonomy_key) = parameter.strip_prefix(TAXONOMY_PARAMETER_PREFIX) {
+            taxonomy_filters.push(parse_taxonomy_filter(taxonomy_key, &value, taxonomies)?);
+            continue;
+        }
+        match parameter.as_str() {
+            "script" => {
+                reject_duplicate("script", scripts.is_some())?;
+                scripts = Some(parse_facet_list(&value, "script", |key| {
+                    ScriptType::from_key(key).ok_or_else(|| ModelError::UnknownFilterValue {
+                        facet: "script",
+                        value: key.to_owned(),
+                    })
+                })?);
+            }
+            "feerate_min" => {
+                reject_duplicate("feerate_min", feerate_min.is_some())?;
+                feerate_min = Some(parse_feerate_bound("feerate_min", &value)?);
+            }
+            "feerate_max" => {
+                reject_duplicate("feerate_max", feerate_max.is_some())?;
+                feerate_max = Some(parse_feerate_bound("feerate_max", &value)?);
+            }
+            "detail" => {
+                reject_duplicate("detail", detail_seen)?;
+                detail_seen = true;
+                for selection in value.split(',') {
+                    match selection {
+                        "ecdf" => detail.ecdf = true,
+                        "joint" => detail.joint_fee_size = true,
+                        other => {
+                            return Err(ModelError::UnknownDetailSelection {
+                                value: other.to_owned(),
+                            }
+                            .into());
+                        }
                     }
-                    .into());
                 }
+            }
+            other => {
+                return Err(ApiError::InvalidQuery(format!("unknown parameter {other}")));
             }
         }
     }
+
+    let filter = SummaryFilter {
+        taxonomies: taxonomy_filters,
+        scripts,
+        feerate_min,
+        feerate_max,
+    };
+    filter.validate()?;
     Ok((filter, detail))
+}
+
+/// Parses one `t.<taxonomy>=<verdict,verdict>` parameter against the
+/// registered taxonomy vocabularies. Duplicate parameters for the same
+/// taxonomy are detected by [`SummaryFilter::validate`].
+fn parse_taxonomy_filter(
+    taxonomy_key: &str,
+    value: &str,
+    taxonomies: &[TaxonomyDescriptor],
+) -> Result<TaxonomyFilter, ApiError> {
+    let taxonomy = taxonomies
+        .iter()
+        .find(|taxonomy| taxonomy.key == taxonomy_key)
+        .ok_or_else(|| ModelError::UnknownTaxonomy {
+            key: taxonomy_key.to_owned(),
+        })?;
+    if value.is_empty() {
+        return Err(ModelError::EmptyTaxonomyFilter {
+            taxonomy: taxonomy_key.to_owned(),
+        }
+        .into());
+    }
+    let verdicts = value
+        .split(',')
+        .map(|verdict| {
+            if taxonomy
+                .verdicts
+                .iter()
+                .any(|descriptor| descriptor.key == verdict)
+            {
+                Ok(verdict.to_owned())
+            } else {
+                Err(ModelError::UnknownTaxonomyVerdict {
+                    taxonomy: taxonomy_key.to_owned(),
+                    verdict: verdict.to_owned(),
+                })
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TaxonomyFilter {
+        key: taxonomy_key.to_owned(),
+        verdicts,
+    })
+}
+
+fn reject_duplicate(parameter: &str, seen: bool) -> Result<(), ApiError> {
+    if seen {
+        return Err(ApiError::InvalidQuery(format!(
+            "duplicate parameter {parameter}"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_feerate_bound(field: &'static str, value: &str) -> Result<f64, ApiError> {
+    value
+        .parse()
+        .map_err(|_| ApiError::InvalidQuery(format!("{field} is not a number: {value}")))
 }
 
 fn parse_facet_list<T>(
@@ -212,7 +282,11 @@ async fn mempool_summary(
     RawQuery(query): RawQuery,
 ) -> Result<Json<MempoolSummary>, ApiError> {
     let source_id = SourceId::new(source_id)?;
-    let (filter, detail) = parse_summary_query(query.as_deref())?;
+    let taxonomies: Vec<TaxonomyDescriptor> = registered_packs()
+        .iter()
+        .map(|pack| pack.taxonomy())
+        .collect();
+    let (filter, detail) = parse_summary_query(query.as_deref(), &taxonomies)?;
     let store = Arc::clone(&state.store);
     let requested_source = source_id.clone();
     let as_of_ms = (state.now_ms)();
@@ -221,7 +295,12 @@ async fn mempool_summary(
             return Ok(None);
         };
         Ok(Some(compute_summary(
-            source_id, &facts, &filter, detail, as_of_ms,
+            source_id,
+            &facts,
+            &filter,
+            detail,
+            as_of_ms,
+            &taxonomies,
         )))
     })
     .await

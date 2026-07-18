@@ -20,8 +20,8 @@
       "body": "mempool_summary",
       "method": "GET",
       "path": "mempool-summary-filtered.json",
-      "request": "/api/v1/sources/source-a/mempool/summary?class=unknown&feerate_min=1&feerate_max=64",
-      "scenario": "classification facet plus inclusive fee-rate bounds shrink the matching set while totals.all is unchanged",
+      "request": "/api/v1/sources/source-a/mempool/summary?t.behavior=unknown&feerate_min=1&feerate_max=64",
+      "scenario": "behavior-taxonomy verdict facet plus inclusive fee-rate bounds shrink the matching set while totals.all is unchanged",
       "status": 200
     },
     {

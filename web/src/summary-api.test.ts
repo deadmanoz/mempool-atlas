@@ -5,16 +5,64 @@ import {
   summaryQuery,
 } from "./summary-api";
 
+const behaviorTaxonomy = (): Record<string, unknown> => ({
+  key: "behavior",
+  label: "Behavior",
+  verdicts: [
+    { key: "payment", label: "Payment" },
+    { key: "consolidation", label: "Consolidation" },
+    { key: "batch", label: "Batch payout" },
+    { key: "coinjoin", label: "CoinJoin" },
+    { key: "data", label: "Data / inscription" },
+    { key: "lightning", label: "Lightning" },
+    { key: "unknown", label: "Unknown" },
+  ],
+});
+
+const behaviorHistogram = (): Record<string, unknown> => ({
+  key: "behavior",
+  status: "available",
+  bins: Array.from({ length: 7 }, (_, index) =>
+    index === 6 ? { count: 1, vsize: 200 } : { count: 0, vsize: 0 },
+  ),
+  underived: { count: 0, vsize: 0 },
+});
+
+// A second, minimal taxonomy used only to exercise catalog/histogram
+// alignment rules that a single-taxonomy fixture can't reach.
+const bip110Taxonomy = (): Record<string, unknown> => ({
+  key: "bip110",
+  label: "BIP110",
+  verdicts: [
+    { key: "eligible", label: "Eligible" },
+    { key: "unknown", label: "Unknown" },
+  ],
+});
+
+const bip110Histogram = (): Record<string, unknown> => ({
+  key: "bip110",
+  status: "available",
+  bins: [
+    { count: 0, vsize: 0 },
+    { count: 0, vsize: 0 },
+  ],
+  underived: { count: 0, vsize: 0 },
+});
+
 const validSummary = (): Record<string, unknown> => ({
   source_id: "source-a",
   as_of_ms: 1_752_710_400_000,
-  filter_echo: { classes: ["unknown"], feerate_min: 1 },
+  filter_echo: {
+    taxonomies: [{ key: "behavior", verdicts: ["unknown"] }],
+    feerate_min: 1,
+  },
   totals: {
     all: { count: 2, vsize: 400 },
     matching: { count: 1, vsize: 200 },
     awaiting_rpc: { count: 3 },
   },
   bins: {
+    taxonomies: [behaviorTaxonomy()],
     feerate_sat_per_vb_edges: [1, 2, 4, 8, 16, 32, 64, 128],
     age_ms_edges: [600_000, 3_600_000, 21_600_000, 86_400_000, 259_200_000],
     value_sats_edges: [
@@ -22,15 +70,6 @@ const validSummary = (): Record<string, unknown> => ({
     ],
     input_count_uppers: [1, 5, 20, 100],
     output_count_uppers: [1, 2, 10, 50],
-    classification_keys: [
-      "payment",
-      "consolidation",
-      "batch",
-      "coinjoin",
-      "data",
-      "lightning",
-      "unknown",
-    ],
     script_keys: [
       "p2tr",
       "p2wpkh",
@@ -42,13 +81,7 @@ const validSummary = (): Record<string, unknown> => ({
     ],
   },
   histograms: {
-    classification: {
-      status: "available",
-      bins: Array.from({ length: 7 }, (_, index) =>
-        index === 6 ? { count: 1, vsize: 200 } : { count: 0, vsize: 0 },
-      ),
-      underived: { count: 0, vsize: 0 },
-    },
+    taxonomies: [behaviorHistogram()],
     script: { status: "unavailable", reason: "requires_raw_transaction" },
     value: { status: "unavailable", reason: "requires_raw_transaction" },
     inputs: { status: "unavailable", reason: "requires_raw_transaction" },
@@ -65,6 +98,7 @@ const validSummary = (): Record<string, unknown> => ({
     },
   },
   ecdf: {
+    taxonomy: "behavior",
     fee_edges: [0.5, 1, 2, 512],
     series: [{ key: "unknown", cum_vsize: [0, 100, 200] }],
   },
@@ -87,7 +121,11 @@ describe("parseMempoolSummary", () => {
     const summary = parseMempoolSummary(validSummary());
     expect(summary.source_id).toBe("source-a");
     expect(summary.totals.awaiting_rpc.count).toBe(3);
-    expect(summary.filter_echo.classes).toEqual(["unknown"]);
+    expect(summary.filter_echo.taxonomies).toEqual([
+      { key: "behavior", verdicts: ["unknown"] },
+    ]);
+    expect(summary.bins.taxonomies).toHaveLength(1);
+    expect(summary.bins.taxonomies[0]?.key).toBe("behavior");
     expect(summary.histograms.script.status).toBe("unavailable");
     const age = summary.histograms.age;
     expect(age.status).toBe("available");
@@ -95,11 +133,15 @@ describe("parseMempoolSummary", () => {
       count: 2,
       vsize: 150,
     });
-    const classification = summary.histograms.classification;
-    expect(classification.status).toBe("available");
-    expect(
-      classification.status === "available" && classification.underived,
-    ).toEqual({ count: 0, vsize: 0 });
+    const behavior = summary.histograms.taxonomies.find(
+      (entry) => entry.key === "behavior",
+    );
+    expect(behavior?.status).toBe("available");
+    expect(behavior?.status === "available" && behavior.underived).toEqual({
+      count: 0,
+      vsize: 0,
+    });
+    expect(summary.ecdf?.taxonomy).toBe("behavior");
     expect(summary.ecdf?.series[0]?.key).toBe("unknown");
     expect(summary.joint_fee_size?.grid).toHaveLength(2);
   });
@@ -115,11 +157,36 @@ describe("parseMempoolSummary", () => {
 
   it.each([
     [
-      "unknown classification key",
+      "taxonomy missing the unknown verdict",
       (payload: Record<string, unknown>): void => {
-        (payload.bins as Record<string, unknown>).classification_keys = [
-          "snazzy",
+        const bins = payload.bins as Record<string, unknown>;
+        bins.taxonomies = [
+          {
+            ...behaviorTaxonomy(),
+            verdicts: [{ key: "payment", label: "Payment" }],
+          },
         ];
+      },
+    ],
+    [
+      "histogram taxonomy order mismatch with catalog",
+      (payload: Record<string, unknown>): void => {
+        const bins = payload.bins as Record<string, unknown>;
+        const histograms = payload.histograms as Record<string, unknown>;
+        bins.taxonomies = [behaviorTaxonomy(), bip110Taxonomy()];
+        // Same two keys, but histograms are supplied in the wrong order.
+        histograms.taxonomies = [bip110Histogram(), behaviorHistogram()];
+      },
+    ],
+    [
+      "taxonomy histogram bin count mismatch with its verdicts",
+      (payload: Record<string, unknown>): void => {
+        const histograms = payload.histograms as Record<string, unknown>;
+        const taxonomies = histograms.taxonomies as Record<string, unknown>[];
+        taxonomies[0] = {
+          ...taxonomies[0],
+          bins: (taxonomies[0]!.bins as unknown[]).slice(0, 3),
+        };
       },
     ],
     [
@@ -142,6 +209,20 @@ describe("parseMempoolSummary", () => {
       (payload: Record<string, unknown>): void => {
         (payload.ecdf as Record<string, unknown>).series = [
           { key: "unknown", cum_vsize: ["many"] },
+        ];
+      },
+    ],
+    [
+      "ecdf taxonomy not in the bin catalog",
+      (payload: Record<string, unknown>): void => {
+        (payload.ecdf as Record<string, unknown>).taxonomy = "bip110";
+      },
+    ],
+    [
+      "ecdf series key not a verdict of its taxonomy",
+      (payload: Record<string, unknown>): void => {
+        (payload.ecdf as Record<string, unknown>).series = [
+          { key: "not-a-verdict", cum_vsize: [0, 100, 200] },
         ];
       },
     ],
@@ -191,13 +272,25 @@ describe("parseSourcesResponse", () => {
 describe("summaryQuery", () => {
   it("always requests detail blocks and encodes facets", () => {
     const query = summaryQuery({
-      classes: ["payment", "data"],
+      taxonomies: [{ key: "behavior", verdicts: ["payment", "data"] }],
       feerate_min: 4,
     });
     const parameters = new URLSearchParams(query);
-    expect(parameters.get("class")).toBe("payment,data");
+    expect(parameters.get("t.behavior")).toBe("payment,data");
     expect(parameters.get("feerate_min")).toBe("4");
     expect(parameters.get("detail")).toBe("ecdf,joint");
     expect(parameters.get("script")).toBeNull();
+  });
+
+  it("encodes one t.<key> parameter per taxonomy", () => {
+    const query = summaryQuery({
+      taxonomies: [
+        { key: "behavior", verdicts: ["payment"] },
+        { key: "bip110", verdicts: ["eligible", "unknown"] },
+      ],
+    });
+    const parameters = new URLSearchParams(query);
+    expect(parameters.get("t.behavior")).toBe("payment");
+    expect(parameters.get("t.bip110")).toBe("eligible,unknown");
   });
 });

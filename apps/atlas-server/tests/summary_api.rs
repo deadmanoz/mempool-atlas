@@ -4,13 +4,19 @@
 //! module; fixture parity lives in the fixture contract test.
 
 use atlas_model::{
-    AggregateBin, Evidence, MempoolEntryFacts, MempoolSummary, NormalizedEvent,
+    AggregateBin, DimensionHistogram, Evidence, MempoolEntryFacts, MempoolSummary, NormalizedEvent,
     ReconciledMembership, SourceId, SourceSessionId, SourcesResponse,
 };
 use atlas_server::{Store, router_with_clock};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use bitcoin::absolute::LockTime;
+use bitcoin::hashes::Hash;
+use bitcoin::transaction::Version;
+use bitcoin::{
+    Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, WPubkeyHash, Witness,
+};
 use tower::ServiceExt;
 
 const AS_OF_MS: u64 = 1_752_710_400_000;
@@ -101,7 +107,7 @@ async fn summary_applies_filters_from_query_parameters() {
 
     let (status, body) = get(
         application,
-        "/api/v1/sources/source-a/mempool/summary?class=unknown&feerate_min=1",
+        "/api/v1/sources/source-a/mempool/summary?t.behavior=unknown&feerate_min=1",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -114,9 +120,11 @@ async fn summary_applies_filters_from_query_parameters() {
             vsize: 200
         }
     );
+    assert_eq!(summary.filter_echo.taxonomies.len(), 1);
+    assert_eq!(summary.filter_echo.taxonomies[0].key, "behavior");
     assert_eq!(
-        summary.filter_echo.classes,
-        Some(vec![atlas_model::Classification::Unknown])
+        summary.filter_echo.taxonomies[0].verdicts,
+        vec!["unknown".to_owned()]
     );
     assert_eq!(summary.filter_echo.feerate_min, Some(1.0));
 }
@@ -127,9 +135,16 @@ async fn summary_rejects_malformed_queries_with_json_errors() {
         // Unknown parameters, facet values, and detail selections must never
         // silently widen or narrow a filter.
         "/api/v1/sources/source-a/mempool/summary?flavor=spicy",
-        "/api/v1/sources/source-a/mempool/summary?class=snazzy",
+        // The pre-taxonomy `class` grammar is gone, not silently ignored.
+        "/api/v1/sources/source-a/mempool/summary?class=unknown",
+        // Unknown taxonomy, unknown verdict, empty verdict list, and a
+        // duplicated taxonomy parameter.
+        "/api/v1/sources/source-a/mempool/summary?t.bogus=payment",
+        "/api/v1/sources/source-a/mempool/summary?t.behavior=snazzy",
+        "/api/v1/sources/source-a/mempool/summary?t.behavior=",
+        "/api/v1/sources/source-a/mempool/summary?t.behavior=payment&t.behavior=data",
         "/api/v1/sources/source-a/mempool/summary?script=opreturn",
-        "/api/v1/sources/source-a/mempool/summary?class=",
+        "/api/v1/sources/source-a/mempool/summary?script=",
         "/api/v1/sources/source-a/mempool/summary?feerate_min=8&feerate_max=4",
         "/api/v1/sources/source-a/mempool/summary?feerate_min=-1",
         "/api/v1/sources/source-a/mempool/summary?feerate_min=fast",
@@ -145,6 +160,96 @@ async fn summary_rejects_malformed_queries_with_json_errors() {
             "{uri} should return a JSON error body, got {body}"
         );
     }
+}
+
+#[tokio::test]
+async fn summary_carries_taxonomy_bins_and_derived_verdicts_land_in_them() {
+    // A deterministic OP_RETURN-carrying transaction classifies as `data`
+    // once its raw bytes are observed over P2P.
+    let payload =
+        bitcoin::script::PushBytesBuf::try_from(b"atlas-test".to_vec()).expect("push bytes");
+    let data_transaction = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: bitcoin::Txid::from_byte_array([0x24; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[vec![0xab; 107]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::new_op_return(payload),
+            },
+            TxOut {
+                value: Amount::from_sat(120_000),
+                script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x33; 20])),
+            },
+        ],
+    };
+    let data_txid = data_transaction.compute_txid().to_string();
+    let (_temporary, application) = application(&[
+        event(
+            "source-a",
+            1,
+            Evidence::P2pTransaction {
+                txid: data_txid.clone(),
+                wtxid: data_transaction.compute_wtxid().to_string(),
+                raw_transaction_hex: Some(hex::encode(bitcoin::consensus::encode::serialize(
+                    &data_transaction,
+                ))),
+                peer_id: Some(7),
+                inbound: Some(true),
+            },
+        ),
+        event("source-a", 2, present(data_txid, 200, 1_700)),
+        event("source-a", 3, present(txid(1), 400, 800)),
+    ]);
+
+    let (status, body) = get(application, "/api/v1/sources/source-a/mempool/summary").await;
+    assert_eq!(status, StatusCode::OK);
+    let summary: MempoolSummary = serde_json::from_value(body).expect("summary");
+
+    // The catalog leads with the behavior taxonomy and its verdict order
+    // defines the histogram's bin order.
+    let behavior = &summary.bins.taxonomies[0];
+    assert_eq!(behavior.key, "behavior");
+    assert_eq!(summary.histograms.taxonomies[0].key, "behavior");
+    let DimensionHistogram::Available { bins, underived } =
+        &summary.histograms.taxonomies[0].histogram
+    else {
+        panic!("behavior histogram must be available");
+    };
+    assert_eq!(bins.len(), behavior.verdicts.len());
+    let bin_for = |verdict: &str| {
+        let index = behavior
+            .verdicts
+            .iter()
+            .position(|descriptor| descriptor.key == verdict)
+            .unwrap_or_else(|| panic!("behavior taxonomy declares {verdict}"));
+        bins[index]
+    };
+    assert_eq!(
+        bin_for("data"),
+        AggregateBin {
+            count: 1,
+            vsize: 200
+        }
+    );
+    // The verdictless membership lands in the honest unknown bin, never in
+    // the taxonomy's underived bucket.
+    assert_eq!(
+        bin_for("unknown"),
+        AggregateBin {
+            count: 1,
+            vsize: 400
+        }
+    );
+    assert_eq!(*underived, AggregateBin::default());
 }
 
 #[tokio::test]

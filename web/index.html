@@ -50,10 +50,7 @@
 
         <div class="workbench-body">
           <aside class="workbench-sidebar" aria-label="Filters">
-            <div>
-              <h3 class="sidebar-heading">Classification</h3>
-              <div id="class-chips" class="chip-column"></div>
-            </div>
+            <div id="taxonomy-groups"></div>
             <div>
               <h3 class="sidebar-heading">Script type</h3>
               <div id="script-chips" class="chip-wrap"></div>
@@ -74,12 +71,12 @@
           <div class="workbench-rail">
             <div>
               <h3 class="rail-heading">Fee-rate ECDF</h3>
-              <p class="rail-sub">cumulative vsize share by class</p>
+              <p id="ecdf-subtitle" class="rail-sub">cumulative vsize share</p>
               <svg
                 id="ecdf"
                 viewBox="0 0 480 172"
                 role="img"
-                aria-label="Cumulative fee-rate distribution per classification"
+                aria-label="Cumulative fee-rate distribution"
               ></svg>
               <div id="ecdf-axis" class="axis-row mono"></div>
             </div>

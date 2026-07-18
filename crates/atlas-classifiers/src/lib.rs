@@ -5,6 +5,11 @@
 //! classifier the parsed [`bitcoin::Transaction`]; classifiers never receive
 //! raw bytes. A classifier states what it could derive instead of guessing:
 //! absent facts produce a non-`Complete` status, never a fabricated verdict.
+//!
+//! Each pack owns one taxonomy: a declared verdict vocabulary published as
+//! [`TaxonomyDescriptor`] data. Verdicts travel as keys into that
+//! vocabulary, so a new taxonomy adds a pack instead of widening a shared
+//! enum.
 
 mod baseline;
 mod shape;
@@ -12,7 +17,7 @@ mod shape;
 #[cfg(test)]
 mod test_support;
 
-use atlas_model::Classification;
+use atlas_model::TaxonomyDescriptor;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -29,8 +34,7 @@ pub struct ClassifierManifest {
 
 /// How far one classification run got. `Unknown` states that required facts
 /// were unavailable; a classifier that ran to completion without matching
-/// reports `Complete` with the explicit verdict
-/// [`Classification::Unknown`] instead.
+/// reports `Complete` with its taxonomy's explicit `unknown` verdict instead.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassificationStatus {
@@ -52,22 +56,37 @@ pub struct ClassificationInput<'a> {
 }
 
 /// One classifier's statement about one transaction. `verdict` is `Some` iff
-/// `status` is [`ClassificationStatus::Complete`]; every other status
-/// explains itself through `evidence` instead of guessing a verdict.
+/// `status` is [`ClassificationStatus::Complete`] or
+/// [`ClassificationStatus::Partial`] (a `Partial` verdict is honest but
+/// derived from incomplete evidence, e.g. BIP-110's "indeterminate"),
+/// and its value must be one of the verdict keys the pack's
+/// [`TaxonomyDescriptor`] declares. Every other status explains itself
+/// through `evidence` instead of guessing a verdict.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ClassificationResult {
     pub classifier_id: String,
     pub classifier_version: String,
     pub status: ClassificationStatus,
-    pub verdict: Option<Classification>,
+    pub verdict: Option<String>,
     pub evidence: Value,
 }
 
 /// One in-process rule pack. Implementations must be pure over their input:
 /// the same input always yields the same result for one classifier version.
+/// Each pack owns exactly one taxonomy and only ever emits verdict keys that
+/// taxonomy declares.
 pub trait Classifier: Send + Sync {
     fn manifest(&self) -> ClassifierManifest;
+    fn taxonomy(&self) -> TaxonomyDescriptor;
     fn classify(&self, input: &ClassificationInput<'_>) -> ClassificationResult;
+}
+
+/// Every classifier pack compiled into this build, in stable registration
+/// order. The server derives one classification row per pack per
+/// transaction, so each transaction receives one verdict per taxonomy.
+#[must_use]
+pub fn registered_packs() -> Vec<Box<dyn Classifier>> {
+    vec![Box::new(BaselineHeuristics)]
 }
 
 #[cfg(test)]
@@ -101,7 +120,7 @@ mod tests {
             classifier_id: "baseline-heuristics".to_owned(),
             classifier_version: "0.1.0".to_owned(),
             status: ClassificationStatus::Complete,
-            verdict: Some(Classification::Payment),
+            verdict: Some("payment".to_owned()),
             evidence: serde_json::json!({ "rule": "payment" }),
         };
         assert_eq!(
@@ -114,5 +133,48 @@ mod tests {
                 "evidence": { "rule": "payment" },
             })
         );
+    }
+
+    #[test]
+    fn registration_order_defines_the_wire_taxonomy_order() {
+        let keys: Vec<String> = registered_packs()
+            .iter()
+            .map(|pack| pack.taxonomy().key)
+            .collect();
+        assert_eq!(keys, vec!["behavior".to_owned()]);
+    }
+
+    #[test]
+    fn every_registered_pack_declares_a_well_formed_taxonomy() {
+        let packs = registered_packs();
+        assert!(!packs.is_empty());
+        for pack in packs {
+            let taxonomy = pack.taxonomy();
+            let mut seen = std::collections::HashSet::new();
+            for verdict in &taxonomy.verdicts {
+                assert!(
+                    !verdict.key.is_empty()
+                        && verdict.key.chars().all(|character| {
+                            character.is_ascii_lowercase()
+                                || character.is_ascii_digit()
+                                || character == '_'
+                        }),
+                    "taxonomy {} verdict key {:?} is not lowercase [a-z0-9_]+",
+                    taxonomy.key,
+                    verdict.key,
+                );
+                assert!(
+                    seen.insert(verdict.key.as_str()),
+                    "taxonomy {} declares duplicate verdict key {:?}",
+                    taxonomy.key,
+                    verdict.key,
+                );
+            }
+            assert!(
+                seen.contains("unknown"),
+                "taxonomy {} is missing the required unknown verdict",
+                taxonomy.key,
+            );
+        }
     }
 }

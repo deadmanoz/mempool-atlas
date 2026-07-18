@@ -4,26 +4,48 @@
 
 import type {
   BinCatalog,
-  ClassificationKey,
+  DimensionHistogram,
   FeeRateEcdf,
   JointFeeSize,
   MempoolSummary,
   ScriptTypeKey,
-  SummaryDimension,
+  ShapeDimension,
+  TaxonomyDescriptor,
 } from "./types";
 
-export const CLASSIFICATION_META: Record<
-  ClassificationKey,
-  { label: string; color: string }
-> = {
-  payment: { label: "Payment", color: "#56c7d9" },
-  consolidation: { label: "Consolidation", color: "#5b9dd9" },
-  batch: { label: "Batch payout", color: "#7fce6b" },
-  coinjoin: { label: "CoinJoin", color: "#8f7de0" },
-  data: { label: "Data / inscription", color: "#e0a35a" },
-  lightning: { label: "Lightning", color: "#d9759e" },
-  unknown: { label: "Unknown", color: "#6b7a8d" },
+/** Named colours for the "behavior" taxonomy's seven baseline verdicts.
+ * Any other taxonomy, or a verdict later added to "behavior" that isn't in
+ * this map, falls back to the fixed palette below so the client never has
+ * to hardcode a closed set of verdict keys. */
+export const BEHAVIOR_COLORS: Record<string, string> = {
+  payment: "#56c7d9",
+  consolidation: "#5b9dd9",
+  batch: "#7fce6b",
+  coinjoin: "#8f7de0",
+  data: "#e0a35a",
+  lightning: "#d9759e",
+  unknown: "#6b7a8d",
 };
+
+const UNKNOWN_VERDICT_COLOR = "#6b7a8d";
+const UNDERIVED_COLOR = "#38434f";
+
+/** Deterministic fallback palette for verdicts without a named colour,
+ * indexed by the verdict's position within its taxonomy descriptor. */
+const FALLBACK_VERDICT_PALETTE: readonly string[] = [
+  "#56c7d9",
+  "#5b9dd9",
+  "#7fce6b",
+  "#8f7de0",
+  "#e0a35a",
+  "#d9759e",
+  "#5ad1c9",
+  "#c9d95a",
+  "#d95a6b",
+  "#5a7fd9",
+  "#a3e056",
+  "#e05ad4",
+];
 
 export const SCRIPT_META: Record<
   ScriptTypeKey,
@@ -172,18 +194,36 @@ export interface DimensionBinMeta {
   color: string;
 }
 
-/** Ordered per-bin labels and colours for one dimension, derived from the
- * server-emitted bin catalog so the client never hardcodes edges. */
+/** Ordered per-verdict labels and colours for one taxonomy, deterministic in
+ * the verdict's catalog order regardless of which taxonomy it belongs to. */
+export const verdictMeta = (taxonomy: TaxonomyDescriptor): DimensionBinMeta[] =>
+  taxonomy.verdicts.map((verdict, index) => {
+    if (verdict.key === "unknown") {
+      return {
+        key: verdict.key,
+        label: verdict.label,
+        color: UNKNOWN_VERDICT_COLOR,
+      };
+    }
+    const named =
+      taxonomy.key === "behavior" ? BEHAVIOR_COLORS[verdict.key] : undefined;
+    return {
+      key: verdict.key,
+      label: verdict.label,
+      color:
+        named ??
+        FALLBACK_VERDICT_PALETTE[index % FALLBACK_VERDICT_PALETTE.length]!,
+    };
+  });
+
+/** Ordered per-bin labels and colours for one of the fixed transaction-shape
+ * dimensions, derived from the server-emitted bin catalog so the client
+ * never hardcodes edges. */
 export const dimensionBinMeta = (
-  dimension: SummaryDimension,
+  dimension: ShapeDimension,
   bins: BinCatalog,
 ): DimensionBinMeta[] => {
   switch (dimension) {
-    case "classification":
-      return bins.classification_keys.map((key) => ({
-        key,
-        ...CLASSIFICATION_META[key],
-      }));
     case "script":
       return bins.script_keys.map((key) => ({ key, ...SCRIPT_META[key] }));
     case "value":
@@ -233,20 +273,19 @@ export interface CompositionSegment extends DimensionBinMeta {
 
 export type CompositionRow =
   | {
-      dimension: SummaryDimension;
+      key: string;
       label: string;
       status: "unavailable";
       reason: string;
     }
   | {
-      dimension: SummaryDimension;
+      key: string;
       label: string;
       status: "available";
       segments: CompositionSegment[];
     };
 
-const DIMENSION_LABELS: Record<SummaryDimension, string> = {
-  classification: "Classification",
+const SHAPE_DIMENSION_LABELS: Record<ShapeDimension, string> = {
   script: "Script type",
   value: "Output value (BTC)",
   inputs: "Inputs",
@@ -255,8 +294,9 @@ const DIMENSION_LABELS: Record<SummaryDimension, string> = {
   feerate: "Fee-rate (sat/vB)",
 };
 
-export const COMPOSITION_ORDER: readonly SummaryDimension[] = [
-  "classification",
+/** Fixed rendering order for the transaction-shape dimensions; taxonomies are
+ * open-ended and are always listed ahead of these in wire order instead. */
+const SHAPE_DIMENSION_ORDER: readonly ShapeDimension[] = [
   "script",
   "value",
   "inputs",
@@ -265,49 +305,77 @@ export const COMPOSITION_ORDER: readonly SummaryDimension[] = [
   "feerate",
 ];
 
+const findTaxonomyHistogram = (summary: MempoolSummary, key: string) =>
+  summary.histograms.taxonomies.find((entry) => entry.key === key);
+
+const buildCompositionRow = (
+  key: string,
+  label: string,
+  histogram: DimensionHistogram,
+  meta: DimensionBinMeta[],
+  metric: "count" | "vsize",
+): CompositionRow => {
+  if (histogram.status === "unavailable") {
+    return { key, label, status: "unavailable", reason: histogram.reason };
+  }
+  const binTotal = histogram.bins.reduce((sum, bin) => sum + bin[metric], 0);
+  const total = binTotal + histogram.underived[metric];
+  const segments = histogram.bins.flatMap((bin, index) => {
+    if (bin[metric] === 0 || index >= meta.length) {
+      return [];
+    }
+    return [
+      {
+        ...meta[index]!,
+        fraction: total === 0 ? 0 : bin[metric] / total,
+        count: bin.count,
+        vsize: bin.vsize,
+      },
+    ];
+  });
+  if (histogram.underived[metric] > 0) {
+    segments.push({
+      key: "underived",
+      label: "Underived",
+      color: UNDERIVED_COLOR,
+      fraction: total === 0 ? 0 : histogram.underived[metric] / total,
+      count: histogram.underived.count,
+      vsize: histogram.underived.vsize,
+    });
+  }
+  return { key, label, status: "available", segments };
+};
+
+/** One row per taxonomy (label from the wire catalog, verdict order and
+ * colours from `verdictMeta`) followed by the six fixed shape dimensions. */
 export const compositionRows = (
   summary: MempoolSummary,
   metric: "count" | "vsize",
-): CompositionRow[] =>
-  COMPOSITION_ORDER.map((dimension) => {
-    const histogram = summary.histograms[dimension];
-    const label = DIMENSION_LABELS[dimension];
-    if (histogram.status === "unavailable") {
-      return {
-        dimension,
-        label,
-        status: "unavailable",
-        reason: histogram.reason,
-      };
+): CompositionRow[] => {
+  const taxonomyRows = summary.bins.taxonomies.map((taxonomy) => {
+    const histogram = findTaxonomyHistogram(summary, taxonomy.key);
+    if (histogram === undefined) {
+      throw new Error(`Missing histogram for taxonomy "${taxonomy.key}"`);
     }
-    const meta = dimensionBinMeta(dimension, summary.bins);
-    const binTotal = histogram.bins.reduce((sum, bin) => sum + bin[metric], 0);
-    const total = binTotal + histogram.underived[metric];
-    const segments = histogram.bins.flatMap((bin, index) => {
-      if (bin[metric] === 0 || index >= meta.length) {
-        return [];
-      }
-      return [
-        {
-          ...meta[index]!,
-          fraction: total === 0 ? 0 : bin[metric] / total,
-          count: bin.count,
-          vsize: bin.vsize,
-        },
-      ];
-    });
-    if (histogram.underived[metric] > 0) {
-      segments.push({
-        key: "underived",
-        label: "Underived",
-        color: "#38434f",
-        fraction: total === 0 ? 0 : histogram.underived[metric] / total,
-        count: histogram.underived.count,
-        vsize: histogram.underived.vsize,
-      });
-    }
-    return { dimension, label, status: "available", segments };
+    return buildCompositionRow(
+      taxonomy.key,
+      taxonomy.label,
+      histogram,
+      verdictMeta(taxonomy),
+      metric,
+    );
   });
+  const shapeRows = SHAPE_DIMENSION_ORDER.map((dimension) =>
+    buildCompositionRow(
+      dimension,
+      SHAPE_DIMENSION_LABELS[dimension],
+      summary.histograms[dimension],
+      dimensionBinMeta(dimension, summary.bins),
+      metric,
+    ),
+  );
+  return [...taxonomyRows, ...shapeRows];
+};
 
 export interface TreemapTile {
   key: string;
@@ -420,19 +488,111 @@ export const squarify = (
   return placed;
 };
 
+export interface TreemapGroup {
+  key: string;
+  label: string;
+  available: boolean;
+}
+
+/** Data-driven treemap group tabs: one per taxonomy (in catalog order),
+ * followed by script and value. `available` mirrors the histogram status so
+ * callers can grey out facets still awaiting raw-transaction derivation. */
+export const treemapGroups = (summary: MempoolSummary): TreemapGroup[] => [
+  ...summary.bins.taxonomies.map((taxonomy) => ({
+    key: taxonomy.key,
+    label: taxonomy.label,
+    available:
+      findTaxonomyHistogram(summary, taxonomy.key)?.status === "available",
+  })),
+  {
+    key: "script",
+    label: "Script",
+    available: summary.histograms.script.status === "available",
+  },
+  {
+    key: "value",
+    label: "Value",
+    available: summary.histograms.value.status === "available",
+  },
+];
+
+export interface TreemapNode {
+  key: string;
+  label: string;
+  color: string;
+  count: number;
+  vsize: number;
+}
+
+const histogramNodes = (
+  histogram: DimensionHistogram,
+  meta: DimensionBinMeta[],
+): TreemapNode[] => {
+  if (histogram.status !== "available") {
+    return [];
+  }
+  const nodes = histogram.bins.flatMap((bin, index) =>
+    bin.vsize === 0 || index >= meta.length
+      ? []
+      : [{ ...meta[index]!, count: bin.count, vsize: bin.vsize }],
+  );
+  if (histogram.underived.vsize > 0) {
+    nodes.push({
+      key: "underived",
+      label: "Underived",
+      color: UNDERIVED_COLOR,
+      count: histogram.underived.count,
+      vsize: histogram.underived.vsize,
+    });
+  }
+  return nodes;
+};
+
+/** Treemap leaf nodes for one group produced by `treemapGroups`: either a
+ * taxonomy key or the literal "script"/"value" shape-dimension keys. */
+export const treemapNodes = (
+  summary: MempoolSummary,
+  groupKey: string,
+): TreemapNode[] => {
+  const taxonomy = summary.bins.taxonomies.find(
+    (entry) => entry.key === groupKey,
+  );
+  if (taxonomy !== undefined) {
+    const histogram = findTaxonomyHistogram(summary, groupKey);
+    return histogram === undefined
+      ? []
+      : histogramNodes(histogram, verdictMeta(taxonomy));
+  }
+  if (groupKey === "script" || groupKey === "value") {
+    return histogramNodes(
+      summary.histograms[groupKey],
+      dimensionBinMeta(groupKey, summary.bins),
+    );
+  }
+  return [];
+};
+
 export interface EcdfPath {
-  key: ClassificationKey;
+  key: string;
   color: string;
   d: string;
 }
 
-/** SVG path per classification: x spans the fine fee bins, y is cumulative
- * vsize share of that class (1 at its own total). */
+/** SVG path per verdict of the ECDF's named taxonomy: x spans the fine fee
+ * bins, y is cumulative vsize share of that verdict (1 at its own total). */
 export const ecdfPaths = (
   ecdf: FeeRateEcdf,
+  bins: BinCatalog,
   plot: { left: number; top: number; width: number; height: number },
-): EcdfPath[] =>
-  ecdf.series.flatMap((series) => {
+): EcdfPath[] => {
+  const taxonomy = bins.taxonomies.find((entry) => entry.key === ecdf.taxonomy);
+  const colorByVerdict = new Map(
+    (taxonomy === undefined ? [] : verdictMeta(taxonomy)).map((meta) => [
+      meta.key,
+      meta.color,
+    ]),
+  );
+  return ecdf.series.flatMap((series) => {
     const total = series.cum_vsize[series.cum_vsize.length - 1];
     if (total === undefined || total === 0 || series.cum_vsize.length < 2) {
       return [];
@@ -446,9 +606,14 @@ export const ecdfPaths = (
       })
       .join("");
     return [
-      { key: series.key, color: CLASSIFICATION_META[series.key].color, d },
+      {
+        key: series.key,
+        color: colorByVerdict.get(series.key) ?? UNKNOWN_VERDICT_COLOR,
+        d,
+      },
     ];
   });
+};
 
 export interface JointViewModel {
   /** Rows top-to-bottom are largest-to-smallest size bins; values in [0, 1]. */

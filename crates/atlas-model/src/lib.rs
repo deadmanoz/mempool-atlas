@@ -48,6 +48,14 @@ pub enum ModelError {
     IngestBatchSourceMismatch { expected: String, found: String },
     #[error("filter facet {facet} must select at least one value")]
     EmptyFilterFacet { facet: &'static str },
+    #[error("taxonomy filter {taxonomy} must select at least one verdict")]
+    EmptyTaxonomyFilter { taxonomy: String },
+    #[error("taxonomy filter {taxonomy} appears more than once")]
+    DuplicateTaxonomyFilter { taxonomy: String },
+    #[error("unknown taxonomy {key}")]
+    UnknownTaxonomy { key: String },
+    #[error("unknown verdict {verdict} for taxonomy {taxonomy}")]
+    UnknownTaxonomyVerdict { taxonomy: String, verdict: String },
     #[error("filter bound {field} must be a finite, non-negative number")]
     InvalidFilterBound { field: &'static str },
     #[error("feerate_min must not exceed feerate_max")]
