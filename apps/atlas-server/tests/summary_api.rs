@@ -253,6 +253,221 @@ async fn summary_carries_taxonomy_bins_and_derived_verdicts_land_in_them() {
 }
 
 #[tokio::test]
+async fn summary_carries_the_bip110_taxonomy_and_filters_on_its_verdicts() {
+    // A plain 1-in/2-out P2WPKH transaction is BIP-110 `conforming` once its
+    // raw bytes are observed; the raw-byte-less membership stays `unknown`.
+    let conforming_transaction = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: bitcoin::Txid::from_byte_array([0x42; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[vec![0xab; 107]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(80_000),
+                script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x44; 20])),
+            },
+            TxOut {
+                value: Amount::from_sat(15_000),
+                script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x45; 20])),
+            },
+        ],
+    };
+    let conforming_txid = conforming_transaction.compute_txid().to_string();
+    let (_temporary, application) = application(&[
+        event(
+            "source-a",
+            1,
+            Evidence::P2pTransaction {
+                txid: conforming_txid.clone(),
+                wtxid: conforming_transaction.compute_wtxid().to_string(),
+                raw_transaction_hex: Some(hex::encode(bitcoin::consensus::encode::serialize(
+                    &conforming_transaction,
+                ))),
+                peer_id: Some(3),
+                inbound: Some(true),
+            },
+        ),
+        event("source-a", 2, present(conforming_txid, 200, 1_700)),
+        event("source-a", 3, present(txid(1), 400, 800)),
+    ]);
+
+    let (status, body) = get(
+        application.clone(),
+        "/api/v1/sources/source-a/mempool/summary",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let summary: MempoolSummary = serde_json::from_value(body).expect("summary");
+
+    // The bip110 taxonomy travels second, after the behavior taxonomy.
+    let bip110 = &summary.bins.taxonomies[1];
+    assert_eq!(bip110.key, "bip110");
+    assert_eq!(summary.histograms.taxonomies[1].key, "bip110");
+    let DimensionHistogram::Available { bins, underived } =
+        &summary.histograms.taxonomies[1].histogram
+    else {
+        panic!("bip110 histogram must be available");
+    };
+    assert_eq!(bins.len(), bip110.verdicts.len());
+    let bin_for = |verdict: &str| {
+        let index = bip110
+            .verdicts
+            .iter()
+            .position(|descriptor| descriptor.key == verdict)
+            .unwrap_or_else(|| panic!("bip110 taxonomy declares {verdict}"));
+        bins[index]
+    };
+    assert_eq!(
+        bin_for("conforming"),
+        AggregateBin {
+            count: 1,
+            vsize: 200
+        }
+    );
+    assert_eq!(
+        bin_for("unknown"),
+        AggregateBin {
+            count: 1,
+            vsize: 400
+        }
+    );
+    assert_eq!(*underived, AggregateBin::default());
+
+    // The verdict filters through the taxonomy query grammar.
+    let (status, body) = get(
+        application,
+        "/api/v1/sources/source-a/mempool/summary?t.bip110=conforming",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let summary: MempoolSummary = serde_json::from_value(body).expect("summary");
+    assert_eq!(summary.totals.all.count, 2);
+    assert_eq!(
+        summary.totals.matching,
+        AggregateBin {
+            count: 1,
+            vsize: 200
+        }
+    );
+}
+
+#[tokio::test]
+async fn summary_carries_the_data_protocol_taxonomy_and_filters_on_its_verdicts() {
+    // An OP_RETURN-carrying transaction with an unrecognized payload lands
+    // in `op_return_other` once its raw bytes are observed; the
+    // raw-byte-less membership stays `unknown`.
+    let payload =
+        bitcoin::script::PushBytesBuf::try_from(b"atlas-test".to_vec()).expect("push bytes");
+    let carrier_transaction = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: bitcoin::Txid::from_byte_array([0x51; 32]),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[vec![0xab; 107]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::new_op_return(payload),
+            },
+            TxOut {
+                value: Amount::from_sat(120_000),
+                script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x52; 20])),
+            },
+        ],
+    };
+    let carrier_txid = carrier_transaction.compute_txid().to_string();
+    let (_temporary, application) = application(&[
+        event(
+            "source-a",
+            1,
+            Evidence::P2pTransaction {
+                txid: carrier_txid.clone(),
+                wtxid: carrier_transaction.compute_wtxid().to_string(),
+                raw_transaction_hex: Some(hex::encode(bitcoin::consensus::encode::serialize(
+                    &carrier_transaction,
+                ))),
+                peer_id: Some(5),
+                inbound: Some(true),
+            },
+        ),
+        event("source-a", 2, present(carrier_txid, 200, 1_700)),
+        event("source-a", 3, present(txid(1), 400, 800)),
+    ]);
+
+    let (status, body) = get(
+        application.clone(),
+        "/api/v1/sources/source-a/mempool/summary",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let summary: MempoolSummary = serde_json::from_value(body).expect("summary");
+
+    // The data_protocol taxonomy travels third, after behavior and bip110.
+    let data_protocol = &summary.bins.taxonomies[2];
+    assert_eq!(data_protocol.key, "data_protocol");
+    assert_eq!(summary.histograms.taxonomies[2].key, "data_protocol");
+    let DimensionHistogram::Available { bins, underived } =
+        &summary.histograms.taxonomies[2].histogram
+    else {
+        panic!("data_protocol histogram must be available");
+    };
+    assert_eq!(bins.len(), data_protocol.verdicts.len());
+    let bin_for = |verdict: &str| {
+        let index = data_protocol
+            .verdicts
+            .iter()
+            .position(|descriptor| descriptor.key == verdict)
+            .unwrap_or_else(|| panic!("data_protocol taxonomy declares {verdict}"));
+        bins[index]
+    };
+    assert_eq!(
+        bin_for("op_return_other"),
+        AggregateBin {
+            count: 1,
+            vsize: 200
+        }
+    );
+    assert_eq!(
+        bin_for("unknown"),
+        AggregateBin {
+            count: 1,
+            vsize: 400
+        }
+    );
+    assert_eq!(*underived, AggregateBin::default());
+
+    // The verdict filters through the taxonomy query grammar.
+    let (status, body) = get(
+        application,
+        "/api/v1/sources/source-a/mempool/summary?t.data_protocol=op_return_other",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let summary: MempoolSummary = serde_json::from_value(body).expect("summary");
+    assert_eq!(summary.totals.all.count, 2);
+    assert_eq!(
+        summary.totals.matching,
+        AggregateBin {
+            count: 1,
+            vsize: 200
+        }
+    );
+}
+
+#[tokio::test]
 async fn summary_for_unknown_source_is_not_found() {
     let (_temporary, application) = application(&[]);
     let (status, body) = get(application, "/api/v1/sources/absent-node/mempool/summary").await;

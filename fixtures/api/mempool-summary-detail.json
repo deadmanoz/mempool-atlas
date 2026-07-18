@@ -73,6 +73,90 @@
             "label": "Unknown"
           }
         ]
+      },
+      {
+        "key": "bip110",
+        "label": "BIP-110",
+        "verdicts": [
+          {
+            "key": "conforming",
+            "label": "Conforming"
+          },
+          {
+            "key": "oversized_script_pubkey",
+            "label": "Oversized scriptPubKey"
+          },
+          {
+            "key": "oversized_data_push",
+            "label": "Oversized data push"
+          },
+          {
+            "key": "annex_present",
+            "label": "Annex present"
+          },
+          {
+            "key": "oversized_control_block",
+            "label": "Oversized control block"
+          },
+          {
+            "key": "op_success_in_tapscript",
+            "label": "OP_SUCCESS in tapscript"
+          },
+          {
+            "key": "conditional_in_tapscript",
+            "label": "Conditional in tapscript"
+          },
+          {
+            "key": "indeterminate",
+            "label": "Indeterminate"
+          },
+          {
+            "key": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "key": "data_protocol",
+        "label": "Data protocol",
+        "verdicts": [
+          {
+            "key": "brc20",
+            "label": "BRC-20"
+          },
+          {
+            "key": "inscription",
+            "label": "Inscription"
+          },
+          {
+            "key": "runes",
+            "label": "Runes"
+          },
+          {
+            "key": "stamps",
+            "label": "Stamps"
+          },
+          {
+            "key": "counterparty",
+            "label": "Counterparty"
+          },
+          {
+            "key": "omni",
+            "label": "Omni"
+          },
+          {
+            "key": "op_return_other",
+            "label": "Other OP_RETURN"
+          },
+          {
+            "key": "none",
+            "label": "No data carrier"
+          },
+          {
+            "key": "unknown",
+            "label": "Unknown"
+          }
+        ]
       }
     ],
     "value_sats_edges": [
@@ -582,6 +666,98 @@
           }
         ],
         "key": "behavior",
+        "status": "available",
+        "underived": {
+          "count": 0,
+          "vsize": 0
+        }
+      },
+      {
+        "bins": [
+          {
+            "count": 2,
+            "vsize": 343
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 6,
+            "vsize": 5232
+          }
+        ],
+        "key": "bip110",
+        "status": "available",
+        "underived": {
+          "count": 0,
+          "vsize": 0
+        }
+      },
+      {
+        "bins": [
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 0,
+            "vsize": 0
+          },
+          {
+            "count": 1,
+            "vsize": 134
+          },
+          {
+            "count": 1,
+            "vsize": 209
+          },
+          {
+            "count": 6,
+            "vsize": 5232
+          }
+        ],
+        "key": "data_protocol",
         "status": "available",
         "underived": {
           "count": 0,

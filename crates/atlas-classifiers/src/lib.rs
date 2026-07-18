@@ -8,11 +8,14 @@
 //!
 //! Each pack owns one taxonomy: a declared verdict vocabulary published as
 //! [`TaxonomyDescriptor`] data. Verdicts travel as keys into that
-//! vocabulary, so a new taxonomy adds a pack instead of widening a shared
-//! enum.
+//! vocabulary, so new taxonomies (like the BIP-110 conformance pack and the
+//! data-carrying-protocol pack) add packs instead of widening a shared enum.
 
 mod baseline;
+mod bip110;
+mod data_protocol;
 mod shape;
+mod witness;
 
 #[cfg(test)]
 mod test_support;
@@ -22,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use baseline::BaselineHeuristics;
+pub use bip110::Bip110Conformance;
+pub use data_protocol::{DataProtocolFingerprints, arc4};
 pub use shape::TransactionShape;
 
 /// Identity and declared input facts of one classifier rule pack.
@@ -86,7 +91,11 @@ pub trait Classifier: Send + Sync {
 /// transaction, so each transaction receives one verdict per taxonomy.
 #[must_use]
 pub fn registered_packs() -> Vec<Box<dyn Classifier>> {
-    vec![Box::new(BaselineHeuristics)]
+    vec![
+        Box::new(BaselineHeuristics),
+        Box::new(Bip110Conformance),
+        Box::new(DataProtocolFingerprints),
+    ]
 }
 
 #[cfg(test)]
@@ -141,7 +150,14 @@ mod tests {
             .iter()
             .map(|pack| pack.taxonomy().key)
             .collect();
-        assert_eq!(keys, vec!["behavior".to_owned()]);
+        assert_eq!(
+            keys,
+            vec![
+                "behavior".to_owned(),
+                "bip110".to_owned(),
+                "data_protocol".to_owned(),
+            ]
+        );
     }
 
     #[test]

@@ -1458,7 +1458,11 @@ mod tests {
         // One stored verdict per registered pack, in registry order.
         assert_eq!(
             membership.available[0].verdicts,
-            vec![("behavior".to_owned(), "payment".to_owned())]
+            vec![
+                ("behavior".to_owned(), "payment".to_owned()),
+                ("bip110".to_owned(), "conforming".to_owned()),
+                ("data_protocol".to_owned(), "none".to_owned()),
+            ]
         );
     }
 

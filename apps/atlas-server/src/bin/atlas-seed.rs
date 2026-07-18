@@ -21,10 +21,28 @@
 //! The class mixture and log-normal fee presets are ported from the design
 //! exploration (`Mempool Visualisations.dc.html`); output-value presets and
 //! per-class script mixes shape the constructed transactions.
+//!
+//! The data class is constructed as a real Taproot script-path inscription
+//! reveal (envelope tapscript plus control block), so its transactions
+//! honestly classify `data` in the behavior taxonomy,
+//! `conditional_in_tapscript` in the `bip110` taxonomy, and `inscription` —
+//! or, for the roughly 15% carrying a BRC-20 JSON payload, `brc20` — in the
+//! `data_protocol` taxonomy.
+//!
+//! Every [`BIP110_SPECIAL_INTERVAL`]-th transaction (2% of the population)
+//! is a dedicated BIP-110 construction cycling through [`Bip110Kind`], and
+//! every [`PROTOCOL_SPECIAL_INTERVAL`]-th transaction offset by
+//! [`PROTOCOL_SPECIAL_OFFSET`] (another 2%, disjoint from the BIP-110 cycle
+//! by construction: multiples of 50 versus odd multiples of 25) is a
+//! dedicated data-protocol construction cycling through [`ProtocolKind`],
+//! so every verdict bin of the `bip110` and `data_protocol` taxonomies
+//! renders locally. Specials are behavior-classified however they honestly
+//! fall out: the data-carrying kinds land in `data`, the rest in `payment`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
+use atlas_classifiers::arc4;
 use atlas_model::{
     CaptureGapCertainty, Evidence, IngestBatchRequest, IngestBatchResponse, IngestStatus,
     MAX_INGEST_BATCH_EVENTS, MempoolEntryFacts, NormalizedEvent, ReconciledMembership, SourceId,
@@ -200,6 +218,181 @@ const fn script_mix(class: TxClass) -> &'static [(ScriptKind, f64)] {
     }
 }
 
+/// Every this-many-th transaction is a dedicated BIP-110 construction.
+const BIP110_SPECIAL_INTERVAL: u64 = 50;
+
+/// Every this-many-th transaction, offset by
+/// [`PROTOCOL_SPECIAL_OFFSET`], is a dedicated data-protocol construction.
+/// The offset keeps the cycle disjoint from the BIP-110 cycle: protocol
+/// specials sit at odd multiples of 25, BIP-110 specials at multiples of 50.
+const PROTOCOL_SPECIAL_INTERVAL: u64 = 50;
+const PROTOCOL_SPECIAL_OFFSET: u64 = 25;
+
+/// Fraction of data-class inscriptions carrying a BRC-20 JSON payload.
+const BRC20_FRACTION: f64 = 0.15;
+
+/// The dedicated BIP-110 constructions, one per checkable-rule verdict of
+/// the `bip110` taxonomy plus one ambiguity that classifies `indeterminate`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Bip110Kind {
+    /// Rule 1: an `OP_RETURN` scriptPubKey beyond 83 bytes.
+    OversizedOpReturn,
+    /// Rule 1: a 67-byte bare P2PK-style scriptPubKey.
+    OversizedBareScriptPubkey,
+    /// Rule 2: a 300-byte script argument under a Taproot script path.
+    OversizedWitnessArgument,
+    /// Rule 4: an annex on a key-path-shaped spend.
+    KeyPathAnnex,
+    /// Rule 5: a 289-byte control block (eight merkle-path steps).
+    OversizedControlBlock,
+    /// Rule 6: a tapscript that is one `OP_SUCCESS187` opcode.
+    OpSuccessTapscript,
+    /// Rule 7: an inscription-style `OP_IF` envelope tapscript.
+    ConditionalTapscript,
+    /// A `0x50`-led last witness element on a non-Taproot-shaped witness:
+    /// ambiguous, so the honest verdict is `indeterminate`.
+    AmbiguousAnnex,
+}
+
+impl Bip110Kind {
+    const ALL: [Self; 8] = [
+        Self::OversizedOpReturn,
+        Self::OversizedBareScriptPubkey,
+        Self::OversizedWitnessArgument,
+        Self::KeyPathAnnex,
+        Self::OversizedControlBlock,
+        Self::OpSuccessTapscript,
+        Self::ConditionalTapscript,
+        Self::AmbiguousAnnex,
+    ];
+
+    /// The behavior classification the construction honestly lands in.
+    const fn behavior_class(self) -> TxClass {
+        match self {
+            Self::OversizedOpReturn | Self::ConditionalTapscript => TxClass::Data,
+            _ => TxClass::Payment,
+        }
+    }
+
+    /// The `bip110` verdict the construction is built to receive.
+    #[cfg(test)]
+    const fn expected_verdict(self) -> &'static str {
+        match self {
+            Self::OversizedOpReturn | Self::OversizedBareScriptPubkey => "oversized_script_pubkey",
+            Self::OversizedWitnessArgument => "oversized_data_push",
+            Self::KeyPathAnnex => "annex_present",
+            Self::OversizedControlBlock => "oversized_control_block",
+            Self::OpSuccessTapscript => "op_success_in_tapscript",
+            Self::ConditionalTapscript => "conditional_in_tapscript",
+            Self::AmbiguousAnnex => "indeterminate",
+        }
+    }
+
+    /// The `data_protocol` verdict the construction honestly lands in: the
+    /// oversized OP_RETURN is an unrecognized data carrier, and the
+    /// conditional tapscript is the inscription-style envelope.
+    #[cfg(test)]
+    const fn expected_data_protocol_verdict(self) -> &'static str {
+        match self {
+            Self::OversizedOpReturn => "op_return_other",
+            Self::ConditionalTapscript => "inscription",
+            _ => "none",
+        }
+    }
+}
+
+/// The dedicated BIP-110 construction for one transaction index, if any.
+fn bip110_kind_for_index(index: u64) -> Option<Bip110Kind> {
+    index.is_multiple_of(BIP110_SPECIAL_INTERVAL).then(|| {
+        let cycle = (index / BIP110_SPECIAL_INTERVAL) % Bip110Kind::ALL.len() as u64;
+        Bip110Kind::ALL[cycle as usize]
+    })
+}
+
+/// The dedicated data-protocol constructions, one per carrier verdict of
+/// the `data_protocol` taxonomy that the ordinary population does not
+/// already render (the data class renders `inscription` and `brc20`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtocolKind {
+    /// `OP_RETURN OP_13 <push>`: the runestone marker.
+    Runestone,
+    /// A 1-of-3 bare multisig whose first two "pubkeys" carry data bytes
+    /// behind implausible prefixes.
+    Stamps,
+    /// An `OP_RETURN` whose payload is `CNTRPRTY`-prefixed and
+    /// ARC4-encrypted with the display-order bytes of the first input's
+    /// previous txid, mirroring real Counterparty keying.
+    CounterpartyArc4,
+    /// An `OP_RETURN` whose payload opens with ASCII `omni`.
+    Omni,
+    /// An `OP_RETURN` with an unrecognized payload.
+    OpReturnOther,
+}
+
+impl ProtocolKind {
+    const ALL: [Self; 5] = [
+        Self::Runestone,
+        Self::Stamps,
+        Self::CounterpartyArc4,
+        Self::Omni,
+        Self::OpReturnOther,
+    ];
+
+    /// The behavior classification the construction honestly lands in.
+    const fn behavior_class(self) -> TxClass {
+        match self {
+            Self::Stamps => TxClass::Payment,
+            _ => TxClass::Data,
+        }
+    }
+
+    /// The `data_protocol` verdict the construction is built to receive.
+    #[cfg(test)]
+    const fn expected_verdict(self) -> &'static str {
+        match self {
+            Self::Runestone => "runes",
+            Self::Stamps => "stamps",
+            Self::CounterpartyArc4 => "counterparty",
+            Self::Omni => "omni",
+            Self::OpReturnOther => "op_return_other",
+        }
+    }
+
+    /// The `bip110` verdict the construction honestly lands in: the Stamps
+    /// bare multisig is a 105-byte non-OP_RETURN scriptPubKey.
+    #[cfg(test)]
+    const fn expected_bip110_verdict(self) -> &'static str {
+        match self {
+            Self::Stamps => "oversized_script_pubkey",
+            _ => "conforming",
+        }
+    }
+}
+
+/// The dedicated data-protocol construction for one transaction index, if
+/// any.
+fn protocol_kind_for_index(index: u64) -> Option<ProtocolKind> {
+    (index % PROTOCOL_SPECIAL_INTERVAL == PROTOCOL_SPECIAL_OFFSET).then(|| {
+        let cycle = (index / PROTOCOL_SPECIAL_INTERVAL) % ProtocolKind::ALL.len() as u64;
+        ProtocolKind::ALL[cycle as usize]
+    })
+}
+
+/// A transaction index's dedicated construction, if any. The two cycles are
+/// disjoint by construction, so at most one can claim an index.
+#[derive(Clone, Copy, Debug)]
+enum SpecialKind {
+    Bip110(Bip110Kind),
+    Protocol(ProtocolKind),
+}
+
+fn special_for_index(index: u64) -> Option<SpecialKind> {
+    if let Some(kind) = bip110_kind_for_index(index) {
+        return Some(SpecialKind::Bip110(kind));
+    }
+    protocol_kind_for_index(index).map(SpecialKind::Protocol)
+}
+
 const MAX_AGE_MS: f64 = 5.0 * 86_400_000.0;
 const SATS_PER_BTC: f64 = 100_000_000.0;
 /// Minimum total output value drawn for one transaction.
@@ -282,17 +475,12 @@ fn scrub_marker(bytes: &mut [u8]) {
 }
 
 /// A synthetic input spending a deterministic dummy outpoint. The single
-/// witness element makes the wtxid differ from the txid; the data class
-/// embeds the inscription marker in it.
-fn dummy_input(rng: &mut Rng, embed_marker: bool) -> TxIn {
+/// marker-scrubbed witness element makes the wtxid differ from the txid.
+fn dummy_input(rng: &mut Rng) -> TxIn {
     let previous_txid = Txid::from_byte_array(rng.byte_array());
     let mut element = [0_u8; WITNESS_ELEMENT_LEN];
     rng.fill_bytes(&mut element);
-    if embed_marker {
-        element[20..20 + INSCRIPTION_MARKER.len()].copy_from_slice(&INSCRIPTION_MARKER);
-    } else {
-        scrub_marker(&mut element);
-    }
+    scrub_marker(&mut element);
     TxIn {
         previous_output: OutPoint {
             txid: previous_txid,
@@ -305,7 +493,7 @@ fn dummy_input(rng: &mut Rng, embed_marker: bool) -> TxIn {
 }
 
 fn dummy_inputs(rng: &mut Rng, count: usize) -> Vec<TxIn> {
-    (0..count).map(|_| dummy_input(rng, false)).collect()
+    (0..count).map(|_| dummy_input(rng)).collect()
 }
 
 fn p2tr_script(rng: &mut Rng) -> ScriptBuf {
@@ -404,22 +592,35 @@ fn construct_transaction(rng: &mut Rng, class: TxClass, total_sats: u64) -> Tran
             (inputs, outputs)
         }
         TxClass::Data => {
-            // Both data signals: an OP_RETURN output and an input witness
-            // element embedding the inscription marker.
-            let inputs = vec![dummy_input(rng, true)];
-            let mut outputs = vec![TxOut {
-                value: Amount::from_sat(0),
-                script_pubkey: ScriptBuf::new_op_return(rng.byte_array::<32>()),
-            }];
-            if rng.uniform() < 0.5 {
-                outputs.extend(ordinary_outputs(rng, class, 1, total_sats));
-            }
-            (inputs, outputs)
+            // A real Taproot script-path inscription reveal: one 64-byte
+            // dummy signature argument, the envelope tapscript, and a
+            // 33-byte control block (leaf version 0xc0), matching the
+            // structural inference the bip110 and data_protocol packs
+            // share. The envelope carries the inscription marker bytes, so
+            // behavior lands on data; the tapscript's OP_IF lands bip110 on
+            // conditional_in_tapscript; and data_protocol reads the
+            // envelope as inscription — or brc20 for the JSON fraction.
+            let tapscript = if rng.uniform() < BRC20_FRACTION {
+                let body = format!(
+                    r#"{{"p":"brc-20","op":"transfer","tick":"atls","amt":"{}"}}"#,
+                    rng.range_inclusive(1, 100_000)
+                );
+                inscription_envelope_tapscript(rng, b"application/json", body.as_bytes())
+            } else {
+                let body_len = rng.range_inclusive(24, 72) as usize;
+                let body = scrubbed_element(rng, body_len);
+                inscription_envelope_tapscript(rng, b"image/png", &body)
+            };
+            let elements = vec![scrubbed_element(rng, 64), tapscript, control_block(rng, 0)];
+            (
+                vec![witness_input(rng, &elements)],
+                ordinary_outputs(rng, class, 1, total_sats),
+            )
         }
         TxClass::Lightning => {
             // One exact 330-sat P2TR anchor among ordinary outputs; no
             // OP_RETURN and no marker, so the data rule cannot fire first.
-            let inputs = vec![dummy_input(rng, false)];
+            let inputs = vec![dummy_input(rng)];
             let output_count = rng.range_inclusive(3, 4) as usize;
             let anchor_index = rng.range_inclusive(0, output_count as u64 - 1) as usize;
             let mut outputs = ordinary_outputs(rng, class, output_count - 1, total_sats);
@@ -449,6 +650,263 @@ fn construct_transaction(rng: &mut Rng, class: TxClass, total_sats: u64) -> Tran
     }
 }
 
+/// A synthetic input spending a deterministic dummy outpoint through the
+/// given witness elements.
+fn witness_input(rng: &mut Rng, elements: &[Vec<u8>]) -> TxIn {
+    TxIn {
+        previous_output: OutPoint {
+            txid: Txid::from_byte_array(rng.byte_array()),
+            vout: 0,
+        },
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::from_slice(elements),
+    }
+}
+
+/// A marker-free random witness element of the given length.
+fn scrubbed_element(rng: &mut Rng, len: usize) -> Vec<u8> {
+    let mut element = vec![0_u8; len];
+    rng.fill_bytes(&mut element);
+    scrub_marker(&mut element);
+    element
+}
+
+/// A clean 34-byte tapscript: `OP_PUSHBYTES_32 <key> OP_CHECKSIG`.
+fn clean_tapscript(rng: &mut Rng) -> Vec<u8> {
+    let mut script = vec![0x20];
+    script.extend_from_slice(&scrubbed_element(rng, 32));
+    script.push(0xac);
+    script
+}
+
+/// A control-block-shaped element (leaf version `0xc0`) with `depth`
+/// merkle-path steps: `33 + 32 * depth` bytes.
+fn control_block(rng: &mut Rng, depth: usize) -> Vec<u8> {
+    let mut block = vec![0xc0];
+    block.extend_from_slice(&scrubbed_element(rng, 32 + 32 * depth));
+    block
+}
+
+/// Appends one single-length-byte data push. Every seed push stays below
+/// `OP_PUSHDATA1`, so pushes never trip BIP-110's 256-byte rule 2.
+fn push_bytes(script: &mut Vec<u8>, bytes: &[u8]) {
+    let len = u8::try_from(bytes.len()).expect("push fits one length byte");
+    assert!(len < 0x4c, "seed pushes stay below OP_PUSHDATA1");
+    script.push(len);
+    script.extend_from_slice(bytes);
+}
+
+/// A full inscription-envelope tapscript: `<key> OP_CHECKSIG OP_FALSE OP_IF
+/// <push "ord"> <tag 1> <content-type> OP_0 <body> OP_ENDIF`.
+fn inscription_envelope_tapscript(rng: &mut Rng, content_type: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut script = vec![0x20];
+    script.extend_from_slice(&scrubbed_element(rng, 32));
+    script.push(0xac);
+    script.extend_from_slice(&INSCRIPTION_MARKER);
+    push_bytes(&mut script, &[0x01]);
+    push_bytes(&mut script, content_type);
+    script.push(0x00);
+    push_bytes(&mut script, body);
+    script.push(0x68);
+    script
+}
+
+/// Constructs a real transaction that definitively violates (or, for
+/// [`Bip110Kind::AmbiguousAnnex`], honestly clouds) exactly one checkable
+/// BIP-110 rule, while its behavior class falls out of the ordinary
+/// heuristics: `data` for the data-carrying kinds, `payment` otherwise.
+fn construct_bip110_transaction(rng: &mut Rng, kind: Bip110Kind, total_sats: u64) -> Transaction {
+    let class = kind.behavior_class();
+    let (input, output) = match kind {
+        Bip110Kind::OversizedOpReturn => {
+            // 99-byte OP_RETURN scriptPubKey: OP_RETURN OP_PUSHDATA1 96 <96>.
+            let mut script_pubkey = vec![0x6a, 0x4c, 96];
+            script_pubkey.extend_from_slice(&rng.byte_array::<32>());
+            script_pubkey.extend_from_slice(&rng.byte_array::<32>());
+            script_pubkey.extend_from_slice(&rng.byte_array::<32>());
+            let mut outputs = vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::from_bytes(script_pubkey),
+            }];
+            outputs.extend(ordinary_outputs(rng, class, 1, total_sats));
+            (vec![dummy_input(rng)], outputs)
+        }
+        Bip110Kind::OversizedBareScriptPubkey => {
+            // 67-byte bare P2PK-style scriptPubKey: push65 <key> OP_CHECKSIG.
+            let mut script_pubkey = vec![0x41];
+            script_pubkey.extend_from_slice(&scrubbed_element(rng, 65));
+            script_pubkey.push(0xac);
+            let outputs = vec![TxOut {
+                value: Amount::from_sat(total_sats.max(MIN_OUTPUT_SATS)),
+                script_pubkey: ScriptBuf::from_bytes(script_pubkey),
+            }];
+            (vec![dummy_input(rng)], outputs)
+        }
+        Bip110Kind::OversizedWitnessArgument => {
+            let elements = vec![
+                scrubbed_element(rng, 300),
+                clean_tapscript(rng),
+                control_block(rng, 1),
+            ];
+            (
+                vec![witness_input(rng, &elements)],
+                ordinary_outputs(rng, class, 2, total_sats),
+            )
+        }
+        Bip110Kind::KeyPathAnnex => {
+            let elements = vec![scrubbed_element(rng, 64), vec![0x50, 0xa7, 0x1a, 0x5f]];
+            (
+                vec![witness_input(rng, &elements)],
+                ordinary_outputs(rng, class, 2, total_sats),
+            )
+        }
+        Bip110Kind::OversizedControlBlock => {
+            // 289 bytes: 33 + 32 * 8 merkle-path steps, one past the
+            // 257-byte (7-step) BIP-110 limit.
+            let elements = vec![clean_tapscript(rng), control_block(rng, 8)];
+            (
+                vec![witness_input(rng, &elements)],
+                ordinary_outputs(rng, class, 2, total_sats),
+            )
+        }
+        Bip110Kind::OpSuccessTapscript => {
+            // The tapscript is the single opcode OP_SUCCESS187 (0xbb).
+            let elements = vec![vec![0xbb], control_block(rng, 1)];
+            (
+                vec![witness_input(rng, &elements)],
+                ordinary_outputs(rng, class, 2, total_sats),
+            )
+        }
+        Bip110Kind::ConditionalTapscript => {
+            // OP_FALSE OP_IF push3 "ord" OP_ENDIF: the inscription-style
+            // envelope, carrying the marker so behavior lands on data.
+            let mut envelope = INSCRIPTION_MARKER.to_vec();
+            envelope.push(0x68);
+            let elements = vec![envelope, control_block(rng, 1)];
+            (
+                vec![witness_input(rng, &elements)],
+                ordinary_outputs(rng, class, 1, total_sats),
+            )
+        }
+        Bip110Kind::AmbiguousAnnex => {
+            // The 0x50-led last element cannot be claimed as an annex: after
+            // stripping it, one 107-byte element is neither a key-path
+            // signature nor a script-path stack.
+            let mut candidate = vec![0x50];
+            candidate.extend_from_slice(&scrubbed_element(rng, 106));
+            let elements = vec![scrubbed_element(rng, 107), candidate];
+            (
+                vec![witness_input(rng, &elements)],
+                ordinary_outputs(rng, class, 2, total_sats),
+            )
+        }
+    };
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input,
+        output,
+    }
+}
+
+/// Constructs a real transaction carrying exactly one dedicated
+/// data-protocol fingerprint, while its behavior class falls out of the
+/// ordinary heuristics: `data` for the OP_RETURN carriers, `payment` for
+/// the Stamps bare multisig.
+fn construct_protocol_transaction(
+    rng: &mut Rng,
+    kind: ProtocolKind,
+    total_sats: u64,
+) -> Transaction {
+    let class = kind.behavior_class();
+    let (input, output) = match kind {
+        ProtocolKind::Runestone => {
+            // OP_RETURN OP_13 <payload push>: the runestone marker.
+            let mut script = vec![0x6a, 0x5d];
+            push_bytes(&mut script, &scrubbed_element(rng, 12));
+            let mut outputs = vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::from_bytes(script),
+            }];
+            outputs.extend(ordinary_outputs(rng, class, 1, total_sats));
+            (vec![dummy_input(rng)], outputs)
+        }
+        ProtocolKind::Stamps => {
+            // OP_1 <data key> <data key> <plausible key> OP_3
+            // OP_CHECKMULTISIG: 105 bytes, so bip110 honestly reads it as
+            // an oversized non-OP_RETURN scriptPubKey.
+            let mut script = vec![0x51];
+            for _ in 0..2 {
+                let mut key = vec![0x00];
+                key.extend_from_slice(&scrubbed_element(rng, 32));
+                push_bytes(&mut script, &key);
+            }
+            let mut signer = vec![0x02];
+            signer.extend_from_slice(&scrubbed_element(rng, 32));
+            push_bytes(&mut script, &signer);
+            script.extend_from_slice(&[0x53, 0xae]);
+            let mut outputs = vec![TxOut {
+                value: Amount::from_sat(MIN_OUTPUT_SATS),
+                script_pubkey: ScriptBuf::from_bytes(script),
+            }];
+            outputs.extend(ordinary_outputs(rng, class, 1, total_sats));
+            (vec![dummy_input(rng)], outputs)
+        }
+        ProtocolKind::CounterpartyArc4 => {
+            // Counterparty keys ARC4 with the display-order (reversed-hex)
+            // bytes of the first input's previous txid; the classifier
+            // must recover the CNTRPRTY prefix through the same keying.
+            let input = dummy_input(rng);
+            let mut key = input.previous_output.txid.to_byte_array();
+            key.reverse();
+            let mut plaintext = b"CNTRPRTY".to_vec();
+            plaintext.extend_from_slice(&scrubbed_element(rng, 22));
+            let mut script = vec![0x6a];
+            push_bytes(&mut script, &arc4(&key, &plaintext));
+            let mut outputs = vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::from_bytes(script),
+            }];
+            outputs.extend(ordinary_outputs(rng, class, 1, total_sats));
+            (vec![input], outputs)
+        }
+        ProtocolKind::Omni => {
+            let mut payload = b"omni".to_vec();
+            payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x32]);
+            payload.extend_from_slice(&scrubbed_element(rng, 16));
+            let mut script = vec![0x6a];
+            push_bytes(&mut script, &payload);
+            let mut outputs = vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::from_bytes(script),
+            }];
+            outputs.extend(ordinary_outputs(rng, class, 1, total_sats));
+            (vec![dummy_input(rng)], outputs)
+        }
+        ProtocolKind::OpReturnOther => {
+            // The fixed 0xdead head keeps the payload from ever opening
+            // with a recognized plaintext protocol prefix.
+            let mut payload = vec![0xde, 0xad];
+            payload.extend_from_slice(&scrubbed_element(rng, 18));
+            let mut script = vec![0x6a];
+            push_bytes(&mut script, &payload);
+            let mut outputs = vec![TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::from_bytes(script),
+            }];
+            outputs.extend(ordinary_outputs(rng, class, 1, total_sats));
+            (vec![dummy_input(rng)], outputs)
+        }
+    };
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input,
+        output,
+    }
+}
+
 struct SyntheticTransaction {
     #[cfg_attr(not(test), allow(dead_code))]
     class: TxClass,
@@ -460,23 +918,59 @@ struct SyntheticTransaction {
     facts: MempoolEntryFacts,
 }
 
-fn synthesize(rng: &mut Rng, awaiting_fraction: f64, now_ms: u64) -> SyntheticTransaction {
-    let class_draw = rng.uniform();
-    let mut cumulative = 0.0;
-    let mut preset = &PRESETS[PRESETS.len() - 1];
-    for candidate in &PRESETS {
-        cumulative += candidate.weight;
-        if class_draw <= cumulative {
-            preset = candidate;
-            break;
-        }
-    }
+/// The preset for one class; every class has exactly one preset.
+fn preset_for(class: TxClass) -> &'static ClassPreset {
+    PRESETS
+        .iter()
+        .find(|preset| preset.class == class)
+        .expect("every class has a preset")
+}
 
+fn draw_total_sats(rng: &mut Rng, preset: &ClassPreset) -> u64 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let total_sats = ((log_normal(rng, preset.value_median_btc, preset.value_sigma) * SATS_PER_BTC)
         .round() as u64)
         .max(MIN_TOTAL_SATS);
-    let transaction = construct_transaction(rng, preset.class, total_sats);
+    total_sats
+}
+
+fn synthesize(
+    rng: &mut Rng,
+    awaiting_fraction: f64,
+    now_ms: u64,
+    special: Option<SpecialKind>,
+) -> SyntheticTransaction {
+    let (preset, transaction) = match special {
+        // Facts (fee, value, age) of a special come from the preset of the
+        // behavior class the construction honestly lands in.
+        Some(SpecialKind::Bip110(kind)) => {
+            let preset = preset_for(kind.behavior_class());
+            let total_sats = draw_total_sats(rng, preset);
+            (preset, construct_bip110_transaction(rng, kind, total_sats))
+        }
+        Some(SpecialKind::Protocol(kind)) => {
+            let preset = preset_for(kind.behavior_class());
+            let total_sats = draw_total_sats(rng, preset);
+            (
+                preset,
+                construct_protocol_transaction(rng, kind, total_sats),
+            )
+        }
+        None => {
+            let class_draw = rng.uniform();
+            let mut cumulative = 0.0;
+            let mut preset = &PRESETS[PRESETS.len() - 1];
+            for candidate in &PRESETS {
+                cumulative += candidate.weight;
+                if class_draw <= cumulative {
+                    preset = candidate;
+                    break;
+                }
+            }
+            let total_sats = draw_total_sats(rng, preset);
+            (preset, construct_transaction(rng, preset.class, total_sats))
+        }
+    };
     let vsize = u64::try_from(transaction.vsize()).expect("vsize fits in u64");
 
     let feerate = log_normal(rng, preset.fee_median, preset.fee_sigma).max(0.4);
@@ -534,8 +1028,13 @@ fn seed_events(cli: &Cli, now_ms: u64) -> anyhow::Result<Vec<NormalizedEvent>> {
             certainty: CaptureGapCertainty::PossibleLoss,
         })?);
     }
-    for _ in 0..cli.count {
-        let transaction = synthesize(&mut rng, cli.awaiting_fraction, now_ms);
+    for index in 0..cli.count {
+        let transaction = synthesize(
+            &mut rng,
+            cli.awaiting_fraction,
+            now_ms,
+            special_for_index(index),
+        );
         events.push(next_event(Evidence::P2pTransaction {
             txid: transaction.txid.clone(),
             wtxid: transaction.wtxid,
@@ -778,8 +1277,8 @@ mod tests {
     fn constructed_transactions_match_their_class_heuristics() {
         let mut rng = Rng::new(11);
         let mut counts: HashMap<TxClass, usize> = HashMap::new();
-        for _ in 0..700 {
-            let synthetic = synthesize(&mut rng, 0.0, NOW_MS);
+        for index in 0..700 {
+            let synthetic = synthesize(&mut rng, 0.0, NOW_MS, special_for_index(index));
             let transaction: Transaction =
                 deserialize_hex(&synthetic.raw_transaction_hex).expect("raw hex round-trips");
             assert_eq!(
@@ -798,6 +1297,179 @@ mod tests {
                 preset.class
             );
         }
+    }
+
+    #[test]
+    fn bip110_specials_cycle_at_the_expected_interval() {
+        assert_eq!(
+            bip110_kind_for_index(0),
+            Some(Bip110Kind::OversizedOpReturn)
+        );
+        assert_eq!(bip110_kind_for_index(1), None);
+        assert_eq!(bip110_kind_for_index(49), None);
+        assert_eq!(
+            bip110_kind_for_index(50),
+            Some(Bip110Kind::OversizedBareScriptPubkey)
+        );
+        assert_eq!(
+            bip110_kind_for_index(50 * 7),
+            Some(Bip110Kind::AmbiguousAnnex)
+        );
+        assert_eq!(
+            bip110_kind_for_index(50 * 8),
+            Some(Bip110Kind::OversizedOpReturn),
+            "the cycle wraps"
+        );
+    }
+
+    #[test]
+    fn protocol_specials_cycle_disjointly_from_the_bip110_specials() {
+        assert_eq!(protocol_kind_for_index(0), None);
+        assert_eq!(protocol_kind_for_index(25), Some(ProtocolKind::Runestone));
+        assert_eq!(protocol_kind_for_index(50), None, "a bip110 slot");
+        assert_eq!(protocol_kind_for_index(75), Some(ProtocolKind::Stamps));
+        assert_eq!(
+            protocol_kind_for_index(25 + 50 * 4),
+            Some(ProtocolKind::OpReturnOther)
+        );
+        assert_eq!(
+            protocol_kind_for_index(25 + 50 * 5),
+            Some(ProtocolKind::Runestone),
+            "the cycle wraps"
+        );
+        for index in 0..10_000 {
+            assert!(
+                !(bip110_kind_for_index(index).is_some()
+                    && protocol_kind_for_index(index).is_some()),
+                "index {index} claimed by both special cycles",
+            );
+        }
+    }
+
+    /// Every dedicated BIP-110 construction must land in its intended
+    /// `bip110` verdict bin, its honest behavior class, and its honest
+    /// `data_protocol` verdict, asserted by running the real classifier
+    /// packs over the consensus-round-tripped bytes exactly as server-side
+    /// enrichment does.
+    #[test]
+    fn bip110_constructions_yield_their_intended_verdicts() {
+        use atlas_classifiers::{
+            Bip110Conformance, ClassificationInput, Classifier, DataProtocolFingerprints,
+        };
+
+        let mut rng = Rng::new(13);
+        for kind in Bip110Kind::ALL {
+            for _ in 0..25 {
+                let transaction = construct_bip110_transaction(&mut rng, kind, 750_000);
+                let parsed: Transaction =
+                    deserialize_hex(&serialize_hex(&transaction)).expect("raw hex round-trips");
+                let txid = parsed.compute_txid().to_string();
+                let input = ClassificationInput {
+                    txid: &txid,
+                    wtxid: None,
+                    transaction: Some(&parsed),
+                };
+                assert_eq!(
+                    Bip110Conformance.classify(&input).verdict.as_deref(),
+                    Some(kind.expected_verdict()),
+                    "{kind:?} produced the wrong bip110 verdict",
+                );
+                assert_eq!(
+                    DataProtocolFingerprints.classify(&input).verdict.as_deref(),
+                    Some(kind.expected_data_protocol_verdict()),
+                    "{kind:?} produced the wrong data_protocol verdict",
+                );
+                assert_eq!(
+                    heuristic_class(&parsed),
+                    kind.behavior_class(),
+                    "{kind:?} landed in the wrong behavior class",
+                );
+            }
+        }
+    }
+
+    /// Every dedicated protocol construction must land in its intended
+    /// `data_protocol` verdict bin, its honest `bip110` verdict, and its
+    /// honest behavior class.
+    #[test]
+    fn protocol_constructions_yield_their_intended_verdicts() {
+        use atlas_classifiers::{
+            Bip110Conformance, ClassificationInput, Classifier, DataProtocolFingerprints,
+        };
+
+        let mut rng = Rng::new(17);
+        for kind in ProtocolKind::ALL {
+            for _ in 0..25 {
+                let transaction = construct_protocol_transaction(&mut rng, kind, 750_000);
+                let parsed: Transaction =
+                    deserialize_hex(&serialize_hex(&transaction)).expect("raw hex round-trips");
+                let txid = parsed.compute_txid().to_string();
+                let input = ClassificationInput {
+                    txid: &txid,
+                    wtxid: None,
+                    transaction: Some(&parsed),
+                };
+                assert_eq!(
+                    DataProtocolFingerprints.classify(&input).verdict.as_deref(),
+                    Some(kind.expected_verdict()),
+                    "{kind:?} produced the wrong data_protocol verdict",
+                );
+                assert_eq!(
+                    Bip110Conformance.classify(&input).verdict.as_deref(),
+                    Some(kind.expected_bip110_verdict()),
+                    "{kind:?} produced the wrong bip110 verdict",
+                );
+                assert_eq!(
+                    heuristic_class(&parsed),
+                    kind.behavior_class(),
+                    "{kind:?} landed in the wrong behavior class",
+                );
+            }
+        }
+    }
+
+    /// Data-class transactions are real inscription reveals: behavior
+    /// `data`, bip110 `conditional_in_tapscript`, and data_protocol
+    /// `inscription` with a `brc20` fraction that must actually appear.
+    #[test]
+    fn data_class_inscriptions_span_all_three_taxonomies() {
+        use atlas_classifiers::{
+            Bip110Conformance, ClassificationInput, Classifier, DataProtocolFingerprints,
+        };
+
+        let mut rng = Rng::new(19);
+        let mut verdict_counts: HashMap<String, usize> = HashMap::new();
+        for _ in 0..200 {
+            let transaction = construct_transaction(&mut rng, TxClass::Data, 80_000);
+            let parsed: Transaction =
+                deserialize_hex(&serialize_hex(&transaction)).expect("raw hex round-trips");
+            assert_eq!(heuristic_class(&parsed), TxClass::Data);
+            let txid = parsed.compute_txid().to_string();
+            let input = ClassificationInput {
+                txid: &txid,
+                wtxid: None,
+                transaction: Some(&parsed),
+            };
+            assert_eq!(
+                Bip110Conformance.classify(&input).verdict.as_deref(),
+                Some("conditional_in_tapscript"),
+                "the envelope's OP_IF must land bip110 on rule 7",
+            );
+            let verdict = DataProtocolFingerprints
+                .classify(&input)
+                .verdict
+                .expect("verdict present");
+            assert!(
+                verdict == "inscription" || verdict == "brc20",
+                "unexpected data_protocol verdict {verdict}",
+            );
+            *verdict_counts.entry(verdict).or_insert(0) += 1;
+        }
+        assert!(verdict_counts.get("inscription").copied().unwrap_or(0) > 0);
+        assert!(
+            verdict_counts.get("brc20").copied().unwrap_or(0) > 0,
+            "the brc-20 fraction must appear",
+        );
     }
 
     #[test]

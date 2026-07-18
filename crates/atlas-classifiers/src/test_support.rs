@@ -33,6 +33,12 @@ pub fn witness_input(elements: &[Vec<u8>]) -> TxIn {
     input
 }
 
+pub fn script_sig_input(script_sig: ScriptBuf) -> TxIn {
+    let mut input = bare_input();
+    input.script_sig = script_sig;
+    input
+}
+
 pub fn output(sats: u64, script_pubkey: ScriptBuf) -> TxOut {
     TxOut {
         value: Amount::from_sat(sats),
