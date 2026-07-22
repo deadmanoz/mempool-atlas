@@ -8,7 +8,7 @@ use bitcoin::hashes::{Hash, HashEngine, sha256};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-use crate::{MAX_SAFE_JSON_INTEGER, MempoolEntryFacts, ModelError, SourceId};
+use crate::{MAX_IDENTIFIER_BYTES, MAX_SAFE_JSON_INTEGER, MempoolEntryFacts, ModelError, SourceId};
 
 pub const SOURCE_REPLICA_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_SOURCE_REPLICA_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -27,6 +27,12 @@ pub enum SourceReplicaError {
     EmptyIdentifier { field: &'static str },
     #[error("{field} contains unsupported characters")]
     InvalidIdentifier { field: &'static str },
+    #[error("{field} contains {found} bytes; maximum is {maximum}")]
+    IdentifierTooLong {
+        field: &'static str,
+        found: usize,
+        maximum: usize,
+    },
     #[error("unsupported source replica protocol version {found}; expected {expected}")]
     UnsupportedProtocolVersion { found: u16, expected: u16 },
     #[error("{field} value {value} exceeds the exact JSON integer maximum {maximum}")]
@@ -194,7 +200,7 @@ impl SourceReplicaRequest {
                 expected: SOURCE_REPLICA_PROTOCOL_VERSION,
             });
         }
-        SourceId::new(self.source_id.as_str())?;
+        self.source_id.validate()?;
         self.epoch_id.validate()?;
         self.command.validate()?;
 
@@ -928,6 +934,13 @@ fn validate_identifier(field: &'static str, value: &str) -> Result<(), SourceRep
     if value.is_empty() {
         return Err(SourceReplicaError::EmptyIdentifier { field });
     }
+    if value.len() > MAX_IDENTIFIER_BYTES {
+        return Err(SourceReplicaError::IdentifierTooLong {
+            field,
+            found: value.len(),
+            maximum: MAX_IDENTIFIER_BYTES,
+        });
+    }
     if !value
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
@@ -1045,6 +1058,76 @@ mod tests {
                 .expect("valid identifier")
                 .as_str(),
             "checkpoint-1"
+        );
+    }
+
+    #[test]
+    fn source_epoch_id_enforces_identifier_byte_limit_on_every_input_path() {
+        let at_limit = "a".repeat(MAX_IDENTIFIER_BYTES);
+        let over_limit = "a".repeat(MAX_IDENTIFIER_BYTES + 1);
+
+        assert_eq!(
+            SourceEpochId::new(at_limit.clone()).expect("64-byte epoch ID"),
+            serde_json::from_value(serde_json::Value::String(at_limit))
+                .expect("deserialize 64-byte epoch ID")
+        );
+        assert_eq!(
+            SourceEpochId::new(over_limit.clone()),
+            Err(SourceReplicaError::IdentifierTooLong {
+                field: "epoch_id",
+                found: MAX_IDENTIFIER_BYTES + 1,
+                maximum: MAX_IDENTIFIER_BYTES,
+            })
+        );
+        assert_eq!(
+            SourceEpochId(over_limit.clone()).validate(),
+            Err(SourceReplicaError::IdentifierTooLong {
+                field: "epoch_id",
+                found: MAX_IDENTIFIER_BYTES + 1,
+                maximum: MAX_IDENTIFIER_BYTES,
+            })
+        );
+        let error = serde_json::from_value::<SourceEpochId>(serde_json::Value::String(over_limit))
+            .expect_err("65-byte epoch ID must not deserialize");
+        assert!(
+            error
+                .to_string()
+                .contains("epoch_id contains 65 bytes; maximum is 64")
+        );
+    }
+
+    #[test]
+    fn checkpoint_id_enforces_identifier_byte_limit_on_every_input_path() {
+        let at_limit = "a".repeat(MAX_IDENTIFIER_BYTES);
+        let over_limit = "a".repeat(MAX_IDENTIFIER_BYTES + 1);
+
+        assert_eq!(
+            CheckpointId::new(at_limit.clone()).expect("64-byte checkpoint ID"),
+            serde_json::from_value(serde_json::Value::String(at_limit))
+                .expect("deserialize 64-byte checkpoint ID")
+        );
+        assert_eq!(
+            CheckpointId::new(over_limit.clone()),
+            Err(SourceReplicaError::IdentifierTooLong {
+                field: "checkpoint_id",
+                found: MAX_IDENTIFIER_BYTES + 1,
+                maximum: MAX_IDENTIFIER_BYTES,
+            })
+        );
+        assert_eq!(
+            CheckpointId(over_limit.clone()).validate(),
+            Err(SourceReplicaError::IdentifierTooLong {
+                field: "checkpoint_id",
+                found: MAX_IDENTIFIER_BYTES + 1,
+                maximum: MAX_IDENTIFIER_BYTES,
+            })
+        );
+        let error = serde_json::from_value::<CheckpointId>(serde_json::Value::String(over_limit))
+            .expect_err("65-byte checkpoint ID must not deserialize");
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint_id contains 65 bytes; maximum is 64")
         );
     }
 

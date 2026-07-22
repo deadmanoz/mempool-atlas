@@ -1,13 +1,19 @@
 CREATE TABLE source (
-    source_id TEXT PRIMARY KEY NOT NULL,
-    latest_session_id TEXT NOT NULL,
+    source_id TEXT PRIMARY KEY NOT NULL CHECK (
+        length(CAST(source_id AS BLOB)) BETWEEN 1 AND 64
+    ),
+    latest_session_id TEXT NOT NULL CHECK (
+        length(CAST(latest_session_id AS BLOB)) BETWEEN 1 AND 64
+    ),
     last_seen_at_ms INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE event (
     event_id TEXT PRIMARY KEY NOT NULL,
     source_id TEXT NOT NULL REFERENCES source(source_id),
-    source_session_id TEXT NOT NULL,
+    source_session_id TEXT NOT NULL CHECK (
+        length(CAST(source_session_id AS BLOB)) BETWEEN 1 AND 64
+    ),
     local_sequence INTEGER NOT NULL,
     observed_at_ms INTEGER NOT NULL,
     received_at_ms INTEGER NOT NULL,

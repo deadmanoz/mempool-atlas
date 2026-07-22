@@ -7,7 +7,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use bitcoin::{Txid, Wtxid};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 pub use source_replica::*;
@@ -17,6 +17,8 @@ pub const SCHEMA_VERSION: u16 = 3;
 pub const MAX_INGEST_BATCH_EVENTS: usize = 512;
 pub const MAX_INGEST_BATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+/// Maximum encoded length of an ASCII wire identifier.
+pub const MAX_IDENTIFIER_BYTES: usize = 64;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ModelError {
@@ -24,6 +26,12 @@ pub enum ModelError {
     EmptyField { field: &'static str },
     #[error("{field} contains unsupported characters")]
     InvalidIdentifier { field: &'static str },
+    #[error("{field} contains {found} bytes; maximum is {maximum}")]
+    IdentifierTooLong {
+        field: &'static str,
+        found: usize,
+        maximum: usize,
+    },
     #[error("invalid txid: {0}")]
     InvalidTxid(String),
     #[error("invalid wtxid: {0}")]
@@ -68,20 +76,24 @@ pub enum ModelError {
     UnknownDetailSelection { value: String },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct SourceId(String);
 
 impl SourceId {
     pub fn new(value: impl Into<String>) -> Result<Self, ModelError> {
         let value = value.into();
-        ensure_nonempty("source_id", &value)?;
+        validate_identifier("source_id", &value)?;
         Ok(Self(value))
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), ModelError> {
+        validate_identifier("source_id", &self.0)
     }
 }
 
@@ -91,14 +103,24 @@ impl fmt::Display for SourceId {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+impl<'de> Deserialize<'de> for SourceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct SourceSessionId(String);
 
 impl SourceSessionId {
     pub fn new(value: impl Into<String>) -> Result<Self, ModelError> {
         let value = value.into();
-        ensure_nonempty("source_session_id", &value)?;
+        validate_identifier("source_session_id", &value)?;
         Ok(Self(value))
     }
 
@@ -106,11 +128,25 @@ impl SourceSessionId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn validate(&self) -> Result<(), ModelError> {
+        validate_identifier("source_session_id", &self.0)
+    }
 }
 
 impl fmt::Display for SourceSessionId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -157,8 +193,8 @@ impl NormalizedEvent {
             });
         }
         ensure_nonempty("event_id", &self.event_id)?;
-        ensure_nonempty("source_id", self.source_id.as_str())?;
-        ensure_nonempty("source_session_id", self.source_session_id.as_str())?;
+        self.source_id.validate()?;
+        self.source_session_id.validate()?;
         let expected_event_id = format!(
             "{}/{}/{}",
             self.source_id, self.source_session_id, self.local_sequence
@@ -482,10 +518,21 @@ fn ensure_nonempty(field: &'static str, value: &str) -> Result<(), ModelError> {
     if value.trim().is_empty() {
         return Err(ModelError::EmptyField { field });
     }
-    if matches!(field, "source_id" | "source_session_id")
-        && !value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    Ok(())
+}
+
+fn validate_identifier(field: &'static str, value: &str) -> Result<(), ModelError> {
+    ensure_nonempty(field, value)?;
+    if value.len() > MAX_IDENTIFIER_BYTES {
+        return Err(ModelError::IdentifierTooLong {
+            field,
+            found: value.len(),
+            maximum: MAX_IDENTIFIER_BYTES,
+        });
+    }
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
     {
         return Err(ModelError::InvalidIdentifier { field });
     }
@@ -913,6 +960,77 @@ mod tests {
             SourceId::new("source/with/slashes"),
             Err(ModelError::InvalidIdentifier { field: "source_id" })
         ));
+    }
+
+    #[test]
+    fn source_id_enforces_identifier_byte_limit_on_every_input_path() {
+        let at_limit = "a".repeat(MAX_IDENTIFIER_BYTES);
+        let over_limit = "a".repeat(MAX_IDENTIFIER_BYTES + 1);
+
+        assert_eq!(
+            SourceId::new(at_limit.clone()).expect("64-byte source ID"),
+            serde_json::from_value(serde_json::Value::String(at_limit))
+                .expect("deserialize 64-byte source ID")
+        );
+        assert_eq!(
+            SourceId::new(over_limit.clone()),
+            Err(ModelError::IdentifierTooLong {
+                field: "source_id",
+                found: MAX_IDENTIFIER_BYTES + 1,
+                maximum: MAX_IDENTIFIER_BYTES,
+            })
+        );
+        assert_eq!(
+            SourceId(over_limit.clone()).validate(),
+            Err(ModelError::IdentifierTooLong {
+                field: "source_id",
+                found: MAX_IDENTIFIER_BYTES + 1,
+                maximum: MAX_IDENTIFIER_BYTES,
+            })
+        );
+        let error = serde_json::from_value::<SourceId>(serde_json::Value::String(over_limit))
+            .expect_err("65-byte source ID must not deserialize");
+        assert!(
+            error
+                .to_string()
+                .contains("source_id contains 65 bytes; maximum is 64")
+        );
+    }
+
+    #[test]
+    fn source_session_id_enforces_identifier_byte_limit_on_every_input_path() {
+        let at_limit = "a".repeat(MAX_IDENTIFIER_BYTES);
+        let over_limit = "a".repeat(MAX_IDENTIFIER_BYTES + 1);
+
+        assert_eq!(
+            SourceSessionId::new(at_limit.clone()).expect("64-byte source session ID"),
+            serde_json::from_value(serde_json::Value::String(at_limit))
+                .expect("deserialize 64-byte source session ID")
+        );
+        assert_eq!(
+            SourceSessionId::new(over_limit.clone()),
+            Err(ModelError::IdentifierTooLong {
+                field: "source_session_id",
+                found: MAX_IDENTIFIER_BYTES + 1,
+                maximum: MAX_IDENTIFIER_BYTES,
+            })
+        );
+        assert_eq!(
+            SourceSessionId(over_limit.clone()).validate(),
+            Err(ModelError::IdentifierTooLong {
+                field: "source_session_id",
+                found: MAX_IDENTIFIER_BYTES + 1,
+                maximum: MAX_IDENTIFIER_BYTES,
+            })
+        );
+        let error =
+            serde_json::from_value::<SourceSessionId>(serde_json::Value::String(over_limit))
+                .expect_err("65-byte source session ID must not deserialize");
+        assert!(
+            error
+                .to_string()
+                .contains("source_session_id contains 65 bytes; maximum is 64")
+        );
     }
 
     #[test]

@@ -1,6 +1,8 @@
 CREATE TABLE agent_database (
     singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-    source_id TEXT NOT NULL
+    source_id TEXT NOT NULL CHECK (
+        length(CAST(source_id AS BLOB)) BETWEEN 1 AND 64
+    )
 ) STRICT;
 
 CREATE TABLE outbox_state (
@@ -11,7 +13,9 @@ CREATE TABLE outbox_state (
 INSERT INTO outbox_state (singleton) VALUES (1);
 
 CREATE TABLE session_sequence (
-    source_session_id TEXT PRIMARY KEY NOT NULL,
+    source_session_id TEXT PRIMARY KEY NOT NULL CHECK (
+        length(CAST(source_session_id AS BLOB)) BETWEEN 1 AND 64
+    ),
     next_sequence INTEGER NOT NULL CHECK (next_sequence >= 1)
 ) STRICT;
 
@@ -45,7 +49,9 @@ CREATE TABLE projected_membership (
 -- new epoch.
 CREATE TABLE source_replica_state (
     singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-    epoch_id TEXT NOT NULL,
+    epoch_id TEXT NOT NULL CHECK (
+        length(CAST(epoch_id AS BLOB)) BETWEEN 1 AND 64
+    ),
     local_revision INTEGER NOT NULL DEFAULT 0 CHECK (local_revision >= 0),
     acknowledged_revision INTEGER NOT NULL DEFAULT 0
         CHECK (acknowledged_revision >= 0),
@@ -59,9 +65,12 @@ CREATE TABLE source_replica_state (
         CHECK (checkpoint_replacement_known IN (0, 1)),
     checkpoint_supersedes_id TEXT CHECK (
         checkpoint_supersedes_id IS NULL
-        OR length(trim(checkpoint_supersedes_id)) > 0
+        OR length(CAST(checkpoint_supersedes_id AS BLOB)) BETWEEN 1 AND 64
     ),
-    checkpoint_replaces_epoch_id TEXT,
+    checkpoint_replaces_epoch_id TEXT CHECK (
+        checkpoint_replaces_epoch_id IS NULL
+        OR length(CAST(checkpoint_replaces_epoch_id AS BLOB)) BETWEEN 1 AND 64
+    ),
     checkpoint_replaces_revision INTEGER CHECK (checkpoint_replaces_revision >= 0),
     state_observed_at_ms INTEGER CHECK (state_observed_at_ms >= 0),
     acknowledged_state_observed_at_ms INTEGER
@@ -139,13 +148,19 @@ CREATE TABLE source_replica_dirty (
 CREATE TABLE source_replica_frozen_action (
     singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
     action_kind TEXT NOT NULL CHECK (action_kind IN ('delta', 'checkpoint')),
-    checkpoint_id TEXT,
+    checkpoint_id TEXT CHECK (
+        checkpoint_id IS NULL
+        OR length(CAST(checkpoint_id AS BLOB)) BETWEEN 1 AND 64
+    ),
     supersedes_checkpoint_id TEXT CHECK (
         supersedes_checkpoint_id IS NULL
-        OR length(trim(supersedes_checkpoint_id)) > 0
+        OR length(CAST(supersedes_checkpoint_id AS BLOB)) BETWEEN 1 AND 64
     ),
     base_revision INTEGER CHECK (base_revision >= 0),
-    replaces_epoch_id TEXT,
+    replaces_epoch_id TEXT CHECK (
+        replaces_epoch_id IS NULL
+        OR length(CAST(replaces_epoch_id AS BLOB)) BETWEEN 1 AND 64
+    ),
     replaces_revision INTEGER CHECK (replaces_revision >= 0),
     target_revision INTEGER NOT NULL CHECK (target_revision >= 1),
     state_observed_at_ms INTEGER NOT NULL CHECK (state_observed_at_ms >= 0),

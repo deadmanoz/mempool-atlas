@@ -1,5 +1,6 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use atlas_classifiers::{
@@ -7,8 +8,14 @@ use atlas_classifiers::{
 };
 use atlas_model::{
     AggregateBin, CaptureGapCertainty, CaptureStatus, CheckpointId, Evidence, IngestBatchRequest,
-    IngestStatus, MempoolEntry, MempoolEntryFacts, MempoolEntryFactsStatus, MempoolSnapshot,
-    NormalizedEvent, ReplicaCursor, ScriptType, SourceDescriptor, SourceHealth, SourceId,
+    IngestStatus, MAX_CHECKPOINT_ENTRIES, MempoolEntry, MempoolEntryFacts, MempoolEntryFactsStatus,
+    MempoolSnapshot, NormalizedEvent, ReplicaCursor, ScriptType, SourceDescriptor, SourceHealth,
+    SourceId,
+};
+use atlas_storage::{
+    SqlitePhysicalSnapshot, SqliteStorageError, SqliteStorageLimits, SqliteStorageLimitsError,
+    check_write_admission, configure_sqlite_connection, relieve_wal_pressure,
+    sqlite_physical_snapshot,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter};
 use thiserror::Error;
@@ -18,13 +25,119 @@ use crate::comparison::{ComparisonInputs, ComparisonOutcome, SourceTotal, StageI
 use crate::rejections::{REJECTION_WINDOW_MAX, RejectionCursor, RejectionInputs, RejectionRow};
 use crate::summary::{FactsRow, RegionFacts, ShapeRow, SourceMembershipFacts};
 
-const LATEST_SCHEMA_VERSION: i64 = 7;
+const LATEST_SCHEMA_VERSION: i64 = 8;
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_2: &str = include_str!("../migrations/0002_source_replica.sql");
+const MIB: u64 = 1024 * 1024;
+
+/// Bounded library defaults keep tests and embedded development stores
+/// independent of production filesystem sizing. The server binary always
+/// supplies its explicit production defaults instead.
+const DEFAULT_LIBRARY_STORAGE_LIMITS: SqliteStorageLimits = SqliteStorageLimits {
+    max_database_bytes: 256 * MIB,
+    max_total_sqlite_bytes: 512 * MIB,
+    filesystem_reserve_bytes: 1,
+    filesystem_reserve_percent: 1,
+    retained_wal_high_water_bytes: 64 * MIB,
+    wal_autocheckpoint_pages: 1_000,
+};
+const DEFAULT_MAX_SOURCE_IDENTITIES: usize = 4;
+const DEFAULT_MAX_MEMBERSHIP_ENTRIES: u64 = 200_000;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreLimits {
+    pub sqlite: SqliteStorageLimits,
+    /// Persistent source identities admitted to this store. SourceReplica has
+    /// no source-retirement operation, so this is not a concurrency limit.
+    pub max_sources: usize,
+    pub max_membership_entries: u64,
+    pub allowed_source_ids: Option<BTreeSet<SourceId>>,
+}
+
+impl StoreLimits {
+    pub fn new(
+        sqlite: SqliteStorageLimits,
+        max_sources: usize,
+        max_membership_entries: u64,
+        allowed_source_ids: Option<BTreeSet<SourceId>>,
+    ) -> Result<Self, StoreLimitsError> {
+        let limits = Self {
+            sqlite,
+            max_sources,
+            max_membership_entries,
+            allowed_source_ids,
+        };
+        limits.validate()?;
+        Ok(limits)
+    }
+
+    pub fn validate(&self) -> Result<(), StoreLimitsError> {
+        self.sqlite.validate()?;
+        if self.max_sources == 0 {
+            return Err(StoreLimitsError::ZeroMaxSources);
+        }
+        if self.max_membership_entries == 0 || self.max_membership_entries > MAX_CHECKPOINT_ENTRIES
+        {
+            return Err(StoreLimitsError::MembershipLimitOutOfRange {
+                found: self.max_membership_entries,
+                maximum: MAX_CHECKPOINT_ENTRIES,
+            });
+        }
+        if let Some(allowed) = &self.allowed_source_ids
+            && allowed.len() > self.max_sources
+        {
+            return Err(StoreLimitsError::AllowlistExceedsPersistentSourceLimit {
+                found: allowed.len(),
+                maximum: self.max_sources,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for StoreLimits {
+    fn default() -> Self {
+        Self {
+            sqlite: DEFAULT_LIBRARY_STORAGE_LIMITS,
+            max_sources: DEFAULT_MAX_SOURCE_IDENTITIES,
+            max_membership_entries: DEFAULT_MAX_MEMBERSHIP_ENTRIES,
+            allowed_source_ids: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum StoreLimitsError {
+    #[error(transparent)]
+    Storage(#[from] SqliteStorageLimitsError),
+    #[error("max_sources persistent identity cap must be greater than zero")]
+    ZeroMaxSources,
+    #[error("max_membership_entries must be in 1..={maximum}; found {found}")]
+    MembershipLimitOutOfRange { found: u64, maximum: u64 },
+    #[error(
+        "source allowlist contains {found} persistent identities, exceeding max_sources {maximum}"
+    )]
+    AllowlistExceedsPersistentSourceLimit { found: usize, maximum: usize },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreReadiness {
+    pub snapshot: SqlitePhysicalSnapshot,
+    pub pressure: Option<String>,
+}
+
+impl StoreReadiness {
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.pressure.is_none()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Store {
     path: Arc<PathBuf>,
+    limits: Arc<StoreLimits>,
+    write_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Error)]
@@ -33,6 +146,10 @@ pub enum StoreError {
     Database(#[from] rusqlite::Error),
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("storage policy error: {0}")]
+    Storage(#[from] SqliteStorageError),
+    #[error("invalid store limits: {0}")]
+    Limits(#[from] StoreLimitsError),
     #[error("event model error: {0}")]
     Model(#[from] atlas_model::ModelError),
     #[error("source replica model error: {0}")]
@@ -41,6 +158,22 @@ pub enum StoreError {
     Serialization(#[from] serde_json::Error),
     #[error("database schema is at version {found}, expected {expected}")]
     SchemaVersion { found: i64, expected: i64 },
+    #[error(
+        "database contains {found} persistent source identities, exceeding configured maximum {maximum}"
+    )]
+    ExistingSourceIdentityLimitExceeded { found: u64, maximum: usize },
+    #[error("database source {source_id} is absent from the configured source allowlist")]
+    ExistingSourceNotAllowed { source_id: SourceId },
+    #[error(
+        "database generation {source_id}/{generation_id} declares {declared_entries} and contains {actual_entries} membership entries, exceeding configured maximum {maximum}"
+    )]
+    ExistingGenerationMembershipLimitExceeded {
+        source_id: SourceId,
+        generation_id: i64,
+        declared_entries: u64,
+        actual_entries: u64,
+        maximum: u64,
+    },
     #[error("numeric field {field} is too large for SQLite")]
     NumericOverflow { field: &'static str },
     #[error("invalid raw transaction hex for event {event_id}")]
@@ -68,8 +201,16 @@ pub enum StoreError {
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_limits(path, StoreLimits::default())
+    }
+
+    pub fn open_with_limits(
+        path: impl AsRef<Path>,
+        limits: StoreLimits,
+    ) -> Result<Self, StoreError> {
+        limits.validate()?;
         let path = path.as_ref().to_path_buf();
-        let connection = open_existing_connection(&path)?;
+        let connection = open_existing_connection(&path, &limits.sqlite)?;
         let version = schema_version(&connection)?;
         if version != LATEST_SCHEMA_VERSION {
             return Err(StoreError::SchemaVersion {
@@ -77,18 +218,29 @@ impl Store {
                 expected: LATEST_SCHEMA_VERSION,
             });
         }
+        validate_existing_store_policy(&connection, &limits)?;
         Ok(Self {
             path: Arc::new(path),
+            limits: Arc::new(limits),
+            write_gate: Arc::new(Mutex::new(())),
         })
     }
 
     pub fn migrate(path: impl AsRef<Path>) -> Result<(), StoreError> {
+        Self::migrate_with_limits(path, &StoreLimits::default().sqlite)
+    }
+
+    pub fn migrate_with_limits(
+        path: impl AsRef<Path>,
+        limits: &SqliteStorageLimits,
+    ) -> Result<(), StoreError> {
+        limits.validate().map_err(StoreLimitsError::from)?;
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut connection = Connection::open(path)?;
-        configure_connection(&connection)?;
+        configure_connection(&connection, limits)?;
         let version = schema_version(&connection)?;
         if version == LATEST_SCHEMA_VERSION {
             return Ok(());
@@ -127,8 +279,15 @@ impl Store {
         &self,
         events: &[NormalizedEvent],
     ) -> Result<Vec<IngestStatus>, StoreError> {
+        let _write_guard = self.lock_write_gate();
+        // This router is explicitly experimental. Its legacy reducer upserts
+        // source freshness before it can resolve an event replay, so the
+        // batch is admitted before reduction. SourceReplica production paths
+        // place admission after duplicate and conflict resolution instead.
+        self.attempt_wal_relief();
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
+        self.require_write_admission(&transaction, None)?;
         let mut statuses = Vec::with_capacity(events.len());
         for event in events {
             statuses.push(ingest_in_transaction(&transaction, event)?);
@@ -405,7 +564,116 @@ impl Store {
     }
 
     pub(crate) fn connect(&self) -> Result<Connection, StoreError> {
-        open_existing_connection(&self.path)
+        open_existing_connection(&self.path, &self.limits.sqlite)
+    }
+
+    pub(crate) fn lock_write_gate(&self) -> MutexGuard<'_, ()> {
+        self.write_gate.lock().unwrap_or_else(|poisoned| {
+            warn!(
+                "server write gate was poisoned; recovering after the prior transaction rollback"
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    /// Best-effort WAL relief runs only on an autocommit connection. A pinned
+    /// reader or other pressure does not hide idempotent replies: the command
+    /// still enters its transaction and the first actual mutation performs
+    /// the authoritative admission check.
+    pub(crate) fn attempt_wal_relief(&self) {
+        let result = self.connect().and_then(|connection| {
+            relieve_wal_pressure(&connection, self.path.as_ref(), &self.limits.sqlite)
+                .map(|_| ())
+                .map_err(StoreError::from)
+        });
+        if let Err(error) = result {
+            warn!(%error, database = %self.path.display(), "SQLite WAL relief was unavailable");
+        }
+    }
+
+    pub(crate) fn require_write_admission(
+        &self,
+        connection: &Connection,
+        active_cursor: Option<ReplicaCursor>,
+    ) -> Result<SqlitePhysicalSnapshot, StoreError> {
+        check_write_admission(connection, self.path.as_ref(), &self.limits.sqlite).map_err(
+            |error| {
+                warn!(
+                    %error,
+                    database = %self.path.display(),
+                    ?active_cursor,
+                    "SQLite write admission rejected"
+                );
+                if storage_error_is_capacity(&error) {
+                    StoreError::SourceReplicaCapacity {
+                        message: format!("physical storage admission rejected: {error}"),
+                        active_cursor,
+                    }
+                } else {
+                    StoreError::Storage(error)
+                }
+            },
+        )
+    }
+
+    pub(crate) fn require_source_allowed(
+        &self,
+        source_id: &SourceId,
+        active_cursor: Option<ReplicaCursor>,
+    ) -> Result<(), StoreError> {
+        if let Some(allowed) = &self.limits.allowed_source_ids
+            && !allowed.contains(source_id)
+        {
+            return Err(StoreError::SourceReplicaCapacity {
+                message: format!(
+                    "source {} is absent from the configured source allowlist",
+                    source_id
+                ),
+                active_cursor,
+            });
+        }
+        Ok(())
+    }
+
+    /// Admit a genuinely new persistent source identity. SourceReplica has no
+    /// source-retirement command, so active and staging generations both count
+    /// against the lifetime identity cap.
+    pub(crate) fn require_new_source_identity_admission(
+        &self,
+        connection: &Connection,
+        source_id: &SourceId,
+    ) -> Result<(), StoreError> {
+        let source_count = distinct_source_count(connection)?;
+        if source_count >= self.limits.max_sources as u64 {
+            return Err(StoreError::SourceReplicaCapacity {
+                message: format!(
+                    "creating source {} would exceed the configured maximum of {} persistent source identities",
+                    source_id, self.limits.max_sources
+                ),
+                active_cursor: None,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn readiness(&self) -> Result<StoreReadiness, StoreError> {
+        let _write_guard = self.lock_write_gate();
+        let connection = self.connect()?;
+        let relief_error =
+            relieve_wal_pressure(&connection, self.path.as_ref(), &self.limits.sqlite).err();
+        let snapshot =
+            sqlite_physical_snapshot(&connection, self.path.as_ref(), &self.limits.sqlite)?;
+        let pressure = relief_error
+            .or_else(|| {
+                check_write_admission(&connection, self.path.as_ref(), &self.limits.sqlite).err()
+            })
+            .map(|error| error.to_string());
+        Ok(StoreReadiness { snapshot, pressure })
+    }
+
+    #[must_use]
+    pub fn limits(&self) -> &StoreLimits {
+        &self.limits
     }
 }
 
@@ -696,21 +964,115 @@ fn ingest_in_transaction(
     Ok(IngestStatus::Applied)
 }
 
-fn open_existing_connection(path: &Path) -> Result<Connection, StoreError> {
+fn open_existing_connection(
+    path: &Path,
+    limits: &SqliteStorageLimits,
+) -> Result<Connection, StoreError> {
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    configure_connection(&connection)?;
+    configure_connection(&connection, limits)?;
     Ok(connection)
 }
 
-fn configure_connection(connection: &Connection) -> Result<(), rusqlite::Error> {
+fn configure_connection(
+    connection: &Connection,
+    limits: &SqliteStorageLimits,
+) -> Result<(), StoreError> {
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
-    connection.pragma_update(None, "temp_store", "MEMORY")?;
+    configure_sqlite_connection(connection, limits)?;
     Ok(())
+}
+
+fn validate_existing_store_policy(
+    connection: &Connection,
+    limits: &StoreLimits,
+) -> Result<(), StoreError> {
+    let count = distinct_source_count(connection)?;
+    if count > limits.max_sources as u64 {
+        return Err(StoreError::ExistingSourceIdentityLimitExceeded {
+            found: count,
+            maximum: limits.max_sources,
+        });
+    }
+
+    if let Some(allowed) = &limits.allowed_source_ids {
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT source_id FROM source_replica_generation ORDER BY source_id",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let source_id = SourceId::new(row?)?;
+            if !allowed.contains(&source_id) {
+                return Err(StoreError::ExistingSourceNotAllowed { source_id });
+            }
+        }
+    }
+
+    let maximum = i64::try_from(limits.max_membership_entries)
+        .expect("validated membership limit fits SQLite integer");
+    let offending_generation = connection
+        .query_row(
+            "SELECT generation.source_id, generation.generation_id,
+                    generation.expected_entries, COUNT(membership.txid)
+             FROM source_replica_generation AS generation
+             LEFT JOIN source_replica_membership AS membership
+               ON membership.source_id = generation.source_id
+              AND membership.generation_id = generation.generation_id
+             GROUP BY generation.source_id, generation.generation_id,
+                      generation.expected_entries
+             HAVING generation.expected_entries > ?1 OR COUNT(membership.txid) > ?1
+             ORDER BY generation.source_id, generation.generation_id
+             LIMIT 1",
+            [maximum],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    nonnegative_integer_from_row(row.get(2)?, 2)?,
+                    nonnegative_integer_from_row(row.get(3)?, 3)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((source_id, generation_id, declared_entries, actual_entries)) = offending_generation
+    {
+        return Err(StoreError::ExistingGenerationMembershipLimitExceeded {
+            source_id: SourceId::new(source_id)?,
+            generation_id,
+            declared_entries,
+            actual_entries,
+            maximum: limits.max_membership_entries,
+        });
+    }
+    Ok(())
+}
+
+fn distinct_source_count(connection: &Connection) -> Result<u64, StoreError> {
+    connection
+        .query_row(
+            "SELECT COUNT(DISTINCT source_id) FROM source_replica_generation",
+            [],
+            |row| nonnegative_integer_from_row(row.get(0)?, 0),
+        )
+        .map_err(StoreError::from)
+}
+
+pub(crate) fn storage_error_is_capacity(error: &SqliteStorageError) -> bool {
+    match error {
+        SqliteStorageError::ExistingDatabaseExceedsPageBudget { .. }
+        | SqliteStorageError::MainDatabaseLimitExceeded { .. }
+        | SqliteStorageError::TotalSqliteEnvelopeExceeded { .. }
+        | SqliteStorageError::WalPressure { .. }
+        | SqliteStorageError::FilesystemPressure { .. } => true,
+        SqliteStorageError::Sqlite(rusqlite::Error::SqliteFailure(details, _)) => {
+            details.code == rusqlite::ErrorCode::DiskFull
+        }
+        _ => false,
+    }
 }
 
 fn schema_version(connection: &Connection) -> Result<i64, rusqlite::Error> {
@@ -1035,14 +1397,138 @@ mod tests {
     }
 
     #[test]
-    fn opened_connections_use_memory_temp_store() {
+    fn opened_connections_apply_the_shared_sqlite_capacity_policy() {
         let (_temporary, store) = test_store();
         let connection = store.connect().expect("connect");
         let temp_store = connection
             .pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))
             .expect("read temp store");
+        let page_size = connection
+            .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))
+            .and_then(|value| nonnegative_integer_from_row(value, 0))
+            .expect("read page size");
+        let max_page_count = connection
+            .pragma_query_value(None, "max_page_count", |row| row.get::<_, i64>(0))
+            .and_then(|value| nonnegative_integer_from_row(value, 0))
+            .expect("read max page count");
+        let journal_size_limit = connection
+            .pragma_query_value(None, "journal_size_limit", |row| row.get::<_, i64>(0))
+            .and_then(|value| nonnegative_integer_from_row(value, 0))
+            .expect("read journal size limit");
+        let wal_autocheckpoint = connection
+            .pragma_query_value(None, "wal_autocheckpoint", |row| row.get::<_, i64>(0))
+            .and_then(|value| nonnegative_integer_from_row(value, 0))
+            .expect("read WAL auto-checkpoint interval");
 
         assert_eq!(temp_store, 2);
+        assert_eq!(
+            max_page_count,
+            store.limits().sqlite.max_database_bytes / page_size
+        );
+        assert_eq!(
+            journal_size_limit,
+            store.limits().sqlite.retained_wal_high_water_bytes
+        );
+        assert_eq!(
+            wal_autocheckpoint,
+            u64::from(store.limits().sqlite.wal_autocheckpoint_pages)
+        );
+    }
+
+    #[test]
+    fn allowlist_cannot_exceed_the_persistent_source_identity_cap() {
+        let allowed = ["source-a", "source-b"]
+            .into_iter()
+            .map(|value| SourceId::new(value).expect("source"))
+            .collect();
+        let limits = StoreLimits::new(
+            DEFAULT_LIBRARY_STORAGE_LIMITS,
+            1,
+            DEFAULT_MAX_MEMBERSHIP_ENTRIES,
+            Some(allowed),
+        );
+
+        assert!(matches!(
+            limits,
+            Err(StoreLimitsError::AllowlistExceedsPersistentSourceLimit {
+                found: 2,
+                maximum: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn membership_limit_must_fit_the_wire_contract() {
+        for maximum in [1, MAX_CHECKPOINT_ENTRIES] {
+            assert!(StoreLimits::new(DEFAULT_LIBRARY_STORAGE_LIMITS, 1, maximum, None).is_ok());
+        }
+        for invalid in [0, MAX_CHECKPOINT_ENTRIES + 1] {
+            assert!(matches!(
+                StoreLimits::new(DEFAULT_LIBRARY_STORAGE_LIMITS, 1, invalid, None),
+                Err(StoreLimitsError::MembershipLimitOutOfRange { found, maximum })
+                    if found == invalid && maximum == MAX_CHECKPOINT_ENTRIES
+            ));
+        }
+        assert_eq!(StoreLimits::default().max_membership_entries, 200_000);
+    }
+
+    #[test]
+    fn fresh_schema_enforces_byte_bounds_for_replica_identifiers() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join("atlas.db");
+        Store::migrate(&path).expect("migrate");
+        let connection = Connection::open(&path).expect("open raw database connection");
+        let insert = |source_id: &str, epoch_id: &str, checkpoint_id: &str| {
+            connection.execute(
+                "INSERT INTO source_replica_generation (
+                    source_id, generation_id, role, epoch_id, revision,
+                    state_observed_at_ms, checkpoint_id, expected_entries,
+                    expected_chunks, content_sha256
+                 ) VALUES (?1, 1, 'staging', ?2, 1, 0, ?3, 0, 0, ?4)",
+                params![source_id, epoch_id, checkpoint_id, "00".repeat(32)],
+            )
+        };
+        let exactly_64_source = "s".repeat(64);
+        let exactly_64_epoch = "e".repeat(64);
+        let exactly_64_checkpoint = "c".repeat(64);
+
+        insert(
+            &exactly_64_source,
+            &exactly_64_epoch,
+            &exactly_64_checkpoint,
+        )
+        .expect("64-byte identifiers are accepted");
+
+        for (source_id, epoch_id, checkpoint_id) in [
+            (
+                "s".repeat(65),
+                "epoch-b".to_owned(),
+                "checkpoint-b".to_owned(),
+            ),
+            (
+                "source-c".to_owned(),
+                "e".repeat(65),
+                "checkpoint-c".to_owned(),
+            ),
+            ("source-d".to_owned(), "epoch-d".to_owned(), "c".repeat(65)),
+        ] {
+            let error = insert(&source_id, &epoch_id, &checkpoint_id)
+                .expect_err("65-byte identifier must violate a schema constraint");
+            assert!(matches!(
+                error,
+                rusqlite::Error::SqliteFailure(details, _)
+                    if details.code == rusqlite::ErrorCode::ConstraintViolation
+            ));
+        }
+
+        let rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_replica_generation",
+                [],
+                |row| row.get(0),
+            )
+            .expect("generation count");
+        assert_eq!(rows, 1);
     }
 
     fn source() -> SourceId {
@@ -1869,7 +2355,7 @@ mod tests {
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
                 found: 5,
-                expected: 7
+                expected: 8
             })
         ));
     }
@@ -1880,15 +2366,15 @@ mod tests {
         let path = temporary.path().join("atlas.db");
         let connection = Connection::open(&path).expect("create database");
         connection
-            .pragma_update(None, "user_version", 8)
+            .pragma_update(None, "user_version", 9)
             .expect("schema version");
         drop(connection);
 
         assert!(matches!(
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
-                found: 8,
-                expected: 7
+                found: 9,
+                expected: 8
             })
         ));
     }
@@ -2016,7 +2502,7 @@ mod tests {
             Store::open(path),
             Err(StoreError::SchemaVersion {
                 found: 0,
-                expected: 7
+                expected: 8
             })
         ));
     }

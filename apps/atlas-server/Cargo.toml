@@ -13,6 +13,7 @@ seed-tool = ["dep:reqwest"]
 anyhow.workspace = true
 atlas-classifiers = { path = "../../crates/atlas-classifiers" }
 atlas-model = { path = "../../crates/atlas-model" }
+atlas-storage = { path = "../../crates/atlas-storage" }
 axum.workspace = true
 bitcoin.workspace = true
 clap.workspace = true

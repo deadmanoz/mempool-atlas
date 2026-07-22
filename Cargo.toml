@@ -5,6 +5,7 @@ members = [
     "apps/atlas-server",
     "crates/atlas-classifiers",
     "crates/atlas-model",
+    "crates/atlas-storage",
 ]
 default-members = ["apps/atlas-agent", "apps/atlas-server"]
 
@@ -21,6 +22,7 @@ bitcoin = { version = "0.32.7", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 corepc-client = { version = "0.8", features = ["client-sync"] }
 futures-util = "0.3"
+fs4 = "1.1"
 hex = "0.4"
 prost = "0.14.1"
 prost-build = "0.14"

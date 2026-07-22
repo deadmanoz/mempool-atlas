@@ -10,4 +10,4 @@ pub use api::{
     router_with_clock,
 };
 pub use source_replica::ActiveSourceReplica;
-pub use store::{Store, StoreError};
+pub use store::{Store, StoreError, StoreLimits, StoreLimitsError, StoreReadiness};

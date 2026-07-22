@@ -1,10 +1,10 @@
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU8, NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
 use atlas_agent::delivery::DeliveryRetryPolicy;
-use atlas_agent::source_replica::{SourceReplica, SourceReplicaLimits};
+use atlas_agent::source_replica::{SourceReplica, SourceReplicaLimits, SourceReplicaStoragePolicy};
 use atlas_agent::state_runtime::{RpcStateConfig, StateRuntimeConfig};
 use atlas_model::SourceId;
 use clap::{Args, Parser, Subcommand};
@@ -56,7 +56,7 @@ struct RunArgs {
         default_value = "60000"
     )]
     delivery_retry_max_milliseconds: NonZeroU64,
-    #[arg(long, env = "ATLAS_MAX_MEMPOOL_ENTRIES", default_value = "1000000")]
+    #[arg(long, env = "ATLAS_MAX_MEMPOOL_ENTRIES", default_value = "200000")]
     max_mempool_entries: NonZeroU64,
     #[arg(long, env = "ATLAS_MAX_DIRTY_MUTATIONS", default_value = "4096")]
     max_dirty_mutations: NonZeroUsize,
@@ -66,6 +66,32 @@ struct RunArgs {
     checkpoint_chunk_entries: NonZeroUsize,
     #[arg(long, env = "ATLAS_AGENT_DB_MAX_BYTES", default_value = "1073741824")]
     agent_db_max_bytes: NonZeroU64,
+    #[arg(
+        long,
+        env = "ATLAS_AGENT_STORAGE_MAX_BYTES",
+        default_value = "1879048192"
+    )]
+    agent_storage_max_bytes: NonZeroU64,
+    #[arg(
+        long,
+        env = "ATLAS_FILESYSTEM_RESERVE_BYTES",
+        default_value = "134217728"
+    )]
+    filesystem_reserve_bytes: NonZeroU64,
+    #[arg(long, env = "ATLAS_FILESYSTEM_RESERVE_PERCENT", default_value = "5")]
+    filesystem_reserve_percent: NonZeroU8,
+    #[arg(
+        long,
+        env = "ATLAS_AGENT_WAL_RETAINED_BYTES",
+        default_value = "67108864"
+    )]
+    agent_wal_retained_bytes: NonZeroU64,
+    #[arg(
+        long,
+        env = "ATLAS_AGENT_WAL_AUTOCHECKPOINT_PAGES",
+        default_value = "1000"
+    )]
+    agent_wal_autocheckpoint_pages: NonZeroU32,
 }
 
 #[tokio::main]
@@ -103,8 +129,26 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     }
     .validate()
     .context("validating SourceReplica limits")?;
-    let replica = SourceReplica::open(&args.database, source_id, limits)
-        .with_context(|| format!("opening agent database {}", args.database.display()))?;
+    let storage_policy = SourceReplicaStoragePolicy {
+        max_total_sqlite_bytes: args.agent_storage_max_bytes.get(),
+        filesystem_reserve_bytes: args.filesystem_reserve_bytes.get(),
+        filesystem_reserve_percent: args.filesystem_reserve_percent.get(),
+        retained_wal_high_water_bytes: args.agent_wal_retained_bytes.get(),
+        wal_autocheckpoint_pages: args.agent_wal_autocheckpoint_pages.get(),
+    };
+    info!(
+        max_membership_entries = limits.max_membership_entries,
+        max_database_bytes = limits.max_database_bytes,
+        max_total_sqlite_bytes = storage_policy.max_total_sqlite_bytes,
+        filesystem_reserve_bytes = storage_policy.filesystem_reserve_bytes,
+        filesystem_reserve_percent = storage_policy.filesystem_reserve_percent,
+        retained_wal_high_water_bytes = storage_policy.retained_wal_high_water_bytes,
+        wal_autocheckpoint_pages = storage_policy.wal_autocheckpoint_pages,
+        "configured agent capacity limits"
+    );
+    let replica =
+        SourceReplica::open_with_storage_policy(&args.database, source_id, limits, storage_policy)
+            .with_context(|| format!("opening agent database {}", args.database.display()))?;
     let state_endpoint = http_url("Atlas server", &args.atlas_server_url)?
         .join("/api/v1/state")
         .context("building Atlas state endpoint")?
@@ -179,6 +223,19 @@ mod tests {
 
         assert_eq!(default("delivery_retry_milliseconds"), "1000");
         assert_eq!(default("delivery_retry_max_milliseconds"), "60000");
+    }
+
+    #[test]
+    fn production_capacity_defaults_are_bounded() {
+        let args = parse_run_args(&[]);
+
+        assert_eq!(args.max_mempool_entries.get(), 200_000);
+        assert_eq!(args.agent_db_max_bytes.get(), 1024 * 1024 * 1024);
+        assert_eq!(args.agent_storage_max_bytes.get(), 1_792 * 1024 * 1024);
+        assert_eq!(args.filesystem_reserve_bytes.get(), 128 * 1024 * 1024);
+        assert_eq!(args.filesystem_reserve_percent.get(), 5);
+        assert_eq!(args.agent_wal_retained_bytes.get(), 64 * 1024 * 1024);
+        assert_eq!(args.agent_wal_autocheckpoint_pages.get(), 1_000);
     }
 
     #[test]

@@ -7,13 +7,15 @@
 
 use atlas_model::{
     CheckpointBegin, CheckpointChunk, CheckpointCommit, CheckpointDigest, CheckpointId,
-    CheckpointProgress, MAX_CHECKPOINT_ENTRIES, MempoolEntryFacts, ReplicaCursor, SourceEpochId,
-    SourceId, SourceReplicaCommand, SourceReplicaEntry, SourceReplicaRequest,
-    SourceReplicaResponse, StateDelta, StateHeartbeat, StateMutation,
+    CheckpointProgress, MempoolEntryFacts, ReplicaCursor, SourceEpochId, SourceId,
+    SourceReplicaCommand, SourceReplicaEntry, SourceReplicaRequest, SourceReplicaResponse,
+    StateDelta, StateHeartbeat, StateMutation,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
-use crate::store::{Store, StoreError, nonnegative_integer_from_row, to_sqlite_integer};
+use crate::store::{
+    Store, StoreError, nonnegative_integer_from_row, storage_error_is_capacity, to_sqlite_integer,
+};
 
 const ACTIVE_ROLE: &str = "active";
 const STAGING_ROLE: &str = "staging";
@@ -77,34 +79,62 @@ impl Store {
             _ => invalid(error.to_string(), None),
         })?;
 
+        let _write_guard = self.lock_write_gate();
+        self.attempt_wal_relief();
         // Acquire the writer reservation before reading a cursor. This makes
         // the cursor checks and subsequent mutation one compare-and-swap even
         // when more than one HTTP request reaches SQLite concurrently.
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut connection = self
+            .connect()
+            .map_err(|error| normalize_write_error(error, None))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| normalize_write_error(StoreError::Database(error), None))?;
+        let active_cursor_before =
+            generation_by_role(&transaction, &request.source_id, ACTIVE_ROLE)?
+                .map(|generation| generation.cursor());
+        self.require_source_allowed(&request.source_id, active_cursor_before.clone())?;
         let result = match &request.command {
-            SourceReplicaCommand::Delta(delta) => {
-                apply_delta(&transaction, &request.source_id, &request.epoch_id, delta)
-            }
+            SourceReplicaCommand::Delta(delta) => apply_delta(
+                self,
+                &transaction,
+                &request.source_id,
+                &request.epoch_id,
+                delta,
+            ),
             SourceReplicaCommand::Heartbeat(heartbeat) => apply_heartbeat(
+                self,
                 &transaction,
                 &request.source_id,
                 &request.epoch_id,
                 heartbeat,
             ),
-            SourceReplicaCommand::CheckpointBegin(begin) => {
-                begin_checkpoint(&transaction, &request.source_id, &request.epoch_id, begin)
-            }
-            SourceReplicaCommand::CheckpointChunk(chunk) => {
-                stage_checkpoint_chunk(&transaction, &request.source_id, &request.epoch_id, chunk)
-            }
-            SourceReplicaCommand::CheckpointCommit(commit) => {
-                commit_checkpoint(&transaction, &request.source_id, &request.epoch_id, commit)
-            }
+            SourceReplicaCommand::CheckpointBegin(begin) => begin_checkpoint(
+                self,
+                &transaction,
+                &request.source_id,
+                &request.epoch_id,
+                begin,
+            ),
+            SourceReplicaCommand::CheckpointChunk(chunk) => stage_checkpoint_chunk(
+                self,
+                &transaction,
+                &request.source_id,
+                &request.epoch_id,
+                chunk,
+            ),
+            SourceReplicaCommand::CheckpointCommit(commit) => commit_checkpoint(
+                self,
+                &transaction,
+                &request.source_id,
+                &request.epoch_id,
+                commit,
+            ),
         };
         let response = match result {
             Ok(response) => response,
             Err(error) => {
+                let error = normalize_write_error(error, active_cursor_before.clone());
                 return Err(attach_staging_checkpoint_id(
                     &transaction,
                     &request.source_id,
@@ -112,7 +142,9 @@ impl Store {
                 )?);
             }
         };
-        transaction.commit()?;
+        transaction.commit().map_err(|error| {
+            normalize_write_error(StoreError::Database(error), active_cursor_before)
+        })?;
         Ok(response)
     }
 
@@ -137,6 +169,7 @@ impl Store {
 }
 
 fn apply_delta(
+    store: &Store,
     transaction: &Transaction<'_>,
     source_id: &SourceId,
     epoch_id: &SourceEpochId,
@@ -150,7 +183,6 @@ fn apply_delta(
     };
     let active_cursor = Some(active.cursor());
     require_epoch(epoch_id, &active, active_cursor.clone())?;
-    reject_active_write_while_staging(transaction, source_id, active_cursor.clone())?;
 
     if delta.target_revision == active.revision {
         if active.last_delta_target_revision == Some(delta.target_revision) {
@@ -175,6 +207,8 @@ fn apply_delta(
         ));
     }
 
+    reject_active_write_while_staging(transaction, source_id, active_cursor.clone())?;
+
     if delta.base_revision != active.revision {
         return Err(cursor_mismatch(
             format!(
@@ -194,6 +228,7 @@ fn apply_delta(
         ));
     }
 
+    store.require_write_admission(transaction, active_cursor.clone())?;
     for mutation in &delta.mutations {
         match mutation {
             StateMutation::Absent { txid } => {
@@ -210,10 +245,11 @@ fn apply_delta(
     }
 
     let entry_count = generation_entry_count(transaction, &active)?;
-    if entry_count > MAX_CHECKPOINT_ENTRIES {
+    let maximum = store.limits().max_membership_entries;
+    if entry_count > maximum {
         return Err(capacity(
             format!(
-                "delta would grow active membership to {entry_count} entries; maximum is {MAX_CHECKPOINT_ENTRIES}"
+                "delta would grow active membership to {entry_count} entries; configured maximum is {maximum}"
             ),
             active_cursor,
         ));
@@ -245,6 +281,7 @@ fn apply_delta(
 }
 
 fn apply_heartbeat(
+    store: &Store,
     transaction: &Transaction<'_>,
     source_id: &SourceId,
     epoch_id: &SourceEpochId,
@@ -258,7 +295,6 @@ fn apply_heartbeat(
     };
     let active_cursor = Some(active.cursor());
     require_epoch(epoch_id, &active, active_cursor.clone())?;
-    reject_active_write_while_staging(transaction, source_id, active_cursor.clone())?;
     if heartbeat.revision != active.revision {
         return Err(cursor_mismatch(
             format!(
@@ -271,6 +307,7 @@ fn apply_heartbeat(
     if heartbeat.state_observed_at_ms == active.state_observed_at_ms {
         return Ok(SourceReplicaResponse::duplicate(active_cursor, None));
     }
+    reject_active_write_while_staging(transaction, source_id, active_cursor.clone())?;
     if heartbeat.state_observed_at_ms < active.state_observed_at_ms {
         return Err(invalid(
             format!(
@@ -281,6 +318,7 @@ fn apply_heartbeat(
         ));
     }
 
+    store.require_write_admission(transaction, active_cursor.clone())?;
     transaction.execute(
         "UPDATE source_replica_generation
          SET state_observed_at_ms = ?3
@@ -295,6 +333,7 @@ fn apply_heartbeat(
 }
 
 fn begin_checkpoint(
+    store: &Store,
     transaction: &Transaction<'_>,
     source_id: &SourceId,
     epoch_id: &SourceEpochId,
@@ -302,6 +341,22 @@ fn begin_checkpoint(
 ) -> Result<SourceReplicaResponse, StoreError> {
     let active = generation_by_role(transaction, source_id, ACTIVE_ROLE)?;
     let active_cursor = active.as_ref().map(Generation::cursor);
+
+    if let Some(active) = &active
+        && active.checkpoint_id == begin.checkpoint_id
+    {
+        if active.is_begin_retry(epoch_id, begin) {
+            return Ok(SourceReplicaResponse::duplicate(active_cursor, None));
+        }
+        return Err(conflict(
+            "checkpoint_conflict",
+            format!(
+                "checkpoint ID {} was already used with different content",
+                begin.checkpoint_id
+            ),
+            active_cursor,
+        ));
+    }
 
     let existing_staging = generation_by_role(transaction, source_id, STAGING_ROLE)?;
     if let Some(staging) = &existing_staging {
@@ -332,22 +387,6 @@ fn begin_checkpoint(
                 active_cursor,
             ));
         }
-    }
-
-    if let Some(active) = &active
-        && active.checkpoint_id == begin.checkpoint_id
-    {
-        if active.is_begin_retry(epoch_id, begin) {
-            return Ok(SourceReplicaResponse::duplicate(active_cursor, None));
-        }
-        return Err(conflict(
-            "checkpoint_conflict",
-            format!(
-                "checkpoint ID {} was already used with different content",
-                begin.checkpoint_id
-            ),
-            active_cursor,
-        ));
     }
 
     if existing_staging.is_none() && begin.supersedes_checkpoint_id.is_some() {
@@ -382,15 +421,21 @@ fn begin_checkpoint(
             active_cursor,
         ));
     }
-    if begin.expected_entries > MAX_CHECKPOINT_ENTRIES {
+    let maximum = store.limits().max_membership_entries;
+    if begin.expected_entries > maximum {
         return Err(capacity(
             format!(
-                "checkpoint declares {} entries; maximum is {MAX_CHECKPOINT_ENTRIES}",
+                "checkpoint declares {} entries; configured maximum is {maximum}",
                 begin.expected_entries
             ),
             active_cursor,
         ));
     }
+
+    if active.is_none() && existing_staging.is_none() {
+        store.require_new_source_identity_admission(transaction, source_id)?;
+    }
+    store.require_write_admission(transaction, active_cursor.clone())?;
 
     // Replacing an abandoned staging generation is an explicit compare-and-
     // swap. A delayed begin cannot delete whichever checkpoint happens to be
@@ -462,6 +507,7 @@ fn begin_checkpoint(
 }
 
 fn stage_checkpoint_chunk(
+    store: &Store,
     transaction: &Transaction<'_>,
     source_id: &SourceId,
     epoch_id: &SourceEpochId,
@@ -469,6 +515,18 @@ fn stage_checkpoint_chunk(
 ) -> Result<SourceReplicaResponse, StoreError> {
     let active = generation_by_role(transaction, source_id, ACTIVE_ROLE)?;
     let active_cursor = active.as_ref().map(Generation::cursor);
+    if active
+        .as_ref()
+        .is_some_and(|generation| generation.checkpoint_id == chunk.checkpoint_id)
+    {
+        return completed_chunk_retry_or_conflict(
+            transaction,
+            active.as_ref(),
+            epoch_id,
+            chunk,
+            active_cursor,
+        );
+    }
     let Some(staging) = generation_by_role(transaction, source_id, STAGING_ROLE)? else {
         return completed_chunk_retry_or_conflict(
             transaction,
@@ -565,16 +623,21 @@ fn stage_checkpoint_chunk(
             active_cursor.clone(),
         )
     })?;
-    if staged_after > staging.expected_entries || staged_after > MAX_CHECKPOINT_ENTRIES {
+    let maximum = store.limits().max_membership_entries;
+    if staging.expected_entries > maximum
+        || staged_after > staging.expected_entries
+        || staged_after > maximum
+    {
         return Err(capacity(
             format!(
-                "chunk would stage {staged_after} entries against declared {} and maximum {MAX_CHECKPOINT_ENTRIES}",
+                "chunk would stage {staged_after} entries against declared {} and configured maximum {maximum}",
                 staging.expected_entries
             ),
             active_cursor,
         ));
     }
 
+    store.require_write_admission(transaction, active_cursor.clone())?;
     for entry in &chunk.entries {
         if !insert_staged_entry(transaction, &staging, entry)? {
             return Err(invalid(
@@ -605,6 +668,7 @@ fn stage_checkpoint_chunk(
 }
 
 fn commit_checkpoint(
+    store: &Store,
     transaction: &Transaction<'_>,
     source_id: &SourceId,
     epoch_id: &SourceEpochId,
@@ -652,6 +716,17 @@ fn commit_checkpoint(
         ));
     }
 
+    let maximum = store.limits().max_membership_entries;
+    if staging.expected_entries > maximum {
+        return Err(capacity(
+            format!(
+                "checkpoint declares {} entries; configured maximum is {maximum}",
+                staging.expected_entries
+            ),
+            active_cursor,
+        ));
+    }
+
     // Recheck the checkpoint-begin CAS at activation. This prevents a delta
     // accepted while a checkpoint is staging from being silently overwritten.
     let current_cursor = active.as_ref().map(Generation::cursor);
@@ -665,7 +740,15 @@ fn commit_checkpoint(
         ));
     }
 
-    verify_checkpoint_complete(transaction, &staging, active_cursor.clone())?;
+    let staged_entries = verify_checkpoint_complete(transaction, &staging, active_cursor.clone())?;
+    if staged_entries > maximum {
+        return Err(capacity(
+            format!(
+                "checkpoint contains {staged_entries} entries; configured maximum is {maximum}"
+            ),
+            active_cursor,
+        ));
+    }
     let digest = generation_digest(transaction, &staging, active_cursor.clone())?;
     if digest != staging.content_sha256 {
         return Err(invalid(
@@ -677,6 +760,7 @@ fn commit_checkpoint(
         ));
     }
 
+    store.require_write_admission(transaction, active_cursor.clone())?;
     transaction.execute(
         "DELETE FROM source_replica_generation
          WHERE source_id = ?1 AND role = 'active'",
@@ -758,7 +842,7 @@ fn verify_checkpoint_complete(
     transaction: &Transaction<'_>,
     staging: &Generation,
     active_cursor: Option<ReplicaCursor>,
-) -> Result<(), StoreError> {
+) -> Result<u64, StoreError> {
     let (received_chunks, received_entries, minimum_chunk, maximum_chunk) = transaction.query_row(
         "SELECT COUNT(*), COALESCE(SUM(entry_count), 0), MIN(chunk_index), MAX(chunk_index)
          FROM source_replica_checkpoint_chunk
@@ -794,7 +878,7 @@ fn verify_checkpoint_complete(
             active_cursor,
         ));
     }
-    Ok(())
+    Ok(actual_entries)
 }
 
 fn require_epoch(
@@ -896,6 +980,23 @@ fn capacity(message: String, active_cursor: Option<ReplicaCursor>) -> StoreError
         message,
         active_cursor,
     }
+}
+
+fn normalize_write_error(error: StoreError, active_cursor: Option<ReplicaCursor>) -> StoreError {
+    let capacity_error = match &error {
+        StoreError::Database(rusqlite::Error::SqliteFailure(details, _)) => {
+            details.code == rusqlite::ErrorCode::DiskFull
+        }
+        StoreError::Storage(storage) => storage_error_is_capacity(storage),
+        _ => false,
+    };
+    if capacity_error {
+        return capacity(
+            format!("SQLite write capacity is exhausted: {error}"),
+            active_cursor,
+        );
+    }
+    error
 }
 
 fn invalid(message: String, active_cursor: Option<ReplicaCursor>) -> StoreError {

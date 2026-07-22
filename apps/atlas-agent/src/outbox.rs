@@ -1334,7 +1334,7 @@ mod tests {
             Outbox::open(&path, source("core-a")),
             Err(OutboxError::SchemaVersion {
                 found: 0,
-                expected: 4
+                expected: 5
             })
         ));
 
@@ -1347,20 +1347,20 @@ mod tests {
             Outbox::migrate(&path),
             Err(OutboxError::SchemaVersion {
                 found: 2,
-                expected: 4
+                expected: 5
             })
         ));
 
         let connection = Connection::open(&path).expect("open database");
         connection
-            .pragma_update(None, "user_version", 5)
+            .pragma_update(None, "user_version", 6)
             .expect("set future version");
         drop(connection);
         assert!(matches!(
             Outbox::migrate(&path),
             Err(OutboxError::SchemaVersion {
-                found: 5,
-                expected: 4
+                found: 6,
+                expected: 5
             })
         ));
     }

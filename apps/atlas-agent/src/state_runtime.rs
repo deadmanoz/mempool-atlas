@@ -11,7 +11,7 @@ use reqwest::Client as HttpClient;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::{MissedTickBehavior, interval};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::delivery::DeliveryRetryPolicy;
 use crate::rpc::RpcClient;
@@ -99,6 +99,13 @@ async fn delivery_loop(
                 }
                 continue;
             }
+            Err(error) if state_delivery_capacity(&error) => {
+                error!(
+                    %error,
+                    "agent storage capacity guard triggered; shutting down protectively with the last committed SourceReplica intact"
+                );
+                return Err(error.into());
+            }
             Err(error) => return Err(error.into()),
         };
         let wait = match outcome {
@@ -148,6 +155,13 @@ async fn delivery_loop(
                             "source state database is busy; retrying checkpoint recovery"
                         );
                         delay
+                    }
+                    Err(error) if error.is_capacity() => {
+                        error!(
+                            %error,
+                            "agent storage capacity guard triggered during checkpoint recovery; shutting down protectively"
+                        );
+                        return Err(error.into());
                     }
                     Err(error) => return Err(error.into()),
                 }
@@ -212,6 +226,13 @@ async fn rpc_loop(
                             "source state database is busy; initial RPC snapshot retained by the node and will be fetched again"
                         );
                     }
+                    Err(error) if source_replica_capacity(&error) => {
+                        error!(
+                            %error,
+                            "agent storage capacity guard rejected the initial RPC snapshot; shutting down protectively"
+                        );
+                        return Err(error);
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -251,6 +272,13 @@ async fn poll_rpc(
                                     %error,
                                     "source state database is busy; current replica retained and observation will retry on the next poll"
                                 );
+                            }
+                            Err(error) if source_replica_capacity(&error) => {
+                                error!(
+                                    %error,
+                                    "agent storage capacity guard rejected an RPC observation; shutting down protectively with the previous replica intact"
+                                );
+                                return Err(error);
                             }
                             Err(error) => return Err(error),
                         }
@@ -303,11 +331,26 @@ fn state_delivery_contention(error: &StateDeliveryError) -> bool {
     )
 }
 
+fn state_delivery_capacity(error: &StateDeliveryError) -> bool {
+    matches!(
+        error,
+        StateDeliveryError::Store(error) if error.is_capacity()
+    )
+}
+
 fn source_replica_contention(error: &anyhow::Error) -> bool {
     error.chain().any(|source| {
         source
             .downcast_ref::<SourceReplicaStoreError>()
             .is_some_and(SourceReplicaStoreError::is_retryable_contention)
+    })
+}
+
+fn source_replica_capacity(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        source
+            .downcast_ref::<SourceReplicaStoreError>()
+            .is_some_and(SourceReplicaStoreError::is_capacity)
     })
 }
 
@@ -351,7 +394,7 @@ mod tests {
 
     use super::*;
     use crate::schema;
-    use crate::source_replica::SourceReplicaLimits;
+    use crate::source_replica::{SourceReplicaLimits, SourceReplicaStoragePolicy};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_writer_contention_defers_delivery_and_rpc_persistence() {
@@ -433,5 +476,67 @@ mod tests {
         assert!(status.has_observed_snapshot);
         assert_eq!(status.local_revision, 1);
         assert_eq!(status.state_observed_at_ms, Some(1));
+    }
+
+    #[tokio::test]
+    async fn delivery_capacity_guard_exits_with_committed_replica_intact() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let database = temporary.path().join("agent.db");
+        schema::migrate(&database).expect("migrate agent database");
+        let source_id = SourceId::new("capacity-core").expect("source");
+        let replica =
+            SourceReplica::open(&database, source_id.clone(), SourceReplicaLimits::default())
+                .expect("open source replica");
+        replica
+            .observe_rpc_snapshot(&BTreeMap::new(), 1)
+            .expect("persist empty baseline");
+        let before = replica.status().expect("status before capacity pressure");
+        drop(replica);
+
+        let default_policy = SourceReplicaStoragePolicy::default();
+        let pressure_policy = SourceReplicaStoragePolicy {
+            filesystem_reserve_bytes: u64::MAX - default_policy.max_total_sqlite_bytes,
+            ..default_policy
+        };
+        let pressured = SourceReplica::open_with_storage_policy(
+            &database,
+            source_id,
+            SourceReplicaLimits::default(),
+            pressure_policy,
+        )
+        .expect("existing replica remains readable under pressure");
+        let client = HttpClient::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .expect("HTTP client");
+        let retry_policy =
+            DeliveryRetryPolicy::new(Duration::from_millis(10), Duration::from_millis(20))
+                .expect("retry policy");
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let error = timeout(
+            Duration::from_secs(1),
+            delivery_loop(
+                pressured.clone(),
+                client,
+                "http://127.0.0.1:1/api/v1/state".to_owned(),
+                retry_policy,
+                shutdown_rx,
+            ),
+        )
+        .await
+        .expect("capacity guard exits promptly")
+        .expect_err("capacity pressure must terminate delivery protectively");
+
+        assert!(source_replica_capacity(&error));
+        assert_eq!(
+            pressured.status().expect("status after capacity exit"),
+            before
+        );
+        let stats = pressured
+            .storage_stats()
+            .expect("stats after capacity exit");
+        assert_eq!(stats.frozen_checkpoint_rows, 0);
+        assert_eq!(stats.frozen_delta_rows, 0);
     }
 }

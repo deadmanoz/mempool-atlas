@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use atlas_model::{
@@ -17,21 +17,65 @@ use atlas_model::{
     MAX_SAFE_JSON_INTEGER, MAX_STATE_DELTA_MUTATIONS, MempoolEntryFacts, ReplicaCursor,
     SourceEpochId, SourceId, SourceReplicaEntry, StateDelta, StateHeartbeat, StateMutation,
 };
+use atlas_storage::{
+    SqlitePhysicalSnapshot, SqliteStorageError, SqliteStorageLimits, check_write_admission,
+    configure_sqlite_connection, prepare_for_sqlite_write, relieve_wal_pressure,
+    sqlite_physical_snapshot,
+};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use thiserror::Error;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::schema::LATEST_SCHEMA_VERSION;
 
 const DEFAULT_MAX_DIRTY_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MAX_DATABASE_BYTES: u64 = 1024 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_SQLITE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const WAL_JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
-const WAL_AUTOCHECKPOINT_PAGES: i64 = 1_000;
+const DEFAULT_RETAINED_WAL_HIGH_WATER_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_WAL_AUTOCHECKPOINT_PAGES: u32 = 1_000;
 const ABSENT_MUTATION_ESTIMATED_BYTES: u64 = 96;
 const PRESENT_MUTATION_ESTIMATED_BYTES: u64 = 160;
+
+/// Physical storage policy kept separate from SourceReplica's semantic row
+/// and wire limits. The library default deliberately uses a tiny nonzero
+/// filesystem reserve so isolated tests do not require production headroom.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceReplicaStoragePolicy {
+    pub max_total_sqlite_bytes: u64,
+    pub filesystem_reserve_bytes: u64,
+    pub filesystem_reserve_percent: u8,
+    pub retained_wal_high_water_bytes: u64,
+    pub wal_autocheckpoint_pages: u32,
+}
+
+impl Default for SourceReplicaStoragePolicy {
+    fn default() -> Self {
+        Self {
+            max_total_sqlite_bytes: DEFAULT_MAX_TOTAL_SQLITE_BYTES,
+            filesystem_reserve_bytes: 1,
+            filesystem_reserve_percent: 1,
+            retained_wal_high_water_bytes: DEFAULT_RETAINED_WAL_HIGH_WATER_BYTES,
+            wal_autocheckpoint_pages: DEFAULT_WAL_AUTOCHECKPOINT_PAGES,
+        }
+    }
+}
+
+impl SourceReplicaStoragePolicy {
+    fn sqlite_limits(self, max_database_bytes: u64) -> SqliteStorageLimits {
+        SqliteStorageLimits {
+            max_database_bytes,
+            max_total_sqlite_bytes: self.max_total_sqlite_bytes,
+            filesystem_reserve_bytes: self.filesystem_reserve_bytes,
+            filesystem_reserve_percent: self.filesystem_reserve_percent,
+            retained_wal_high_water_bytes: self.retained_wal_high_water_bytes,
+            wal_autocheckpoint_pages: self.wal_autocheckpoint_pages,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceReplicaLimits {
@@ -115,8 +159,10 @@ impl SourceReplicaLimits {
 #[derive(Clone, Debug)]
 pub struct SourceReplica {
     path: Arc<PathBuf>,
+    write_gate: Arc<Mutex<()>>,
     source_id: SourceId,
     limits: SourceReplicaLimits,
+    storage_limits: SqliteStorageLimits,
     database_busy_timeout: Duration,
 }
 
@@ -191,6 +237,18 @@ pub struct SourceReplicaStorageStats {
     pub dirty_estimated_bytes: u64,
     pub frozen_delta_rows: u64,
     pub frozen_checkpoint_rows: u64,
+    pub database_bytes: u64,
+    pub wal_bytes: u64,
+    pub shm_bytes: u64,
+    pub total_sqlite_bytes: u64,
+    pub page_size_bytes: u64,
+    pub page_count: u64,
+    pub max_page_count: u64,
+    pub freelist_count: u64,
+    pub filesystem_total_bytes: u64,
+    pub filesystem_available_bytes: u64,
+    pub computed_filesystem_reserve_bytes: u64,
+    pub remaining_envelope_bytes: u64,
 }
 
 #[derive(Debug, Error)]
@@ -201,6 +259,12 @@ pub enum SourceReplicaStoreError {
     DatabaseContention(rusqlite::Error),
     #[error("agent database reached its configured page capacity: {0}")]
     DatabaseCapacity(rusqlite::Error),
+    #[error("agent storage capacity guard rejected a write: {0}")]
+    StorageCapacity(#[source] SqliteStorageError),
+    #[error("agent storage maintenance is temporarily blocked: {0}")]
+    StorageContention(#[source] SqliteStorageError),
+    #[error("agent storage policy or inspection failed: {0}")]
+    Storage(#[source] SqliteStorageError),
     #[error("source replica model error: {0}")]
     Model(#[from] atlas_model::SourceReplicaError),
     #[error("agent schema is at version {found}, expected {expected}")]
@@ -215,13 +279,6 @@ pub enum SourceReplicaStoreError {
     },
     #[error("RPC snapshot contains {found} entries; configured maximum is {maximum}")]
     SnapshotTooLarge { found: u64, maximum: u64 },
-    #[error(
-        "agent database already uses {current_bytes} bytes of pages; configured maximum is {maximum_bytes} bytes"
-    )]
-    DatabaseBudgetTooSmall {
-        current_bytes: u64,
-        maximum_bytes: u64,
-    },
     #[error("numeric field {field} is too large for SQLite")]
     NumericOverflow { field: &'static str },
     #[error("database contains a negative value for {field}")]
@@ -279,7 +336,45 @@ impl From<rusqlite::Error> for SourceReplicaStoreError {
 impl SourceReplicaStoreError {
     #[must_use]
     pub const fn is_retryable_contention(&self) -> bool {
-        matches!(self, Self::DatabaseContention(_))
+        matches!(
+            self,
+            Self::DatabaseContention(_) | Self::StorageContention(_)
+        )
+    }
+
+    #[must_use]
+    pub const fn is_capacity(&self) -> bool {
+        matches!(self, Self::DatabaseCapacity(_) | Self::StorageCapacity(_))
+    }
+
+    fn from_storage(error: SqliteStorageError) -> Self {
+        match error {
+            SqliteStorageError::Sqlite(error) => error.into(),
+            error @ SqliteStorageError::WalCheckpointBlocked { .. } => {
+                Self::StorageContention(error)
+            }
+            error @ (SqliteStorageError::MainDatabaseLimitExceeded { .. }
+            | SqliteStorageError::TotalSqliteEnvelopeExceeded { .. }
+            | SqliteStorageError::WalPressure { .. }
+            | SqliteStorageError::FilesystemPressure { .. }
+            | SqliteStorageError::ExistingDatabaseExceedsPageBudget { .. }) => {
+                Self::StorageCapacity(error)
+            }
+            error => Self::Storage(error),
+        }
+    }
+
+    fn from_transaction_storage(error: SqliteStorageError) -> Self {
+        match error {
+            // A required preflight has already relieved or rejected a high
+            // WAL before the write transaction begins. Seeing it cross the
+            // threshold in the immediate in-transaction recheck therefore
+            // means another independently opened handle wrote in between.
+            // Roll back and retry outside the transaction so WAL relief can
+            // run, rather than shutting the agent down as if disk were full.
+            error @ SqliteStorageError::WalPressure { .. } => Self::StorageContention(error),
+            error => Self::from_storage(error),
+        }
     }
 }
 
@@ -399,10 +494,26 @@ impl SourceReplica {
         source_id: SourceId,
         limits: SourceReplicaLimits,
     ) -> Result<Self, SourceReplicaStoreError> {
+        Self::open_with_storage_policy(
+            path,
+            source_id,
+            limits,
+            SourceReplicaStoragePolicy::default(),
+        )
+    }
+
+    /// Opens a SourceReplica with an explicit physical storage policy.
+    pub fn open_with_storage_policy(
+        path: impl AsRef<Path>,
+        source_id: SourceId,
+        limits: SourceReplicaLimits,
+        storage_policy: SourceReplicaStoragePolicy,
+    ) -> Result<Self, SourceReplicaStoreError> {
         Self::open_with_database_busy_timeout(
             path,
             source_id,
             limits,
+            storage_policy,
             DEFAULT_DATABASE_BUSY_TIMEOUT,
         )
     }
@@ -411,16 +522,20 @@ impl SourceReplica {
         path: impl AsRef<Path>,
         source_id: SourceId,
         limits: SourceReplicaLimits,
+        storage_policy: SourceReplicaStoragePolicy,
         database_busy_timeout: Duration,
     ) -> Result<Self, SourceReplicaStoreError> {
         let limits = limits.validate()?;
+        let storage_limits = storage_policy.sqlite_limits(limits.max_database_bytes);
+        storage_limits
+            .validate()
+            .map_err(SqliteStorageError::from)
+            .map_err(SourceReplicaStoreError::from_storage)?;
         let path = path.as_ref().to_path_buf();
         let mut connection =
-            open_existing_connection(&path, limits.max_database_bytes, database_busy_timeout)?;
+            open_existing_connection(&path, &storage_limits, database_busy_timeout)?;
         require_latest_schema(&connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        let bound_source = transaction
+        let bound_source = connection
             .query_row(
                 "SELECT source_id FROM agent_database WHERE singleton = 1",
                 [],
@@ -436,33 +551,68 @@ impl SourceReplica {
             });
         }
 
-        let replica_epoch = transaction
+        let replica_epoch = connection
             .query_row(
                 "SELECT epoch_id FROM source_replica_state WHERE singleton = 1",
                 [],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        if bound_source.is_none() {
-            transaction.execute(
-                "INSERT INTO agent_database (singleton, source_id) VALUES (1, ?1)",
-                [source_id.as_str()],
-            )?;
+        if bound_source.is_none() || replica_epoch.is_none() {
+            prepare_for_sqlite_write(&connection, &path, &storage_limits)
+                .map_err(SourceReplicaStoreError::from_storage)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let bound_source = transaction
+                .query_row(
+                    "SELECT source_id FROM agent_database WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(bound) = bound_source.as_deref()
+                && bound != source_id.as_str()
+            {
+                return Err(SourceReplicaStoreError::SourceBinding {
+                    bound: bound.to_owned(),
+                    configured: source_id.to_string(),
+                });
+            }
+            let replica_epoch = transaction
+                .query_row(
+                    "SELECT epoch_id FROM source_replica_state WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if bound_source.is_none() || replica_epoch.is_none() {
+                check_write_admission(&transaction, &path, &storage_limits)
+                    .map_err(SourceReplicaStoreError::from_transaction_storage)?;
+            }
+            if bound_source.is_none() {
+                transaction.execute(
+                    "INSERT INTO agent_database (singleton, source_id) VALUES (1, ?1)",
+                    [source_id.as_str()],
+                )?;
+            }
+            if replica_epoch.is_none() {
+                let epoch_id = SourceEpochId::new(Uuid::new_v4().to_string())?;
+                transaction.execute(
+                    "INSERT INTO source_replica_state (singleton, epoch_id)
+                     VALUES (1, ?1)",
+                    [epoch_id.as_str()],
+                )?;
+            }
+            transaction.commit()?;
+            best_effort_relieve_wal(&connection, &path, &storage_limits);
         }
-        if replica_epoch.is_none() {
-            let epoch_id = SourceEpochId::new(Uuid::new_v4().to_string())?;
-            transaction.execute(
-                "INSERT INTO source_replica_state (singleton, epoch_id)
-                 VALUES (1, ?1)",
-                [epoch_id.as_str()],
-            )?;
-        }
-        transaction.commit()?;
 
         Ok(Self {
             path: Arc::new(path),
+            write_gate: Arc::new(Mutex::new(())),
             source_id,
             limits,
+            storage_limits,
             database_busy_timeout,
         })
     }
@@ -474,7 +624,13 @@ impl SourceReplica {
         limits: SourceReplicaLimits,
         database_busy_timeout: Duration,
     ) -> Result<Self, SourceReplicaStoreError> {
-        Self::open_with_database_busy_timeout(path, source_id, limits, database_busy_timeout)
+        Self::open_with_database_busy_timeout(
+            path,
+            source_id,
+            limits,
+            SourceReplicaStoragePolicy::default(),
+            database_busy_timeout,
+        )
     }
 
     #[must_use]
@@ -485,6 +641,11 @@ impl SourceReplica {
     #[must_use]
     pub const fn limits(&self) -> SourceReplicaLimits {
         self.limits
+    }
+
+    #[must_use]
+    pub const fn storage_limits(&self) -> SqliteStorageLimits {
+        self.storage_limits
     }
 
     pub fn status(&self) -> Result<SourceReplicaStatus, SourceReplicaStoreError> {
@@ -504,6 +665,7 @@ impl SourceReplica {
         snapshot: &BTreeMap<String, MempoolEntryFacts>,
         completed_at_ms: u64,
     ) -> Result<ObserveRpcOutcome, SourceReplicaStoreError> {
+        let _write_guard = self.lock_write_gate();
         let entry_count = u64::try_from(snapshot.len()).map_err(|_| {
             SourceReplicaStoreError::NumericOverflow {
                 field: "snapshot_entries",
@@ -519,7 +681,9 @@ impl SourceReplica {
         StateHeartbeat::new(1, completed_at_ms)?;
 
         let mut connection = self.connect()?;
+        self.prepare_for_growth(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.check_growth_admission(&transaction)?;
         let state = load_state(&transaction)?;
         if !state.status.has_observed_snapshot {
             replace_membership(&transaction, snapshot)?;
@@ -538,6 +702,7 @@ impl SourceReplica {
                 [to_sqlite_integer(completed_at_ms, "completed_at_ms")?],
             )?;
             transaction.commit()?;
+            self.relieve_wal_after_write(&connection);
             return Ok(ObserveRpcOutcome::Baseline {
                 revision: 1,
                 entry_count,
@@ -589,6 +754,7 @@ impl SourceReplica {
                 [to_sqlite_integer(observed_at_ms, "state_observed_at_ms")?],
             )?;
             transaction.commit()?;
+            self.relieve_wal_after_write(&connection);
             return Ok(ObserveRpcOutcome::Unchanged {
                 revision: state.status.local_revision,
             });
@@ -620,6 +786,7 @@ impl SourceReplica {
                 ],
             )?;
             transaction.commit()?;
+            self.relieve_wal_after_write(&connection);
             return Ok(ObserveRpcOutcome::Changed {
                 revision,
                 mutation_count: changes.mutation_count,
@@ -680,6 +847,7 @@ impl SourceReplica {
 
         let checkpoint_required = uncovered_revision || state.status.checkpoint_required;
         transaction.commit()?;
+        self.relieve_wal_after_write(&connection);
         Ok(ObserveRpcOutcome::Changed {
             revision,
             mutation_count: changes.mutation_count,
@@ -691,11 +859,10 @@ impl SourceReplica {
     /// Frozen actions are returned byte-for-byte equivalently across retries
     /// and process restarts.
     pub fn next_action(&self) -> Result<Option<SourceReplicaAction>, SourceReplicaStoreError> {
+        let _write_guard = self.lock_write_gate();
         let mut connection = self.connect()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let state = load_state(&transaction)?;
+        let state = load_state(&connection)?;
         if !state.status.has_observed_snapshot {
-            transaction.commit()?;
             return Ok(None);
         }
         if state.status.local_revision == 0 {
@@ -704,30 +871,51 @@ impl SourceReplica {
             ));
         }
 
-        if let Some(frozen) = load_frozen_action(&transaction)? {
-            let action = load_frozen_wire_action(&transaction, &frozen)?;
-            transaction.commit()?;
+        // Reading or delivering an already frozen action remains available
+        // under storage pressure. It cannot grow local state and may allow the
+        // corresponding acknowledgement to release a checkpoint copy.
+        if let Some(frozen) = load_frozen_action(&connection)? {
+            let action = load_frozen_wire_action(&connection, &frozen)?;
             return Ok(Some(action));
         }
 
-        if state.status.checkpoint_required {
-            let begin = freeze_checkpoint(&transaction, &state, self.limits)?;
-            transaction.commit()?;
-            return Ok(Some(SourceReplicaAction::Checkpoint(begin)));
-        }
-
-        let dirty_rows = row_count(&transaction, "source_replica_dirty")?;
-        if dirty_rows > 0 {
-            if !state.status.has_acknowledged_cursor {
-                return Err(SourceReplicaStoreError::StoredInvariant(
-                    "a delta requires an acknowledged base cursor",
-                ));
+        let dirty_rows = row_count(&connection, "source_replica_dirty")?;
+        if state.status.checkpoint_required || dirty_rows > 0 {
+            self.prepare_for_growth(&connection)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let state = load_state(&transaction)?;
+            if let Some(frozen) = load_frozen_action(&transaction)? {
+                let action = load_frozen_wire_action(&transaction, &frozen)?;
+                transaction.commit()?;
+                return Ok(Some(action));
             }
-            let delta = freeze_delta(&transaction, &state)?;
+            let dirty_rows = row_count(&transaction, "source_replica_dirty")?;
+            if state.status.checkpoint_required || dirty_rows > 0 {
+                self.check_growth_admission(&transaction)?;
+            }
+            if state.status.checkpoint_required {
+                let begin = freeze_checkpoint(&transaction, &state, self.limits)?;
+                transaction.commit()?;
+                self.relieve_wal_after_write(&connection);
+                return Ok(Some(SourceReplicaAction::Checkpoint(begin)));
+            }
+
+            if dirty_rows > 0 {
+                if !state.status.has_acknowledged_cursor {
+                    return Err(SourceReplicaStoreError::StoredInvariant(
+                        "a delta requires an acknowledged base cursor",
+                    ));
+                }
+                let delta = freeze_delta(&transaction, &state)?;
+                transaction.commit()?;
+                self.relieve_wal_after_write(&connection);
+                return Ok(Some(SourceReplicaAction::Delta(delta)));
+            }
             transaction.commit()?;
-            return Ok(Some(SourceReplicaAction::Delta(delta)));
         }
 
+        let state = load_state(&connection)?;
         if !state.status.has_acknowledged_cursor
             || state.status.acknowledged_revision != state.status.local_revision
         {
@@ -747,11 +935,9 @@ impl SourceReplica {
             .acknowledged_state_observed_at_ms
             .is_some_and(|acknowledged| acknowledged >= observed_at_ms)
         {
-            transaction.commit()?;
             return Ok(None);
         }
         let heartbeat = StateHeartbeat::new(state.status.local_revision, observed_at_ms)?;
-        transaction.commit()?;
         Ok(Some(SourceReplicaAction::Heartbeat(heartbeat)))
     }
 
@@ -856,6 +1042,7 @@ impl SourceReplica {
         &self,
         active_cursor: &ReplicaCursor,
     ) -> Result<AcknowledgeOutcome, SourceReplicaStoreError> {
+        let _write_guard = self.lock_write_gate();
         active_cursor.validate()?;
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -940,6 +1127,7 @@ impl SourceReplica {
         }
         clear_frozen_action(&transaction)?;
         transaction.commit()?;
+        self.relieve_wal_after_write(&connection);
         Ok(AcknowledgeOutcome::Applied)
     }
 
@@ -950,6 +1138,7 @@ impl SourceReplica {
         heartbeat: &StateHeartbeat,
         active_cursor: &ReplicaCursor,
     ) -> Result<AcknowledgeOutcome, SourceReplicaStoreError> {
+        let _write_guard = self.lock_write_gate();
         heartbeat.validate()?;
         active_cursor.validate()?;
         let mut connection = self.connect()?;
@@ -998,12 +1187,14 @@ impl SourceReplica {
             )?],
         )?;
         transaction.commit()?;
+        self.relieve_wal_after_write(&connection);
         Ok(AcknowledgeOutcome::Applied)
     }
 
     /// Abandons a completed or rejected frozen attempt and requires the next
     /// fresh action to be a full checkpoint. Current membership is retained.
     pub fn require_checkpoint(&self) -> Result<(), SourceReplicaStoreError> {
+        let _write_guard = self.lock_write_gate();
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         clear_frozen_action(&transaction)?;
@@ -1019,6 +1210,7 @@ impl SourceReplica {
             [],
         )?;
         transaction.commit()?;
+        self.relieve_wal_after_write(&connection);
         Ok(())
     }
 
@@ -1031,6 +1223,7 @@ impl SourceReplica {
         active_cursor: Option<&ReplicaCursor>,
         supersedes_checkpoint_id: Option<&CheckpointId>,
     ) -> Result<(), SourceReplicaStoreError> {
+        let _write_guard = self.lock_write_gate();
         if let Some(cursor) = active_cursor {
             cursor.validate()?;
         }
@@ -1096,27 +1289,66 @@ impl SourceReplica {
             )?;
         }
         transaction.commit()?;
+        self.relieve_wal_after_write(&connection);
         Ok(())
     }
 
     pub fn storage_stats(&self) -> Result<SourceReplicaStorageStats, SourceReplicaStoreError> {
         let connection = self.connect()?;
         let (dirty_rows, dirty_estimated_bytes) = dirty_pressure(&connection)?;
+        let physical =
+            sqlite_physical_snapshot(&connection, self.path.as_ref(), &self.storage_limits)
+                .map_err(SourceReplicaStoreError::from_storage)?;
         Ok(SourceReplicaStorageStats {
             membership_rows: row_count(&connection, "source_replica_membership")?,
             dirty_rows,
             dirty_estimated_bytes,
             frozen_delta_rows: row_count(&connection, "source_replica_frozen_delta")?,
             frozen_checkpoint_rows: row_count(&connection, "source_replica_frozen_checkpoint")?,
+            database_bytes: physical.database_bytes,
+            wal_bytes: physical.wal_bytes,
+            shm_bytes: physical.shm_bytes,
+            total_sqlite_bytes: physical.total_sqlite_bytes,
+            page_size_bytes: physical.page_size_bytes,
+            page_count: physical.page_count,
+            max_page_count: physical.max_page_count,
+            freelist_count: physical.freelist_count,
+            filesystem_total_bytes: physical.filesystem_total_bytes,
+            filesystem_available_bytes: physical.filesystem_available_bytes,
+            computed_filesystem_reserve_bytes: physical.computed_filesystem_reserve_bytes,
+            remaining_envelope_bytes: physical.remaining_envelope_bytes,
         })
     }
 
     fn connect(&self) -> Result<Connection, SourceReplicaStoreError> {
-        open_existing_connection(
-            &self.path,
-            self.limits.max_database_bytes,
-            self.database_busy_timeout,
-        )
+        open_existing_connection(&self.path, &self.storage_limits, self.database_busy_timeout)
+    }
+
+    fn lock_write_gate(&self) -> MutexGuard<'_, ()> {
+        self.write_gate.lock().unwrap_or_else(|poisoned| {
+            warn!("agent write gate was poisoned; recovering after the prior transaction rollback");
+            poisoned.into_inner()
+        })
+    }
+
+    fn prepare_for_growth(
+        &self,
+        connection: &Connection,
+    ) -> Result<SqlitePhysicalSnapshot, SourceReplicaStoreError> {
+        prepare_for_sqlite_write(connection, self.path.as_ref(), &self.storage_limits)
+            .map_err(SourceReplicaStoreError::from_storage)
+    }
+
+    fn check_growth_admission(
+        &self,
+        connection: &Connection,
+    ) -> Result<SqlitePhysicalSnapshot, SourceReplicaStoreError> {
+        check_write_admission(connection, self.path.as_ref(), &self.storage_limits)
+            .map_err(SourceReplicaStoreError::from_transaction_storage)
+    }
+
+    fn relieve_wal_after_write(&self, connection: &Connection) {
+        best_effort_relieve_wal(connection, self.path.as_ref(), &self.storage_limits);
     }
 }
 
@@ -1137,7 +1369,7 @@ fn validate_limit(
 
 fn open_existing_connection(
     path: &Path,
-    max_database_bytes: u64,
+    storage_limits: &SqliteStorageLimits,
     database_busy_timeout: Duration,
 ) -> Result<Connection, SourceReplicaStoreError> {
     let connection = Connection::open_with_flags(
@@ -1147,55 +1379,19 @@ fn open_existing_connection(
     connection.busy_timeout(database_busy_timeout)?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
-    connection.pragma_update(None, "temp_store", "MEMORY")?;
-    connection.pragma_update(None, "journal_size_limit", WAL_JOURNAL_SIZE_LIMIT_BYTES)?;
-    connection.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)?;
-    configure_database_page_limit(&connection, max_database_bytes)?;
+    configure_sqlite_connection(&connection, storage_limits)
+        .map_err(SourceReplicaStoreError::from_storage)?;
     Ok(connection)
 }
 
-fn configure_database_page_limit(
+fn best_effort_relieve_wal(
     connection: &Connection,
-    max_database_bytes: u64,
-) -> Result<(), SourceReplicaStoreError> {
-    let page_size = connection.pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))?;
-    let page_count =
-        connection.pragma_query_value(None, "page_count", |row| row.get::<_, i64>(0))?;
-    let page_size = from_sqlite_integer(page_size, "page_size")?;
-    let page_count = from_sqlite_integer(page_count, "page_count")?;
-    let current_bytes =
-        page_count
-            .checked_mul(page_size)
-            .ok_or(SourceReplicaStoreError::NumericOverflow {
-                field: "database_page_bytes",
-            })?;
-    if current_bytes > max_database_bytes {
-        return Err(SourceReplicaStoreError::DatabaseBudgetTooSmall {
-            current_bytes,
-            maximum_bytes: max_database_bytes,
-        });
+    path: &Path,
+    storage_limits: &SqliteStorageLimits,
+) {
+    if let Err(error) = relieve_wal_pressure(connection, path, storage_limits) {
+        warn!(%error, database = %path.display(), "could not return agent WAL to its retained high-water target");
     }
-    let max_pages = max_database_bytes / page_size;
-    if max_pages == 0 {
-        return Err(SourceReplicaStoreError::DatabaseBudgetTooSmall {
-            current_bytes,
-            maximum_bytes: max_database_bytes,
-        });
-    }
-    connection.pragma_update(
-        None,
-        "max_page_count",
-        to_sqlite_integer(max_pages, "max_page_count")?,
-    )?;
-    let applied =
-        connection.pragma_query_value(None, "max_page_count", |row| row.get::<_, i64>(0))?;
-    let applied = from_sqlite_integer(applied, "max_page_count")?;
-    if applied != max_pages {
-        return Err(SourceReplicaStoreError::StoredInvariant(
-            "SQLite did not apply the configured maximum page count",
-        ));
-    }
-    Ok(())
 }
 
 fn require_latest_schema(connection: &Connection) -> Result<(), SourceReplicaStoreError> {
@@ -2156,6 +2352,8 @@ fn from_sqlite_integer(value: i64, field: &'static str) -> Result<u64, SourceRep
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -2196,6 +2394,13 @@ mod tests {
         test_replica_with_limits(SourceReplicaLimits::default())
     }
 
+    fn pressure_policy() -> SourceReplicaStoragePolicy {
+        SourceReplicaStoragePolicy {
+            filesystem_reserve_bytes: u64::MAX - DEFAULT_MAX_TOTAL_SQLITE_BYTES,
+            ..SourceReplicaStoragePolicy::default()
+        }
+    }
+
     #[test]
     fn sqlite_busy_and_locked_errors_are_retryable_contention() {
         for result_code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
@@ -2205,6 +2410,66 @@ mod tests {
             );
             assert!(SourceReplicaStoreError::from(error).is_retryable_contention());
         }
+
+        let crossed_after_preflight =
+            SourceReplicaStoreError::from_transaction_storage(SqliteStorageError::WalPressure {
+                wal_bytes: 2,
+                retained_wal_high_water_bytes: 1,
+            });
+        assert!(crossed_after_preflight.is_retryable_contention());
+        assert!(!crossed_after_preflight.is_capacity());
+    }
+
+    #[test]
+    fn pinned_wal_checkpoint_is_retryable_contention_not_capacity() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join("agent.db");
+        schema::migrate(&path).expect("migrate");
+        let storage_policy = SourceReplicaStoragePolicy {
+            retained_wal_high_water_bytes: 1,
+            ..SourceReplicaStoragePolicy::default()
+        };
+        let replica = SourceReplica::open_with_storage_policy(
+            &path,
+            source(),
+            SourceReplicaLimits::default(),
+            storage_policy,
+        )
+        .expect("open replica");
+        replica
+            .observe_rpc_snapshot(&snapshot(&[(1, 1)]), 100)
+            .expect("baseline");
+
+        let mut reader = Connection::open(&path).expect("open pinning reader");
+        let reader_transaction = reader.transaction().expect("reader transaction");
+        let _: i64 = reader_transaction
+            .query_row(
+                "SELECT COUNT(*) FROM source_replica_membership",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pin read snapshot");
+
+        replica
+            .observe_rpc_snapshot(&snapshot(&[(1, 2), (2, 2)]), 200)
+            .expect("writer commits while reader pins prior WAL state");
+        let error = replica
+            .next_action()
+            .expect_err("pinned oversized WAL blocks action freezing");
+        assert!(matches!(
+            &error,
+            SourceReplicaStoreError::StorageContention(
+                SqliteStorageError::WalCheckpointBlocked { .. }
+            )
+        ));
+        assert!(error.is_retryable_contention());
+        assert!(!error.is_capacity());
+
+        drop(reader_transaction);
+        assert!(matches!(
+            replica.next_action().expect("retry after reader exits"),
+            Some(SourceReplicaAction::Checkpoint(_))
+        ));
     }
 
     fn next_checkpoint(replica: &SourceReplica) -> CheckpointBegin {
@@ -2305,8 +2570,11 @@ mod tests {
 
         assert!(max_pages * page_size <= budget);
         assert!(budget - max_pages * page_size < page_size);
-        assert_eq!(journal_limit, WAL_JOURNAL_SIZE_LIMIT_BYTES);
-        assert_eq!(autocheckpoint, WAL_AUTOCHECKPOINT_PAGES);
+        assert_eq!(
+            journal_limit,
+            i64::try_from(DEFAULT_RETAINED_WAL_HIGH_WATER_BYTES).expect("WAL target fits i64")
+        );
+        assert_eq!(autocheckpoint, i64::from(DEFAULT_WAL_AUTOCHECKPOINT_PAGES));
     }
 
     #[test]
@@ -2320,11 +2588,229 @@ mod tests {
         };
         assert!(matches!(
             SourceReplica::open(&path, source(), limits),
-            Err(SourceReplicaStoreError::DatabaseBudgetTooSmall {
-                maximum_bytes: 1,
-                ..
-            })
+            Err(SourceReplicaStoreError::Storage(
+                SqliteStorageError::MainDatabaseBudgetBelowPageSize {
+                    max_database_bytes: 1,
+                    ..
+                }
+            ))
         ));
+    }
+
+    #[test]
+    fn reserve_rejection_preserves_state_and_restored_policy_retries() {
+        let (temporary, path, replica) = test_replica();
+        replica
+            .observe_rpc_snapshot(&snapshot(&[(1, 1)]), 100)
+            .expect("baseline");
+        let before = replica.status().expect("status before pressure");
+        let before_membership = replica
+            .storage_stats()
+            .expect("stats before pressure")
+            .membership_rows;
+        let rejecting_policy = pressure_policy();
+        drop(replica);
+
+        let pressured = SourceReplica::open_with_storage_policy(
+            &path,
+            source(),
+            SourceReplicaLimits::default(),
+            rejecting_policy,
+        )
+        .expect("existing replica remains readable under pressure");
+        let error = pressured
+            .observe_rpc_snapshot(&snapshot(&[(1, 2), (2, 2)]), 200)
+            .expect_err("filesystem reserve rejects growth");
+        assert!(error.is_capacity());
+        assert!(matches!(
+            error,
+            SourceReplicaStoreError::StorageCapacity(SqliteStorageError::FilesystemPressure { .. })
+        ));
+        assert_eq!(pressured.status().expect("status after rejection"), before);
+        assert_eq!(
+            pressured
+                .storage_stats()
+                .expect("stats after rejection")
+                .membership_rows,
+            before_membership
+        );
+        drop(pressured);
+
+        let restored = SourceReplica::open(&path, source(), SourceReplicaLimits::default())
+            .expect("reopen after restoring policy");
+        assert!(matches!(
+            restored
+                .observe_rpc_snapshot(&snapshot(&[(1, 2), (2, 2)]), 200)
+                .expect("retry accepted"),
+            ObserveRpcOutcome::Changed { revision: 2, .. }
+        ));
+        assert_eq!(
+            restored
+                .storage_stats()
+                .expect("retried stats")
+                .membership_rows,
+            2
+        );
+        drop(temporary);
+    }
+
+    #[test]
+    fn frozen_checkpoint_can_be_read_and_acknowledged_under_pressure() {
+        let (_temporary, path, replica) = test_replica();
+        replica
+            .observe_rpc_snapshot(&snapshot(&[(1, 1), (2, 2)]), 100)
+            .expect("baseline");
+        let frozen = next_checkpoint(&replica);
+        let rejecting_policy = pressure_policy();
+        drop(replica);
+
+        let pressured = SourceReplica::open_with_storage_policy(
+            &path,
+            source(),
+            SourceReplicaLimits::default(),
+            rejecting_policy,
+        )
+        .expect("reopen frozen replica under pressure");
+        assert_eq!(
+            pressured.next_action().expect("read frozen action"),
+            Some(SourceReplicaAction::Checkpoint(frozen.clone()))
+        );
+        assert_eq!(
+            pressured
+                .checkpoint_chunk(&frozen.checkpoint_id, 0)
+                .expect("read frozen chunk")
+                .entries
+                .len(),
+            2
+        );
+        assert_eq!(
+            pressured
+                .acknowledge(&cursor(&pressured, frozen.target_revision))
+                .expect("acknowledgement releases frozen copy"),
+            AcknowledgeOutcome::Applied
+        );
+        assert_eq!(
+            pressured
+                .storage_stats()
+                .expect("post-ack stats")
+                .frozen_checkpoint_rows,
+            0
+        );
+        assert_eq!(pressured.next_action().expect("idle after ack"), None);
+    }
+
+    #[test]
+    fn max_page_full_rolls_back_atomically_and_reopens_with_integrity() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join("agent.db");
+        schema::migrate(&path).expect("migrate");
+        let connection = Connection::open(&path).expect("inspect migrated database");
+        let page_size = u64::try_from(
+            connection
+                .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))
+                .expect("page size"),
+        )
+        .expect("nonnegative page size");
+        let page_count = u64::try_from(
+            connection
+                .pragma_query_value(None, "page_count", |row| row.get::<_, i64>(0))
+                .expect("page count"),
+        )
+        .expect("nonnegative page count");
+        drop(connection);
+
+        let constrained_limits = SourceReplicaLimits {
+            max_membership_entries: 5_000,
+            max_database_bytes: page_size * (page_count + 4),
+            ..SourceReplicaLimits::default()
+        };
+        let replica = SourceReplica::open(&path, source(), constrained_limits)
+            .expect("open constrained replica");
+        replica
+            .observe_rpc_snapshot(&snapshot(&[(1, 1)]), 100)
+            .expect("small committed baseline");
+        let before = replica.status().expect("status before full");
+        let oversized = (1..=5_000)
+            .map(|number| (txid(number), facts(number)))
+            .collect::<BTreeMap<_, _>>();
+        let error = replica
+            .observe_rpc_snapshot(&oversized, 200)
+            .expect_err("main page cap must stop replacement");
+        assert!(matches!(
+            error,
+            SourceReplicaStoreError::DatabaseCapacity(_)
+        ));
+        assert_eq!(replica.status().expect("status after full"), before);
+        assert_eq!(
+            replica
+                .storage_stats()
+                .expect("stats after full")
+                .membership_rows,
+            1
+        );
+        drop(replica);
+
+        let integrity = Connection::open(&path)
+            .expect("open for integrity check")
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .expect("integrity result");
+        assert_eq!(integrity, "ok");
+
+        let restored_limits = SourceReplicaLimits {
+            max_membership_entries: 5_000,
+            max_database_bytes: 64 * 1024 * 1024,
+            ..SourceReplicaLimits::default()
+        };
+        let restored = SourceReplica::open(&path, source(), restored_limits)
+            .expect("reopen with restored page capacity");
+        assert!(matches!(
+            restored
+                .observe_rpc_snapshot(&oversized, 200)
+                .expect("retry replacement"),
+            ObserveRpcOutcome::Changed { revision: 2, .. }
+        ));
+        assert_eq!(
+            restored
+                .storage_stats()
+                .expect("restored stats")
+                .membership_rows,
+            5_000
+        );
+    }
+
+    #[test]
+    fn storage_stats_expose_sqlite_files_pages_and_filesystem() {
+        let (_temporary, path, replica) = test_replica();
+        replica
+            .observe_rpc_snapshot(&snapshot(&[(1, 1)]), 100)
+            .expect("baseline");
+        let keeper = Connection::open(&path).expect("keep WAL sidecars open");
+        let stats = replica.storage_stats().expect("storage stats");
+
+        assert_eq!(
+            stats.database_bytes,
+            fs::metadata(&path).expect("database metadata").len()
+        );
+        assert_eq!(
+            stats.total_sqlite_bytes,
+            stats.database_bytes + stats.wal_bytes + stats.shm_bytes
+        );
+        assert!(stats.total_sqlite_bytes >= stats.database_bytes);
+        assert!(stats.page_size_bytes > 0);
+        assert!(stats.page_count > 0);
+        assert!(stats.max_page_count >= stats.page_count);
+        assert!(stats.freelist_count <= stats.page_count);
+        assert!(stats.filesystem_total_bytes > 0);
+        assert!(stats.filesystem_available_bytes <= stats.filesystem_total_bytes);
+        assert!(stats.computed_filesystem_reserve_bytes > 0);
+        assert_eq!(
+            stats.remaining_envelope_bytes,
+            replica
+                .storage_limits()
+                .max_total_sqlite_bytes
+                .saturating_sub(stats.total_sqlite_bytes)
+        );
+        drop(keeper);
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub fn experimental_evidence_router_with_clock(store: Store, now_ms: fn() -> u64
 fn build_router(store: Store, now_ms: fn() -> u64, include_evidence_ingest: bool) -> Router {
     let application = Router::new()
         .route("/healthz", get(health))
+        .route("/readyz", get(readiness))
         .route(
             "/api/v1/state",
             post(ingest_state).layer(DefaultBodyLimit::max(MAX_SOURCE_REPLICA_BODY_BYTES)),
@@ -108,6 +109,91 @@ struct HealthResponse {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+#[derive(Debug, Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage: Option<PhysicalStorageResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct PhysicalStorageResponse {
+    database_bytes: u64,
+    wal_bytes: u64,
+    shm_bytes: u64,
+    total_sqlite_bytes: u64,
+    remaining_envelope_bytes: u64,
+    page_size_bytes: u64,
+    page_count: u64,
+    max_page_count: u64,
+    freelist_count: u64,
+    filesystem_total_bytes: u64,
+    filesystem_available_bytes: u64,
+    computed_filesystem_reserve_bytes: u64,
+}
+
+impl From<atlas_storage::SqlitePhysicalSnapshot> for PhysicalStorageResponse {
+    fn from(snapshot: atlas_storage::SqlitePhysicalSnapshot) -> Self {
+        Self {
+            database_bytes: snapshot.database_bytes,
+            wal_bytes: snapshot.wal_bytes,
+            shm_bytes: snapshot.shm_bytes,
+            total_sqlite_bytes: snapshot.total_sqlite_bytes,
+            remaining_envelope_bytes: snapshot.remaining_envelope_bytes,
+            page_size_bytes: snapshot.page_size_bytes,
+            page_count: snapshot.page_count,
+            max_page_count: snapshot.max_page_count,
+            freelist_count: snapshot.freelist_count,
+            filesystem_total_bytes: snapshot.filesystem_total_bytes,
+            filesystem_available_bytes: snapshot.filesystem_available_bytes,
+            computed_filesystem_reserve_bytes: snapshot.computed_filesystem_reserve_bytes,
+        }
+    }
+}
+
+async fn readiness(State(state): State<AppState>) -> Response {
+    let store = Arc::clone(&state.store);
+    match tokio::task::spawn_blocking(move || store.readiness()).await {
+        Ok(Ok(readiness)) => {
+            let ready = readiness.is_ready();
+            let response = ReadinessResponse {
+                status: if ready { "ready" } else { "not_ready" },
+                error: readiness.pressure,
+                storage: Some(readiness.snapshot.into()),
+            };
+            (
+                if ready {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                },
+                Json(response),
+            )
+                .into_response()
+        }
+        Ok(Err(error)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ReadinessResponse {
+                status: "not_ready",
+                error: Some(error.to_string()),
+                storage: None,
+            }),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ReadinessResponse {
+                status: "not_ready",
+                error: Some(error.to_string()),
+                storage: None,
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn ingest_event(

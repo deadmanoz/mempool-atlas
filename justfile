@@ -28,8 +28,8 @@ test-rust:
 test-web:
     npm --prefix web test
 
-test-baseline-scale:
-    cargo test --release -p atlas-server --test baseline_scale -- --ignored --nocapture
+test-baseline-scale filter="":
+    cargo test --release -p atlas-server --test baseline_scale "{{filter}}" -- --ignored --nocapture --test-threads=1
 
 regen-api-fixtures:
     cargo test -p atlas-server --test api_fixture_contract regenerate_api_fixtures -- --ignored
@@ -56,7 +56,7 @@ format:
     npm --prefix web run format
 
 dev:
-    cargo run -p atlas-server -- serve --database "$ATLAS_DATABASE" --bind "$ATLAS_BIND"
+    cargo run -p atlas-server -- serve --database "$ATLAS_DATABASE" --bind "$ATLAS_BIND" --max-sources 4
 
 agent-dev:
     cargo run -p atlas-agent -- run --database "$ATLAS_AGENT_DATABASE"
