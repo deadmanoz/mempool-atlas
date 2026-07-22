@@ -35,10 +35,10 @@ regen-api-fixtures:
     cargo test -p atlas-server --test api_fixture_contract regenerate_api_fixtures -- --ignored
 
 seed-dev source="demo-node" count="20000":
-    cargo run -p atlas-server --features seed-tool --bin atlas-seed -- --server "http://${ATLAS_BIND}" single --source {{source}} --count {{count}} --capture-gap
+    cargo run -p atlas-server --features seed-tool --bin atlas-seed -- --server "http://${ATLAS_BIND}" single --source {{source}} --count {{count}}
 
 seed-forks count="5000":
-    cargo run -p atlas-server --features seed-tool --bin atlas-seed -- --server "http://${ATLAS_BIND}" forks --count {{count}} --capture-gap
+    cargo run -p atlas-server --features seed-tool --bin atlas-seed -- --server "http://${ATLAS_BIND}" forks --count {{count}}
 
 proto-check:
     ./scripts/check-peer-observer-protos.sh

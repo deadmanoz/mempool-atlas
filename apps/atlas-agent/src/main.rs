@@ -1,20 +1,19 @@
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
 use atlas_agent::delivery::DeliveryRetryPolicy;
-use atlas_agent::outbox::{AgentIdentity, Outbox};
-use atlas_agent::runtime::{NatsConfig, P2pPolicy, RpcConfig, RuntimeConfig};
-use atlas_model::{SourceId, SourceSessionId};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use atlas_agent::source_replica::{SourceReplica, SourceReplicaLimits};
+use atlas_agent::state_runtime::{RpcStateConfig, StateRuntimeConfig};
+use atlas_model::SourceId;
+use clap::{Args, Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "atlas-agent")]
-#[command(about = "Node-local Mempool Atlas capture and reconciliation agent")]
+#[command(about = "Node-local Mempool Atlas RPC state replication agent")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -37,21 +36,6 @@ struct RunArgs {
     database: PathBuf,
     #[arg(long, env = "ATLAS_SERVER_URL")]
     atlas_server_url: String,
-    #[arg(long, env = "ATLAS_AGENT_MODE", value_enum, default_value_t = AgentMode::Full)]
-    mode: AgentMode,
-    #[arg(long, env = "ATLAS_NATS_ADDRESS", default_value = "127.0.0.1:4222")]
-    nats_address: String,
-    #[arg(long, env = "ATLAS_NATS_USERNAME")]
-    nats_username: Option<String>,
-    #[arg(long, env = "ATLAS_NATS_PASSWORD")]
-    nats_password: Option<String>,
-    #[arg(
-        long,
-        env = "ATLAS_P2P_POLICY",
-        value_enum,
-        default_value_t = P2pPolicy::Inbound
-    )]
-    p2p_policy: P2pPolicy,
     #[arg(long, env = "ATLAS_RPC_URL", default_value = "http://127.0.0.1:8332")]
     rpc_url: String,
     #[arg(long, env = "ATLAS_RPC_USERNAME")]
@@ -72,25 +56,35 @@ struct RunArgs {
         default_value = "60000"
     )]
     delivery_retry_max_milliseconds: NonZeroU64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum AgentMode {
-    Full,
-    RpcOnly,
+    #[arg(long, env = "ATLAS_MAX_MEMPOOL_ENTRIES", default_value = "1000000")]
+    max_mempool_entries: NonZeroU64,
+    #[arg(long, env = "ATLAS_MAX_DIRTY_MUTATIONS", default_value = "4096")]
+    max_dirty_mutations: NonZeroUsize,
+    #[arg(long, env = "ATLAS_MAX_DIRTY_BYTES", default_value = "1048576")]
+    max_dirty_bytes: NonZeroU64,
+    #[arg(long, env = "ATLAS_CHECKPOINT_CHUNK_ENTRIES", default_value = "512")]
+    checkpoint_chunk_entries: NonZeroUsize,
+    #[arg(long, env = "ATLAS_AGENT_DB_MAX_BYTES", default_value = "1073741824")]
+    agent_db_max_bytes: NonZeroU64,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // corepc-client logs complete raw JSON-RPC results at trace level. A
+    // verbose mempool response is intentionally large, so never let a broad
+    // RUST_LOG=trace turn every state poll into an unbounded log write.
+    let log_filter = EnvFilter::from_default_env().add_directive(
+        "corepc=debug"
+            .parse()
+            .expect("static corepc logging directive"),
+    );
+    tracing_subscriber::fmt().with_env_filter(log_filter).init();
 
     match Cli::parse().command {
         Command::Migrate { database } => {
-            Outbox::migrate(&database)
-                .with_context(|| format!("migrating agent outbox {}", database.display()))?;
-            info!(database = %database.display(), "agent outbox migrated");
+            atlas_agent::schema::migrate(&database)
+                .with_context(|| format!("migrating agent database {}", database.display()))?;
+            info!(database = %database.display(), "agent database migrated");
         }
         Command::Run(args) => run(*args).await?,
     }
@@ -100,37 +94,32 @@ async fn main() -> anyhow::Result<()> {
 async fn run(args: RunArgs) -> anyhow::Result<()> {
     let delivery_retry = delivery_retry_policy(&args)?;
     let source_id = SourceId::new(args.source_id).context("validating source ID")?;
-    let source_session_id =
-        SourceSessionId::new(Uuid::new_v4().to_string()).context("creating source session ID")?;
-    let identity = AgentIdentity::new(source_id.clone(), source_session_id);
-    let outbox = Outbox::open(&args.database, source_id)
-        .with_context(|| format!("opening agent outbox {}", args.database.display()))?;
-    let atlas_ingest_endpoint = http_url("Atlas server", &args.atlas_server_url)?
-        .join("/api/v1/events")
-        .context("building Atlas ingest endpoint")?
+    let limits = SourceReplicaLimits {
+        max_membership_entries: args.max_mempool_entries.get(),
+        max_dirty_mutations: args.max_dirty_mutations.get(),
+        max_dirty_bytes: args.max_dirty_bytes.get(),
+        checkpoint_chunk_entries: args.checkpoint_chunk_entries.get(),
+        max_database_bytes: args.agent_db_max_bytes.get(),
+    }
+    .validate()
+    .context("validating SourceReplica limits")?;
+    let replica = SourceReplica::open(&args.database, source_id, limits)
+        .with_context(|| format!("opening agent database {}", args.database.display()))?;
+    let state_endpoint = http_url("Atlas server", &args.atlas_server_url)?
+        .join("/api/v1/state")
+        .context("building Atlas state endpoint")?
         .to_string();
-    let nats = match args.mode {
-        AgentMode::Full => Some(NatsConfig {
-            address: args.nats_address,
-            username: args.nats_username,
-            password: args.nats_password,
-            p2p_policy: args.p2p_policy,
-        }),
-        AgentMode::RpcOnly => None,
-    };
-    let config = RuntimeConfig {
-        identity,
-        atlas_ingest_endpoint,
+    let config = StateRuntimeConfig {
+        state_endpoint,
         delivery_retry,
-        nats,
-        rpc: RpcConfig {
+        rpc: RpcStateConfig {
             url: http_url("Bitcoin RPC", &args.rpc_url)?.to_string(),
             username: args.rpc_username,
             password: args.rpc_password,
             poll_interval: Duration::from_secs(args.rpc_poll_seconds.get()),
         },
     };
-    atlas_agent::runtime::run(config, outbox).await
+    atlas_agent::state_runtime::run(config, replica).await
 }
 
 fn delivery_retry_policy(args: &RunArgs) -> anyhow::Result<DeliveryRetryPolicy> {
@@ -207,5 +196,26 @@ mod tests {
                 .to_string()
                 .contains("maximum delivery retry interval")
         }));
+    }
+
+    #[test]
+    fn legacy_capture_mode_flags_are_not_accepted() {
+        let result = Cli::try_parse_from([
+            "atlas-agent",
+            "run",
+            "--source-id",
+            "core-a",
+            "--database",
+            "/tmp/atlas-agent-test.db",
+            "--atlas-server-url",
+            "http://127.0.0.1:8080",
+            "--rpc-username",
+            "rpc-user",
+            "--rpc-password",
+            "rpc-password",
+            "--mode",
+            "full",
+        ]);
+        assert!(result.is_err());
     }
 }

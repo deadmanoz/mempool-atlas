@@ -10,6 +10,7 @@ import {
 } from "./summary-parsing";
 import type {
   RejectionAttribution,
+  RejectionAvailability,
   RejectionRecord,
   RejectionReasonCount,
   RejectionTaxonomyBreakdown,
@@ -21,6 +22,17 @@ import type {
 const isString = (value: unknown): value is string => typeof value === "string";
 const isTxid = (value: unknown): value is string =>
   typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
+
+const parseAvailability = (value: unknown): RejectionAvailability => {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== 1 ||
+    (value.status !== "available" && value.status !== "not_collected")
+  ) {
+    throw new TypeError("Invalid rejection availability");
+  }
+  return { status: value.status };
+};
 
 const parseWindow = (value: unknown): RejectionWindow => {
   if (!isRecord(value) || !isNonNegativeInteger(value.count)) {
@@ -167,6 +179,7 @@ export const parseSourceRejections = (value: unknown): SourceRejections => {
   ) {
     throw new TypeError("Invalid source rejections");
   }
+  const availability = parseAvailability(value.availability);
   const window = parseWindow(value.window);
   const byReason = value.by_reason.map((entry, index) =>
     parseReasonCount(entry, index),
@@ -228,6 +241,7 @@ export const parseSourceRejections = (value: unknown): SourceRejections => {
   const rejections: SourceRejections = {
     source_id: value.source_id,
     as_of_ms: value.as_of_ms,
+    availability,
     window,
     by_reason: byReason,
     attribution,
@@ -238,6 +252,20 @@ export const parseSourceRejections = (value: unknown): SourceRejections => {
       throw new TypeError("Invalid rejection next_cursor");
     }
     rejections.next_cursor = value.next_cursor;
+  }
+  if (
+    availability.status === "not_collected" &&
+    (window.count !== 0 ||
+      byReason.length !== 0 ||
+      attribution.classified_count !== 0 ||
+      attribution.unclassified_count !== 0 ||
+      attribution.taxonomies.length !== 0 ||
+      recent.length !== 0 ||
+      rejections.next_cursor !== undefined)
+  ) {
+    throw new TypeError(
+      "Rejection evidence marked not_collected must not contain observations",
+    );
   }
   return rejections;
 };

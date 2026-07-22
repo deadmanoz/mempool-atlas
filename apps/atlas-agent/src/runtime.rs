@@ -6,7 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use async_nats::{Client as NatsClient, ConnectOptions, Event as NatsEvent, Message, Subscriber};
-use atlas_model::{CaptureGapCertainty, Evidence, MempoolEntryFacts, SourceId};
+use atlas_model::{
+    CaptureGapCertainty, Evidence, MAX_CHECKPOINT_ENTRIES, MempoolEntryFacts, SourceId,
+};
 use futures_util::StreamExt;
 use reqwest::Client as HttpClient;
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
@@ -595,6 +597,7 @@ async fn rpc_loop(
                 &config.url,
                 config.username.clone(),
                 config.password.clone(),
+                MAX_CHECKPOINT_ENTRIES,
             )
             .await
             {

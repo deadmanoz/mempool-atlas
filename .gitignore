@@ -13,5 +13,7 @@
 /web/node_modules/
 /web/dist/
 /web/coverage/
+/.playwright-mcp/
+/docs/.vite/
 
 .claude/settings.local.json

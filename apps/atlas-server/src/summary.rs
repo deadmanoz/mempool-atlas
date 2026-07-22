@@ -35,7 +35,7 @@ pub struct ShapeRow {
     pub script_type: ScriptType,
 }
 
-/// One fact-bearing membership row, as read from `current_membership`.
+/// One fact-bearing membership row, as read from the active SourceReplica.
 /// `verdicts` holds `(taxonomy key, verdict key)` pairs from
 /// `transaction_classification`; a taxonomy without a pair has the honest
 /// effective verdict `unknown`.
@@ -150,11 +150,11 @@ fn matches(filter: &SummaryFilter, row: &FactsRow, feerate: f64) -> bool {
     true
 }
 
-/// The region facts a comparison region is aggregated over: the fact-bearing
-/// rows of the region's designated facts source plus the count of region
-/// members still awaiting RPC facts. Unlike [`SourceMembershipFacts`] a region
-/// carries no source health, because a region is a derived membership set, not
-/// a source.
+/// The region facts a comparison region is aggregated over. Active
+/// SourceReplica rows always carry RPC facts, so `awaiting_rpc_count` is a
+/// legacy wire-compatibility counter and remains zero. Unlike
+/// [`SourceMembershipFacts`] a region carries no source health, because a
+/// region is a derived membership set, not a source.
 #[derive(Clone, Debug, Default)]
 pub struct RegionFacts {
     pub available: Vec<FactsRow>,
@@ -209,9 +209,8 @@ pub fn compute_summary(
 
 /// The rich aggregate over one comparison region, shaped like a summary's
 /// matching set. The region is aggregated with an empty filter and no detail
-/// blocks, so `present` is the histogram-bearing total (every fact-bearing
-/// member) and awaiting-RPC members are counted separately, never folded into
-/// a histogram, following the same honesty rule the summary applies.
+/// blocks, so `present` is the histogram-bearing total. The legacy
+/// `awaiting_rpc` field remains zero for complete SourceReplica state.
 #[must_use]
 pub fn region_aggregate(
     facts: &RegionFacts,
@@ -239,10 +238,9 @@ pub fn region_aggregate(
     }
 }
 
-/// The lightweight aggregate over one comparison region: fact-bearing count and
-/// summed virtual size plus the awaiting-RPC count, with no histograms. Used
-/// for the reverse difference region. Awaiting-RPC members carry no vsize, so
-/// they are counted only.
+/// The lightweight aggregate over one comparison region: fact-bearing count
+/// and summed virtual size, with no histograms. The legacy `awaiting_rpc`
+/// counter remains zero for active SourceReplica rows.
 #[must_use]
 pub fn anomaly_region(facts: &RegionFacts) -> AnomalyRegion {
     let mut present = AggregateBin::default();
@@ -433,7 +431,10 @@ fn fee_rate_ecdf(
 
 #[cfg(test)]
 mod tests {
-    use atlas_model::{CaptureStatus, Classification, TaxonomyFilter, VerdictDescriptor};
+    use atlas_model::{
+        CaptureStatus, Classification, ReplicaCursor, SourceEpochId, TaxonomyFilter,
+        VerdictDescriptor,
+    };
 
     use super::*;
 
@@ -443,8 +444,10 @@ mod tests {
 
     fn health() -> SourceHealth {
         SourceHealth {
-            last_seen_at_ms: 1_000,
-            capture: CaptureStatus::NoReportedGaps,
+            state_cursor: ReplicaCursor::new(SourceEpochId::new("epoch-a").expect("epoch"), 1)
+                .expect("cursor"),
+            state_observed_at_ms: 1_000,
+            capture: CaptureStatus::NotCollected,
         }
     }
 

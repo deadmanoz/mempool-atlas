@@ -9,8 +9,6 @@ import type { MempoolEntry } from "./types";
 
 const memberships = Array.from({ length: 205 }, (_, index): MempoolEntry => ({
   txid: `${index.toString(16).padStart(4, "0")}transaction`,
-  updated_at_ms: 1_700_000_000_000,
-  evidence_event_id: `event-${index}`,
   facts: { status: "awaiting_rpc" },
 }));
 

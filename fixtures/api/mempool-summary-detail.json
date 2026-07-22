@@ -397,49 +397,49 @@
           4450,
           4450,
           4450,
-          4450,
-          4450,
-          4450,
-          4450,
-          4450,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          4591,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5091,
-          5232,
-          5232
+          4810,
+          4810,
+          4810,
+          4810,
+          4810,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          4951,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5451,
+          5592,
+          5592
         ],
         "key": "unknown"
       }
@@ -449,15 +449,13 @@
   "filter_echo": {},
   "health": {
     "capture": {
-      "first_gap_at_ms": 1752706860000,
-      "latest_gap_at_ms": 1752706860000,
-      "latest_input": "peer_observer_nats",
-      "latest_reason": "disconnected",
-      "marker_count": 1,
-      "status": "contains_gaps",
-      "strongest_certainty": "possible_loss"
+      "status": "not_collected"
     },
-    "last_seen_at_ms": 1752707580005
+    "state_cursor": {
+      "epoch_id": "fixture-epoch-source-a",
+      "revision": 1
+    },
+    "state_observed_at_ms": 1752710399000
   },
   "histograms": {
     "age": {
@@ -467,8 +465,8 @@
           "vsize": 141
         },
         {
-          "count": 2,
-          "vsize": 459
+          "count": 4,
+          "vsize": 819
         },
         {
           "count": 2,
@@ -508,8 +506,8 @@
           "vsize": 0
         },
         {
-          "count": 0,
-          "vsize": 0
+          "count": 2,
+          "vsize": 360
         },
         {
           "count": 2,
@@ -563,8 +561,8 @@
       ],
       "status": "available",
       "underived": {
-        "count": 6,
-        "vsize": 5232
+        "count": 8,
+        "vsize": 5592
       }
     },
     "outputs": {
@@ -592,8 +590,8 @@
       ],
       "status": "available",
       "underived": {
-        "count": 6,
-        "vsize": 5232
+        "count": 8,
+        "vsize": 5592
       }
     },
     "script": {
@@ -629,8 +627,8 @@
       ],
       "status": "available",
       "underived": {
-        "count": 6,
-        "vsize": 5232
+        "count": 8,
+        "vsize": 5592
       }
     },
     "taxonomies": [
@@ -661,8 +659,8 @@
             "vsize": 0
           },
           {
-            "count": 6,
-            "vsize": 5232
+            "count": 8,
+            "vsize": 5592
           }
         ],
         "key": "behavior",
@@ -707,8 +705,8 @@
             "vsize": 0
           },
           {
-            "count": 6,
-            "vsize": 5232
+            "count": 8,
+            "vsize": 5592
           }
         ],
         "key": "bip110",
@@ -753,8 +751,8 @@
             "vsize": 209
           },
           {
-            "count": 6,
-            "vsize": 5232
+            "count": 8,
+            "vsize": 5592
           }
         ],
         "key": "data_protocol",
@@ -794,8 +792,8 @@
       ],
       "status": "available",
       "underived": {
-        "count": 6,
-        "vsize": 5232
+        "count": 8,
+        "vsize": 5592
       }
     }
   },
@@ -856,7 +854,7 @@
         0,
         0,
         0,
-        0,
+        360,
         0,
         0,
         209,
@@ -1184,15 +1182,15 @@
   "source_id": "source-a",
   "totals": {
     "all": {
-      "count": 8,
-      "vsize": 5575
+      "count": 10,
+      "vsize": 5935
     },
     "awaiting_rpc": {
-      "count": 2
+      "count": 0
     },
     "matching": {
-      "count": 8,
-      "vsize": 5575
+      "count": 10,
+      "vsize": 5935
     }
   }
 }

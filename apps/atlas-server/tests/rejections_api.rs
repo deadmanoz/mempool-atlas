@@ -4,10 +4,9 @@
 //! honesty invariant that a rejection is never conflated with a removal.
 
 use atlas_model::{
-    Evidence, MempoolEntryFacts, NormalizedEvent, ReconciledMembership, SourceId, SourceRejections,
-    SourceSessionId,
+    Evidence, NormalizedEvent, RejectionAvailability, SourceId, SourceRejections, SourceSessionId,
 };
-use atlas_server::{Store, router_with_clock};
+use atlas_server::{Store, experimental_evidence_router_with_clock, router_with_clock};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -18,6 +17,10 @@ use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, WPubkeyHash, Witness,
 };
 use tower::ServiceExt;
+
+mod support;
+
+use support::install_checkpoint;
 
 const AS_OF_MS: u64 = 1_752_710_400_000;
 
@@ -92,20 +95,22 @@ fn p2p_evidence(transaction: &Transaction) -> Evidence {
     }
 }
 
-fn present(txid: String) -> Evidence {
-    Evidence::MempoolReconciled {
-        txid,
-        membership: ReconciledMembership::Present {
-            facts: MempoolEntryFacts {
-                vsize: 200,
-                fee_sats: 1_700,
-                entered_at_ms: AS_OF_MS - 300_000,
-            },
-        },
-    }
+fn application(events: &[NormalizedEvent], establish_source: bool) -> (tempfile::TempDir, Router) {
+    application_with_mode(events, establish_source, true)
 }
 
-fn application(events: &[NormalizedEvent]) -> (tempfile::TempDir, Router) {
+fn production_application(
+    events: &[NormalizedEvent],
+    establish_source: bool,
+) -> (tempfile::TempDir, Router) {
+    application_with_mode(events, establish_source, false)
+}
+
+fn application_with_mode(
+    events: &[NormalizedEvent],
+    establish_source: bool,
+    experimental_evidence: bool,
+) -> (tempfile::TempDir, Router) {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let database = temporary.path().join("atlas.db");
     Store::migrate(&database).expect("migrate");
@@ -113,7 +118,15 @@ fn application(events: &[NormalizedEvent]) -> (tempfile::TempDir, Router) {
     for event in events {
         store.ingest(event).expect("ingest");
     }
-    (temporary, router_with_clock(store, || AS_OF_MS))
+    if establish_source {
+        install_checkpoint(&store, "source-a", AS_OF_MS - 1_000, vec![]);
+    }
+    let application = if experimental_evidence {
+        experimental_evidence_router_with_clock(store, || AS_OF_MS)
+    } else {
+        router_with_clock(store, || AS_OF_MS)
+    };
+    (temporary, application)
 }
 
 async fn get(application: Router, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -134,13 +147,13 @@ fn rejections_of(body: serde_json::Value) -> SourceRejections {
 
 #[tokio::test]
 async fn known_source_without_rejections_has_an_empty_window() {
-    // A membership event makes the source known but records no rejection.
-    let (_temporary, application) = application(&[event_at(1, 1_000, present(txid(1)))]);
+    let (_temporary, application) = application(&[], true);
 
     let (status, body) = get(application, "/api/v1/sources/source-a/rejections").await;
     assert_eq!(status, StatusCode::OK);
     let rejections = rejections_of(body);
     assert_eq!(rejections.as_of_ms, AS_OF_MS);
+    assert_eq!(rejections.availability, RejectionAvailability::Available);
     assert_eq!(rejections.window.count, 0);
     assert_eq!(rejections.window.oldest_at_ms, None);
     assert_eq!(rejections.window.newest_at_ms, None);
@@ -152,8 +165,31 @@ async fn known_source_without_rejections_has_an_empty_window() {
 }
 
 #[tokio::test]
+async fn production_state_reports_rejection_evidence_as_not_collected() {
+    let (_temporary, application) = production_application(
+        &[reject_at(
+            1,
+            100,
+            txid(1),
+            "legacy evidence must stay hidden",
+        )],
+        true,
+    );
+
+    let (status, body) = get(application, "/api/v1/sources/source-a/rejections").await;
+    assert_eq!(status, StatusCode::OK);
+    let rejections = rejections_of(body);
+    assert_eq!(rejections.availability, RejectionAvailability::NotCollected);
+    assert_eq!(rejections.window.count, 0);
+    assert!(rejections.by_reason.is_empty());
+    assert!(rejections.attribution.taxonomies.is_empty());
+    assert!(rejections.recent.is_empty());
+    assert_eq!(rejections.next_cursor, None);
+}
+
+#[tokio::test]
 async fn rejections_for_unknown_source_are_not_found() {
-    let (_temporary, application) = application(&[]);
+    let (_temporary, application) = application(&[], false);
     let (status, body) = get(application, "/api/v1/sources/absent-node/rejections").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(
@@ -166,19 +202,23 @@ async fn rejections_for_unknown_source_are_not_found() {
 async fn attribution_partitions_classified_and_unclassified_refusals() {
     let data = data_transaction();
     let data_txid = data.compute_txid().to_string();
-    let (_temporary, application) = application(&[
-        // The classified refusal is seen over P2P first, so its bytes derive
-        // shape and verdicts even though it never enters membership.
-        event_at(1, 50, p2p_evidence(&data)),
-        reject_at(2, 200, data_txid.clone(), "min relay fee not met"),
-        // The unclassified refusal is refused before any bytes are seen.
-        reject_at(3, 100, txid(9), "insufficient fee"),
-    ]);
+    let (_temporary, application) = application(
+        &[
+            // The classified refusal is seen over P2P first, so its bytes derive
+            // shape and verdicts even though it never enters membership.
+            event_at(1, 50, p2p_evidence(&data)),
+            reject_at(2, 200, data_txid.clone(), "min relay fee not met"),
+            // The unclassified refusal is refused before any bytes are seen.
+            reject_at(3, 100, txid(9), "insufficient fee"),
+        ],
+        true,
+    );
 
     let (status, body) = get(application, "/api/v1/sources/source-a/rejections").await;
     assert_eq!(status, StatusCode::OK);
     let rejections = rejections_of(body);
 
+    assert_eq!(rejections.availability, RejectionAvailability::Available);
     assert_eq!(rejections.window.count, 2);
     assert_eq!(rejections.attribution.classified_count, 1);
     assert_eq!(rejections.attribution.unclassified_count, 1);
@@ -226,7 +266,7 @@ async fn by_reason_distinguishes_literal_other_from_the_overflow_rollup() {
     for index in 0..14 {
         push(&format!("reason-{index:02}"), 1, &mut events);
     }
-    let (_temporary, application) = application(&events);
+    let (_temporary, application) = application(&events, true);
 
     let (status, body) = get(application, "/api/v1/sources/source-a/rejections").await;
     assert_eq!(status, StatusCode::OK);
@@ -250,13 +290,16 @@ async fn by_reason_distinguishes_literal_other_from_the_overflow_rollup() {
 #[tokio::test]
 async fn pagination_walks_the_cursor_to_exhaustion() {
     // Times 100 and 200 are shared, so the event_id tiebreak is exercised.
-    let (_temporary, application) = application(&[
-        reject_at(1, 100, txid(1), "dust"),
-        reject_at(2, 100, txid(2), "dust"),
-        reject_at(3, 200, txid(3), "dust"),
-        reject_at(4, 200, txid(4), "dust"),
-        reject_at(5, 300, txid(5), "dust"),
-    ]);
+    let (_temporary, application) = application(
+        &[
+            reject_at(1, 100, txid(1), "dust"),
+            reject_at(2, 100, txid(2), "dust"),
+            reject_at(3, 200, txid(3), "dust"),
+            reject_at(4, 200, txid(4), "dust"),
+            reject_at(5, 300, txid(5), "dust"),
+        ],
+        true,
+    );
 
     // Newest first: (300,5), (200,4), (200,3), (100,2), (100,1).
     let (status, body) = get(
@@ -287,18 +330,21 @@ async fn pagination_walks_the_cursor_to_exhaustion() {
 
 #[tokio::test]
 async fn removals_are_never_counted_as_rejections() {
-    let (_temporary, application) = application(&[
-        reject_at(1, 100, txid(1), "insufficient fee"),
-        // A removal for a different transaction must not enter the surface.
-        event_at(
-            2,
-            200,
-            Evidence::MempoolRemoved {
-                txid: txid(2),
-                reason: Some("expired".to_owned()),
-            },
-        ),
-    ]);
+    let (_temporary, application) = application(
+        &[
+            reject_at(1, 100, txid(1), "insufficient fee"),
+            // A removal for a different transaction must not enter the surface.
+            event_at(
+                2,
+                200,
+                Evidence::MempoolRemoved {
+                    txid: txid(2),
+                    reason: Some("expired".to_owned()),
+                },
+            ),
+        ],
+        true,
+    );
 
     let (status, body) = get(application, "/api/v1/sources/source-a/rejections").await;
     assert_eq!(status, StatusCode::OK);
@@ -318,7 +364,7 @@ async fn malformed_cursor_is_a_bad_request() {
         "100:source-a/session-a/1:extra",
     ] {
         let (_temporary, application) =
-            application(&[reject_at(1, 100, txid(1), "insufficient fee")]);
+            application(&[reject_at(1, 100, txid(1), "insufficient fee")], true);
         let (status, body) = get(
             application,
             &format!("/api/v1/sources/source-a/rejections?before={cursor}"),
@@ -334,7 +380,8 @@ async fn malformed_cursor_is_a_bad_request() {
 
 #[tokio::test]
 async fn cursor_for_another_source_is_a_bad_request() {
-    let (_temporary, application) = application(&[reject_at(1, 100, txid(1), "insufficient fee")]);
+    let (_temporary, application) =
+        application(&[reject_at(1, 100, txid(1), "insufficient fee")], true);
     let (status, body) = get(
         application,
         "/api/v1/sources/source-a/rejections?before=100:source-b/session-b/1",
@@ -359,7 +406,7 @@ async fn invalid_limit_and_unknown_parameters_are_bad_requests() {
     ];
     for uri in cases {
         let (_temporary, application) =
-            application(&[reject_at(1, 100, txid(1), "insufficient fee")]);
+            application(&[reject_at(1, 100, txid(1), "insufficient fee")], true);
         let (status, body) = get(application, uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
         assert!(
@@ -372,7 +419,8 @@ async fn invalid_limit_and_unknown_parameters_are_bad_requests() {
 #[tokio::test]
 async fn limit_is_clamped_to_the_maximum_page_size() {
     // A page size above the maximum is clamped, not rejected.
-    let (_temporary, application) = application(&[reject_at(1, 100, txid(1), "insufficient fee")]);
+    let (_temporary, application) =
+        application(&[reject_at(1, 100, txid(1), "insufficient fee")], true);
     let (status, _body) = get(
         application,
         "/api/v1/sources/source-a/rejections?limit=100000",

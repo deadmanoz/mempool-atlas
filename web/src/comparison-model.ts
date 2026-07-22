@@ -4,15 +4,15 @@
 // DOM access, so all of this is unit-testable.
 //
 // Every headline states the region's fact-bearing count and virtual size, which
-// are internally consistent (those N transactions total V vB). Transactions
-// still awaiting RPC facts have no virtual size, so they are never folded into
-// the headline; `awaitingCount` rides alongside for a separate pill, exactly as
-// the single-source workbench surfaces its awaiting-RPC total.
+// are internally consistent (those N transactions total V vB). The
+// `awaitingCount` compatibility field remains visible to the renderer, although
+// complete SourceReplica state always supplies zero.
 
 import type {
   AnomalyRegion,
   ComparisonStage,
   RegionAggregate,
+  RejectionAvailability,
   RejectionTaxonomyBreakdown,
   RejectionReasonCount,
   TaxonomyDescriptor,
@@ -29,18 +29,28 @@ import {
  * the workbench's unknown-verdict colour. */
 const FALLBACK_VERDICT_COLOR = "#6b7a8d";
 
+/** Returns a panel message only when rejection evidence is unavailable. An
+ * available zero-count window is rendered separately as an observed empty
+ * window. */
+export const rejectionAvailabilityMessage = (
+  availability: RejectionAvailability,
+): string | null =>
+  availability.status === "not_collected"
+    ? "Rejection evidence is not collected in state-only mode."
+    : null;
+
 export const rejectionReasonLabel = (
   reason: Pick<RejectionReasonCount, "reason" | "is_rollup">,
 ): string => (reason.is_rollup ? "Other reasons" : reason.reason);
 
 export interface RegionMagnitude {
-  /** Full membership of the region: fact-bearing plus awaiting-RPC. */
+  /** Full membership, including any legacy factless count. */
   totalCount: number;
   /** Fact-bearing members, which carry the virtual size. */
   presentCount: number;
   /** Summed virtual size of the fact-bearing members, in vB. */
   vsize: number;
-  /** Members still awaiting RPC facts; counted, never given a vsize. */
+  /** Legacy compatibility count; zero for complete SourceReplica state. */
   awaitingCount: number;
 }
 

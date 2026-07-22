@@ -19,8 +19,9 @@
 use std::collections::HashMap;
 
 use atlas_model::{
-    RejectionAttribution, RejectionReasonCount, RejectionRecord, RejectionTaxonomyBreakdown,
-    RejectionVerdictCount, RejectionWindow, SourceId, SourceRejections, TaxonomyDescriptor,
+    RejectionAttribution, RejectionAvailability, RejectionReasonCount, RejectionRecord,
+    RejectionTaxonomyBreakdown, RejectionVerdictCount, RejectionWindow, SourceId, SourceRejections,
+    TaxonomyDescriptor,
 };
 use thiserror::Error;
 
@@ -160,11 +161,36 @@ pub fn compute_rejections(
     SourceRejections {
         source_id,
         as_of_ms,
+        availability: RejectionAvailability::Available,
         window,
         by_reason: summarize_reasons(&inputs.window),
         attribution: attribute(&inputs.window, taxonomies),
         recent: inputs.recent.iter().map(rejection_record).collect(),
         next_cursor: inputs.next_cursor.as_ref().map(RejectionCursor::encode),
+    }
+}
+
+/// Constructs the honest production response while rejection evidence is not
+/// collected. The empty collections are placeholders, not an observed zero.
+#[must_use]
+pub fn rejections_not_collected(source_id: SourceId, as_of_ms: u64) -> SourceRejections {
+    SourceRejections {
+        source_id,
+        as_of_ms,
+        availability: RejectionAvailability::NotCollected,
+        window: RejectionWindow {
+            count: 0,
+            oldest_at_ms: None,
+            newest_at_ms: None,
+        },
+        by_reason: Vec::new(),
+        attribution: RejectionAttribution {
+            classified_count: 0,
+            unclassified_count: 0,
+            taxonomies: Vec::new(),
+        },
+        recent: Vec::new(),
+        next_cursor: None,
     }
 }
 
@@ -376,6 +402,7 @@ mod tests {
             AS_OF_MS,
             &[behavior_taxonomy()],
         );
+        assert_eq!(rejections.availability, RejectionAvailability::Available);
         assert_eq!(
             rejections.window,
             RejectionWindow {
@@ -397,6 +424,15 @@ mod tests {
         );
         assert!(rejections.recent.is_empty());
         assert!(rejections.next_cursor.is_none());
+    }
+
+    #[test]
+    fn not_collected_is_distinct_from_an_available_empty_window() {
+        let rejections = rejections_not_collected(source(), AS_OF_MS);
+        assert_eq!(rejections.availability, RejectionAvailability::NotCollected);
+        assert_eq!(rejections.window.count, 0);
+        assert!(rejections.attribution.taxonomies.is_empty());
+        assert!(rejections.recent.is_empty());
     }
 
     #[test]

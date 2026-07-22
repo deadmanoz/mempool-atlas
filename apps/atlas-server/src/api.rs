@@ -3,10 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use atlas_classifiers::registered_packs;
 use atlas_model::{
-    IngestBatchRequest, IngestBatchResponse, IngestResponse, MAX_INGEST_BATCH_BODY_BYTES,
-    MempoolSnapshot, MempoolSummary, ModelError, NormalizedEvent, ScriptType, SourceComparison,
-    SourceId, SourceRejections, SourcesResponse, SummaryDetail, SummaryFilter, TaxonomyDescriptor,
-    TaxonomyFilter,
+    CheckpointId, IngestBatchRequest, IngestBatchResponse, IngestResponse,
+    MAX_INGEST_BATCH_BODY_BYTES, MAX_SOURCE_REPLICA_BODY_BYTES, MempoolSnapshot, MempoolSummary,
+    ModelError, NormalizedEvent, RejectionAvailability, ReplicaCursor, ScriptType,
+    SourceComparison, SourceId, SourceRejections, SourceReplicaRequest, SourceReplicaResponse,
+    SourcesResponse, SummaryDetail, SummaryFilter, TaxonomyDescriptor, TaxonomyFilter,
 };
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::StatusCode;
@@ -18,6 +19,7 @@ use serde::Serialize;
 use crate::comparison::{ComparisonOutcome, compute_comparison};
 use crate::rejections::{
     REJECTION_PAGE_DEFAULT, REJECTION_PAGE_MAX, RejectionCursor, compute_rejections,
+    rejections_not_collected,
 };
 use crate::store::{Store, StoreError};
 use crate::summary::compute_summary;
@@ -26,18 +28,30 @@ pub fn router(store: Store) -> Router {
     router_with_clock(store, system_now_ms)
 }
 
-/// Builds the router with an explicit clock so tests and fixture generation
-/// can produce deterministic `as_of_ms` values.
+/// Builds the production router with an explicit clock so tests and fixture
+/// generation can produce deterministic `as_of_ms` values. The production
+/// surface deliberately excludes legacy event-ledger ingest.
 pub fn router_with_clock(store: Store, now_ms: fn() -> u64) -> Router {
-    Router::new()
+    build_router(store, now_ms, false)
+}
+
+/// Builds the legacy evidence-ingest surface for bounded experiments and
+/// contract tests. The server binary never mounts this router.
+pub fn experimental_evidence_router(store: Store) -> Router {
+    experimental_evidence_router_with_clock(store, system_now_ms)
+}
+
+/// Builds the experimental evidence router with a deterministic clock.
+pub fn experimental_evidence_router_with_clock(store: Store, now_ms: fn() -> u64) -> Router {
+    build_router(store, now_ms, true)
+}
+
+fn build_router(store: Store, now_ms: fn() -> u64, include_evidence_ingest: bool) -> Router {
+    let application = Router::new()
         .route("/healthz", get(health))
         .route(
-            "/api/v1/events",
-            post(ingest_event).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
-        )
-        .route(
-            "/api/v1/events/batch",
-            post(ingest_batch).layer(DefaultBodyLimit::max(MAX_INGEST_BATCH_BODY_BYTES)),
+            "/api/v1/state",
+            post(ingest_state).layer(DefaultBodyLimit::max(MAX_SOURCE_REPLICA_BODY_BYTES)),
         )
         .route("/api/v1/sources", get(sources))
         .route("/api/v1/sources/compare", get(compare))
@@ -46,11 +60,31 @@ pub fn router_with_clock(store: Store, now_ms: fn() -> u64) -> Router {
             "/api/v1/sources/{source_id}/mempool/summary",
             get(mempool_summary),
         )
-        .route("/api/v1/sources/{source_id}/rejections", get(rejections))
-        .with_state(AppState {
-            store: Arc::new(store),
-            now_ms,
-        })
+        .route("/api/v1/sources/{source_id}/rejections", get(rejections));
+
+    let application = if include_evidence_ingest {
+        application
+            .route(
+                "/api/v1/events",
+                post(ingest_event).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+            )
+            .route(
+                "/api/v1/events/batch",
+                post(ingest_batch).layer(DefaultBodyLimit::max(MAX_INGEST_BATCH_BODY_BYTES)),
+            )
+    } else {
+        application
+    };
+
+    application.with_state(AppState {
+        store: Arc::new(store),
+        now_ms,
+        rejection_availability: if include_evidence_ingest {
+            RejectionAvailability::Available
+        } else {
+            RejectionAvailability::NotCollected
+        },
+    })
 }
 
 fn system_now_ms() -> u64 {
@@ -64,6 +98,7 @@ fn system_now_ms() -> u64 {
 struct AppState {
     store: Arc<Store>,
     now_ms: fn() -> u64,
+    rejection_availability: RejectionAvailability,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +148,23 @@ async fn ingest_batch(
         StatusCode::ACCEPTED,
         Json(IngestBatchResponse { acknowledgements }),
     ))
+}
+
+async fn ingest_state(
+    State(state): State<AppState>,
+    Json(request): Json<SourceReplicaRequest>,
+) -> Result<(StatusCode, Json<SourceReplicaResponse>), ApiError> {
+    request.validate().map_err(|error| match error {
+        atlas_model::SourceReplicaError::LimitExceeded { .. } => {
+            ApiError::StateCapacity(error.to_string())
+        }
+        _ => ApiError::InvalidStateRequest(error.to_string()),
+    })?;
+    let store = Arc::clone(&state.store);
+    let response = tokio::task::spawn_blocking(move || store.apply_source_replica(&request))
+        .await
+        .map_err(ApiError::Task)??;
+    Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
 async fn mempool(
@@ -455,9 +507,15 @@ async fn rejections(
         .map(|pack| pack.taxonomy())
         .collect();
     let store = Arc::clone(&state.store);
+    let availability = state.rejection_availability;
     let requested_source = source_id.clone();
     let as_of_ms = (state.now_ms)();
     let rejections = tokio::task::spawn_blocking(move || -> Result<_, StoreError> {
+        if availability == RejectionAvailability::NotCollected {
+            return Ok(store
+                .active_source_exists(&source_id)?
+                .then(|| rejections_not_collected(source_id, as_of_ms)));
+        }
         let Some(inputs) = store.rejections(&source_id, limit, before)? else {
             return Ok(None);
         };
@@ -477,6 +535,8 @@ async fn rejections(
 #[derive(Debug)]
 enum ApiError {
     Model(atlas_model::ModelError),
+    InvalidStateRequest(String),
+    StateCapacity(String),
     InvalidQuery(String),
     InvalidCursor(String),
     SourceNotFound(SourceId),
@@ -499,26 +559,116 @@ impl From<StoreError> for ApiError {
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_cursor: Option<Option<ReplicaCursor>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staging_checkpoint_id: Option<CheckpointId>,
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            Self::Model(error) => (StatusCode::BAD_REQUEST, error.to_string()),
+        let (status, message, code, active_cursor, staging_checkpoint_id) = match self {
+            Self::Model(error) => (StatusCode::BAD_REQUEST, error.to_string(), None, None, None),
+            Self::InvalidStateRequest(message) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                message,
+                Some("invalid_state_request"),
+                Some(None),
+                None,
+            ),
+            Self::StateCapacity(message) => (
+                StatusCode::CONFLICT,
+                message,
+                Some("capacity_exceeded"),
+                Some(None),
+                None,
+            ),
             Self::InvalidQuery(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("invalid query string: {message}"),
+                None,
+                None,
+                None,
             ),
-            Self::InvalidCursor(value) => {
-                (StatusCode::BAD_REQUEST, format!("invalid cursor: {value}"))
-            }
+            Self::InvalidCursor(value) => (
+                StatusCode::BAD_REQUEST,
+                format!("invalid cursor: {value}"),
+                None,
+                None,
+                None,
+            ),
             Self::SourceNotFound(source_id) => (
                 StatusCode::NOT_FOUND,
                 format!("source {source_id} was not found"),
+                None,
+                None,
+                None,
             ),
-            Self::Store(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-            Self::Task(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            Self::Store(StoreError::SourceReplicaConflict {
+                code,
+                message,
+                active_cursor,
+                staging_checkpoint_id,
+            }) => (
+                StatusCode::CONFLICT,
+                message,
+                Some(code),
+                Some(active_cursor),
+                staging_checkpoint_id,
+            ),
+            Self::Store(StoreError::SourceReplicaCapacity {
+                message,
+                active_cursor,
+            }) => (
+                StatusCode::CONFLICT,
+                message,
+                Some("capacity_exceeded"),
+                Some(active_cursor),
+                None,
+            ),
+            Self::Store(StoreError::InvalidSourceReplica {
+                message,
+                active_cursor,
+            }) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                message,
+                Some("invalid_state_request"),
+                Some(active_cursor),
+                None,
+            ),
+            Self::Store(StoreError::SourceReplicaModel(error)) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                error.to_string(),
+                Some("invalid_state_request"),
+                Some(None),
+                None,
+            ),
+            Self::Store(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+                None,
+                None,
+                None,
+            ),
+            Self::Task(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+                None,
+                None,
+                None,
+            ),
         };
-        (status, Json(ErrorResponse { error: message })).into_response()
+        (
+            status,
+            Json(ErrorResponse {
+                error: message,
+                code,
+                active_cursor,
+                staging_checkpoint_id,
+            }),
+        )
+            .into_response()
     }
 }

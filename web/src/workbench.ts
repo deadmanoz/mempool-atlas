@@ -126,6 +126,12 @@ const renderBanner = (
   sourceId: string,
   capture: CaptureStatus,
 ): void => {
+  if (capture.status === "not_collected") {
+    banner.hidden = false;
+    banner.dataset.certainty = "none";
+    banner.textContent = `Peer-observer evidence is not being collected for ${sourceId}. Current membership comes from RPC state only.`;
+    return;
+  }
   if (capture.status === "no_reported_gaps") {
     banner.hidden = true;
     return;
@@ -560,7 +566,7 @@ export const initWorkbench = (): WorkbenchHandle => {
     renderEcdf(summary);
     renderJoint(summary);
     elements.status.dataset.state = "ready";
-    elements.status.textContent = `Updated ${new Date(summary.as_of_ms).toLocaleTimeString()} · auto ${POLL_INTERVAL_MS / 1_000}s · source evidence last seen ${new Date(summary.health.last_seen_at_ms).toLocaleString()}.`;
+    elements.status.textContent = `Updated ${new Date(summary.as_of_ms).toLocaleTimeString()} · auto ${POLL_INTERVAL_MS / 1_000}s · RPC state ${summary.health.state_cursor.epoch_id}@${summary.health.state_cursor.revision} observed ${new Date(summary.health.state_observed_at_ms).toLocaleString()}.`;
   };
 
   const load = async (): Promise<void> => {

@@ -5,12 +5,13 @@
 //! the deterministic seed store. Regenerate with
 //! `just regen-api-fixtures` after intentional contract changes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use atlas_model::{
-    Evidence, MempoolEntryFacts, MempoolSummary, NormalizedEvent, ReconciledMembership,
-    SourceComparison, SourceId, SourceRejections, SourceSessionId, SourcesResponse,
+    Evidence, MembershipMutation, MempoolEntryFacts, MempoolSummary, NormalizedEvent,
+    ReconciledMembership, SourceComparison, SourceId, SourceRejections, SourceReplicaEntry,
+    SourceSessionId, SourcesResponse,
 };
 use atlas_server::{Store, router_with_clock};
 use axum::Router;
@@ -24,6 +25,10 @@ use bitcoin::{
 };
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
+
+mod support;
+
+use support::install_checkpoint;
 
 /// The deterministic instant every fixture response is computed at.
 const AS_OF_MS: u64 = 1_752_710_400_000;
@@ -48,8 +53,8 @@ struct FixtureSpec {
 /// The deterministic seed store a fixture is issued against.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum SeedKind {
-    /// The primary single-source seed backing the sources, summary, and
-    /// rejection fixtures.
+    /// The primary single-source seed backing sources, summaries, and the
+    /// production not-collected rejection response.
     Primary,
     /// The three-source fork seed backing the comparison fixture.
     Fork,
@@ -73,7 +78,7 @@ const SPECS: [FixtureSpec; 7] = [
         status: 200,
         body: BodyKind::Sources,
         seed: SeedKind::Primary,
-        scenario: "two sources with fact-bearing and awaiting-RPC memberships",
+        scenario: "two active SourceReplica projections with complete RPC facts",
     },
     FixtureSpec {
         path: "mempool-summary-default.json",
@@ -82,9 +87,9 @@ const SPECS: [FixtureSpec; 7] = [
         status: 200,
         body: BodyKind::MempoolSummary,
         seed: SeedKind::Primary,
-        scenario: "unfiltered summary without detail blocks, over a source with \
-                   derived and underived rows, awaiting-RPC entries, and a \
-                   possible capture gap",
+        scenario: "unfiltered summary without detail blocks over complete active \
+                   state with derived and underived rows; capture collection is \
+                   explicitly not yet implemented",
     },
     FixtureSpec {
         path: "mempool-summary-filtered.json",
@@ -113,10 +118,8 @@ const SPECS: [FixtureSpec; 7] = [
         status: 200,
         body: BodyKind::Rejections,
         seed: SeedKind::Primary,
-        scenario: "bounded rejection window with reason counts and best-effort \
-                   classification attribution over one classified refusal (bytes \
-                   seen over P2P) and one unclassified refusal, plus a recent \
-                   list carrying a record with derived verdicts and one without",
+        scenario: "production state-only source reports rejection evidence as \
+                   not collected instead of presenting an empty observed window",
     },
     FixtureSpec {
         path: "compare.json",
@@ -126,8 +129,8 @@ const SPECS: [FixtureSpec; 7] = [
         body: BodyKind::Comparison,
         seed: SeedKind::Fork,
         scenario: "ordered three-source comparison (knots, core, libre-relay): a \
-                   shared intersection with a present pair and one awaiting-RPC \
-                   member, a data tx added at each stage, a non-empty knots-only \
+                   shared fact-bearing intersection, a data tx added at each \
+                   stage, a non-empty knots-only \
                    anomaly in the first stage, and an empty anomaly in the second",
     },
     FixtureSpec {
@@ -301,7 +304,7 @@ fn fork_data_transaction(byte: u8, payload: &[u8]) -> Transaction {
 
 /// A staged three-source fork seed for the comparison fixture, ordered least to
 /// most permissive: `knots` (strictest), `core`, `libre-relay`. Two shared
-/// payments and one shared awaiting-RPC member are common to all three. `core`
+/// payments and one shared underived member are common to all three. `core`
 /// additionally relays a data carrier `knots` filters (added at the first
 /// stage); `libre-relay` additionally relays a second data carrier (added at
 /// the second stage). `knots` alone carries one transaction the more-permissive
@@ -324,9 +327,10 @@ fn fork_seed_events() -> Vec<NormalizedEvent> {
     let shared_two_txid = shared_two.compute_txid().to_string();
     let core_added_txid = core_added.compute_txid().to_string();
     let libre_added_txid = libre_added.compute_txid().to_string();
-    // Members observed without raw bytes: the shared awaiting-RPC member and the
-    // knots-only anomaly.
-    let shared_awaiting_txid = txid(0xa1);
+    // Members observed without raw bytes: the shared underived member and the
+    // knots-only anomaly. Their SourceReplica entries still carry complete RPC
+    // facts.
+    let shared_underived_txid = txid(0xa1);
     let anomaly_knots_txid = txid(0xb2);
 
     let event = |source: &SourceId, session: &SourceSessionId, sequence: u64, evidence| {
@@ -352,8 +356,8 @@ fn fork_seed_events() -> Vec<NormalizedEvent> {
     };
 
     vec![
-        // knots (strictest): the two shared payments, the shared awaiting member
-        // (present here with facts), and its own anomaly the others never saw.
+        // knots (strictest): the two shared payments, the shared underived
+        // member, and its own anomaly the others never saw.
         event(
             &knots,
             &knots_session,
@@ -370,7 +374,7 @@ fn fork_seed_events() -> Vec<NormalizedEvent> {
             &knots,
             &knots_session,
             3,
-            present(shared_awaiting_txid.clone(), 180, 900, 40 * MINUTE_MS),
+            present(shared_underived_txid.clone(), 180, 900, 40 * MINUTE_MS),
         ),
         event(
             &knots,
@@ -378,7 +382,7 @@ fn fork_seed_events() -> Vec<NormalizedEvent> {
             4,
             present(anomaly_knots_txid, 210, 700, HOUR_MS),
         ),
-        // core: the two shared payments, the shared awaiting member, and the
+        // core: the two shared payments, the shared underived member, and the
         // data carrier knots filtered out (added at the knots -> core stage).
         event(
             &core,
@@ -396,7 +400,7 @@ fn fork_seed_events() -> Vec<NormalizedEvent> {
             &core,
             &core_session,
             3,
-            present(shared_awaiting_txid.clone(), 180, 950, 42 * MINUTE_MS),
+            present(shared_underived_txid.clone(), 180, 950, 42 * MINUTE_MS),
         ),
         event(
             &core,
@@ -405,8 +409,9 @@ fn fork_seed_events() -> Vec<NormalizedEvent> {
             present(core_added_txid.clone(), 600, 6_000, 30 * MINUTE_MS),
         ),
         // libre-relay (most permissive): observes every shared and added tx's
-        // bytes so classification derives, holds the shared awaiting member
-        // without RPC facts, and additionally relays libre_added.
+        // bytes so classification derives, includes one legacy factless seed
+        // input that `split_seed_material` converts to complete state, and
+        // additionally relays libre_added.
         event(&libre, &libre_session, 1, p2p_evidence(&shared_one)),
         event(
             &libre,
@@ -440,7 +445,7 @@ fn fork_seed_events() -> Vec<NormalizedEvent> {
             &libre_session,
             9,
             Evidence::MempoolAdded {
-                txid: shared_awaiting_txid,
+                txid: shared_underived_txid,
             },
         ),
     ]
@@ -474,9 +479,9 @@ fn seed_events() -> Vec<NormalizedEvent> {
             },
         },
     };
-    // Rejections are point-in-time policy refusals that never enter membership.
-    // They sit earlier than the newest membership evidence, so the source's
-    // last_seen and every membership fixture stay byte-identical.
+    // Historical rejections remain internal fixture evidence. The production
+    // rejection response deliberately reports not_collected even when these
+    // legacy rows exist.
     let rejected = rejected_data_transaction();
     let rejected_txid = rejected.compute_txid().to_string();
     let reject_event = |sequence: u64, observed: u64, evidence| {
@@ -609,6 +614,45 @@ fn seed_events() -> Vec<NormalizedEvent> {
     ]
 }
 
+struct SeedMaterial {
+    state: BTreeMap<SourceId, BTreeMap<String, MempoolEntryFacts>>,
+    evidence: Vec<NormalizedEvent>,
+}
+
+/// Separates historical fixture input from reader-visible SourceReplica
+/// state. Legacy factless membership observations receive deterministic RPC
+/// facts in the checkpoint and are never ingested as state-changing evidence.
+fn split_seed_material(events: Vec<NormalizedEvent>) -> SeedMaterial {
+    let mut state = BTreeMap::<SourceId, BTreeMap<String, MempoolEntryFacts>>::new();
+    let mut evidence = Vec::new();
+    for event in events {
+        let mutations = event.membership_mutations();
+        if mutations.is_empty() {
+            evidence.push(event);
+            continue;
+        }
+        let source = state.entry(event.source_id.clone()).or_default();
+        for mutation in mutations {
+            match mutation {
+                MembershipMutation::Absent { txid } => {
+                    source.remove(&txid);
+                }
+                MembershipMutation::Present { txid, facts } => {
+                    source.insert(
+                        txid,
+                        facts.unwrap_or(MempoolEntryFacts {
+                            vsize: 180,
+                            fee_sats: 900,
+                            entered_at_ms: event.observed_at_ms,
+                        }),
+                    );
+                }
+            }
+        }
+    }
+    SeedMaterial { state, evidence }
+}
+
 fn router_for(seed: SeedKind, directory: &Path) -> Router {
     let database = directory.join(match seed {
         SeedKind::Primary => "primary.db",
@@ -620,8 +664,20 @@ fn router_for(seed: SeedKind, directory: &Path) -> Router {
         SeedKind::Primary => seed_events(),
         SeedKind::Fork => fork_seed_events(),
     };
-    for event in events {
+    let material = split_seed_material(events);
+    for event in material.evidence {
         store.ingest(&event).expect("seed event ingest");
+    }
+    for (source_id, entries) in material.state {
+        install_checkpoint(
+            &store,
+            source_id.as_str(),
+            AS_OF_MS - 1_000,
+            entries
+                .into_iter()
+                .map(|(txid, facts)| SourceReplicaEntry::new(txid, facts).expect("state entry"))
+                .collect(),
+        );
     }
     router_with_clock(store, || AS_OF_MS)
 }

@@ -5,14 +5,13 @@ import { fetchMempool, parseMempoolResponse } from "./api";
 const snapshot = (sourceId = "core") => ({
   source_id: sourceId,
   health: {
-    last_seen_at_ms: 1_700_000_000_000,
-    capture: { status: "no_reported_gaps" },
+    state_cursor: { epoch_id: "epoch-a", revision: 7 },
+    state_observed_at_ms: 1_700_000_000_000,
+    capture: { status: "not_collected" },
   },
   memberships: [
     {
       txid: "abc",
-      updated_at_ms: 1_700_000_000_000,
-      evidence_event_id: "event-1",
       facts: {
         status: "available",
         vsize: 141,
@@ -32,7 +31,11 @@ describe("parseMempoolResponse", () => {
     const response = parseMempoolResponse(snapshot());
 
     expect(response.source_id).toBe("core");
-    expect(response.health.capture.status).toBe("no_reported_gaps");
+    expect(response.health.capture.status).toBe("not_collected");
+    expect(response.health.state_cursor).toEqual({
+      epoch_id: "epoch-a",
+      revision: 7,
+    });
     expect(response.memberships[0]?.txid).toBe("abc");
     expect(response.memberships[0]?.facts).toEqual({
       status: "available",
@@ -48,8 +51,6 @@ describe("parseMempoolResponse", () => {
       memberships: [
         {
           txid: "def",
-          updated_at_ms: 1_700_000_000_000,
-          evidence_event_id: "event-2",
           facts: { status: "awaiting_rpc" },
         },
       ],
@@ -64,7 +65,8 @@ describe("parseMempoolResponse", () => {
     const response = parseMempoolResponse({
       ...snapshot(),
       health: {
-        last_seen_at_ms: 1_700_000_000_000,
+        state_cursor: { epoch_id: "epoch-a", revision: 7 },
+        state_observed_at_ms: 1_700_000_000_000,
         capture: {
           status: "contains_gaps",
           first_gap_at_ms: 1_699_999_000_000,
@@ -90,6 +92,21 @@ describe("parseMempoolResponse", () => {
         source_id: "core",
         health: snapshot().health,
         memberships: [{ txid: "abc" }],
+      }),
+    ).toThrow("Invalid membership at index 0");
+  });
+
+  it("rejects legacy per-membership event provenance", () => {
+    expect(() =>
+      parseMempoolResponse({
+        ...snapshot(),
+        memberships: [
+          {
+            ...snapshot().memberships[0],
+            updated_at_ms: 1_700_000_000_000,
+            evidence_event_id: "event-1",
+          },
+        ],
       }),
     ).toThrow("Invalid membership at index 0");
   });
@@ -122,8 +139,6 @@ describe("parseMempoolResponse", () => {
         memberships: [
           {
             txid: "abc",
-            updated_at_ms: 1_700_000_000_000,
-            evidence_event_id: "event-1",
             facts,
           },
         ],
@@ -136,7 +151,8 @@ describe("parseMempoolResponse", () => {
       parseMempoolResponse({
         ...snapshot(),
         health: {
-          last_seen_at_ms: 1_700_000_000_000,
+          state_cursor: { epoch_id: "epoch-a", revision: 7 },
+          state_observed_at_ms: 1_700_000_000_000,
           capture: {
             status: "contains_gaps",
             marker_count: 0,
@@ -144,6 +160,30 @@ describe("parseMempoolResponse", () => {
         },
       }),
     ).toThrow("Invalid capture status");
+  });
+
+  it("rejects an unestablished state cursor", () => {
+    expect(() =>
+      parseMempoolResponse({
+        ...snapshot(),
+        health: {
+          ...snapshot().health,
+          state_cursor: { epoch_id: "epoch-a", revision: 0 },
+        },
+      }),
+    ).toThrow("Invalid source state cursor");
+  });
+
+  it("rejects a state cursor with an invalid epoch identifier", () => {
+    expect(() =>
+      parseMempoolResponse({
+        ...snapshot(),
+        health: {
+          ...snapshot().health,
+          state_cursor: { epoch_id: "epoch a", revision: 7 },
+        },
+      }),
+    ).toThrow("Invalid source state cursor");
   });
 });
 

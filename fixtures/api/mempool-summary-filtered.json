@@ -181,15 +181,13 @@
   },
   "health": {
     "capture": {
-      "first_gap_at_ms": 1752706860000,
-      "latest_gap_at_ms": 1752706860000,
-      "latest_input": "peer_observer_nats",
-      "latest_reason": "disconnected",
-      "marker_count": 1,
-      "status": "contains_gaps",
-      "strongest_certainty": "possible_loss"
+      "status": "not_collected"
     },
-    "last_seen_at_ms": 1752707580005
+    "state_cursor": {
+      "epoch_id": "fixture-epoch-source-a",
+      "revision": 1
+    },
+    "state_observed_at_ms": 1752710399000
   },
   "histograms": {
     "age": {
@@ -199,8 +197,8 @@
           "vsize": 141
         },
         {
-          "count": 1,
-          "vsize": 250
+          "count": 3,
+          "vsize": 610
         },
         {
           "count": 1,
@@ -240,8 +238,8 @@
           "vsize": 0
         },
         {
-          "count": 0,
-          "vsize": 0
+          "count": 2,
+          "vsize": 360
         },
         {
           "count": 1,
@@ -295,8 +293,8 @@
       ],
       "status": "available",
       "underived": {
-        "count": 4,
-        "vsize": 4291
+        "count": 6,
+        "vsize": 4651
       }
     },
     "outputs": {
@@ -324,8 +322,8 @@
       ],
       "status": "available",
       "underived": {
-        "count": 4,
-        "vsize": 4291
+        "count": 6,
+        "vsize": 4651
       }
     },
     "script": {
@@ -361,8 +359,8 @@
       ],
       "status": "available",
       "underived": {
-        "count": 4,
-        "vsize": 4291
+        "count": 6,
+        "vsize": 4651
       }
     },
     "taxonomies": [
@@ -393,8 +391,8 @@
             "vsize": 0
           },
           {
-            "count": 4,
-            "vsize": 4291
+            "count": 6,
+            "vsize": 4651
           }
         ],
         "key": "behavior",
@@ -439,8 +437,8 @@
             "vsize": 0
           },
           {
-            "count": 4,
-            "vsize": 4291
+            "count": 6,
+            "vsize": 4651
           }
         ],
         "key": "bip110",
@@ -485,8 +483,8 @@
             "vsize": 0
           },
           {
-            "count": 4,
-            "vsize": 4291
+            "count": 6,
+            "vsize": 4651
           }
         ],
         "key": "data_protocol",
@@ -526,23 +524,23 @@
       ],
       "status": "available",
       "underived": {
-        "count": 4,
-        "vsize": 4291
+        "count": 6,
+        "vsize": 4651
       }
     }
   },
   "source_id": "source-a",
   "totals": {
     "all": {
-      "count": 8,
-      "vsize": 5575
+      "count": 10,
+      "vsize": 5935
     },
     "awaiting_rpc": {
-      "count": 2
+      "count": 0
     },
     "matching": {
-      "count": 4,
-      "vsize": 4291
+      "count": 6,
+      "vsize": 4651
     }
   }
 }

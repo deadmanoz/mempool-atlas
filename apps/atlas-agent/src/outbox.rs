@@ -14,8 +14,7 @@ use rusqlite::{
 };
 use thiserror::Error;
 
-const LATEST_SCHEMA_VERSION: i64 = 3;
-const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
+use crate::schema::{self, AgentSchemaError, LATEST_SCHEMA_VERSION};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentIdentity {
@@ -99,7 +98,7 @@ impl Outbox {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing_source = transaction
             .query_row(
-                "SELECT source_id FROM agent_state WHERE singleton = 1",
+                "SELECT source_id FROM agent_database WHERE singleton = 1",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -114,7 +113,7 @@ impl Outbox {
             Some(_) => {}
             None => {
                 transaction.execute(
-                    "INSERT INTO agent_state (singleton, source_id) VALUES (1, ?1)",
+                    "INSERT INTO agent_database (singleton, source_id) VALUES (1, ?1)",
                     [source_id.as_str()],
                 )?;
             }
@@ -130,30 +129,13 @@ impl Outbox {
     /// Applies schema migrations. Persistent deployments must call this through
     /// the project's backup-first migration wrapper.
     pub fn migrate(path: impl AsRef<Path>) -> Result<(), OutboxError> {
-        let path = path.as_ref();
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut connection = Connection::open(path)?;
-        configure_connection(&connection)?;
-        let version = schema_version(&connection)?;
-        if version == LATEST_SCHEMA_VERSION {
-            return Ok(());
-        }
-        if version != 0 {
-            return Err(OutboxError::SchemaVersion {
-                found: version,
-                expected: LATEST_SCHEMA_VERSION,
-            });
-        }
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute_batch(MIGRATION_1)?;
-        transaction.pragma_update(None, "user_version", 3)?;
-        transaction.commit()?;
-        Ok(())
+        schema::migrate(path).map_err(|error| match error {
+            AgentSchemaError::Database(error) => OutboxError::Database(error),
+            AgentSchemaError::Io(error) => OutboxError::Io(error),
+            AgentSchemaError::SchemaVersion { found, expected } => {
+                OutboxError::SchemaVersion { found, expected }
+            }
+        })
     }
 
     #[must_use]
@@ -257,7 +239,7 @@ impl Outbox {
         }
 
         transaction.execute(
-            "UPDATE agent_state SET last_rpc_success_at_ms = ?1 WHERE singleton = 1",
+            "UPDATE outbox_state SET last_rpc_success_at_ms = ?1 WHERE singleton = 1",
             [to_sqlite_integer(completed_at_ms, "completed_at_ms")?],
         )?;
         transaction.commit()?;
@@ -431,7 +413,7 @@ impl Outbox {
     pub fn last_rpc_success_at_ms(&self) -> Result<Option<u64>, OutboxError> {
         let connection = self.connect()?;
         let value = connection.query_row(
-            "SELECT last_rpc_success_at_ms FROM agent_state WHERE singleton = 1",
+            "SELECT last_rpc_success_at_ms FROM outbox_state WHERE singleton = 1",
             [],
             |row| row.get::<_, Option<i64>>(0),
         )?;
@@ -1352,7 +1334,7 @@ mod tests {
             Outbox::open(&path, source("core-a")),
             Err(OutboxError::SchemaVersion {
                 found: 0,
-                expected: 3
+                expected: 4
             })
         ));
 
@@ -1365,20 +1347,20 @@ mod tests {
             Outbox::migrate(&path),
             Err(OutboxError::SchemaVersion {
                 found: 2,
-                expected: 3
+                expected: 4
             })
         ));
 
         let connection = Connection::open(&path).expect("open database");
         connection
-            .pragma_update(None, "user_version", 4)
+            .pragma_update(None, "user_version", 5)
             .expect("set future version");
         drop(connection);
         assert!(matches!(
             Outbox::migrate(&path),
             Err(OutboxError::SchemaVersion {
-                found: 4,
-                expected: 3
+                found: 5,
+                expected: 4
             })
         ));
     }

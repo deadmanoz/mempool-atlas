@@ -1,14 +1,22 @@
 {
   "sources": [
     {
-      "last_seen_at_ms": 1752707580005,
       "membership_count": 10,
-      "source_id": "source-a"
+      "source_id": "source-a",
+      "state_cursor": {
+        "epoch_id": "fixture-epoch-source-a",
+        "revision": 1
+      },
+      "state_observed_at_ms": 1752710399000
     },
     {
-      "last_seen_at_ms": 1752706860005,
       "membership_count": 1,
-      "source_id": "source-b"
+      "source_id": "source-b",
+      "state_cursor": {
+        "epoch_id": "fixture-epoch-source-b",
+        "revision": 1
+      },
+      "state_observed_at_ms": 1752710399000
     }
   ]
 }

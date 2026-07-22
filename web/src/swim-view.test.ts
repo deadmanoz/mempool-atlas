@@ -22,8 +22,6 @@ const availableMembership = (
   > = {},
 ): MempoolEntry => ({
   txid: value.toString(16).padStart(64, "0"),
-  updated_at_ms: NOW_MS,
-  evidence_event_id: `event-${value}`,
   facts: {
     status: "available",
     vsize: 250,
@@ -35,8 +33,6 @@ const availableMembership = (
 
 const awaitingMembership = (value: number): MempoolEntry => ({
   txid: value.toString(16).padStart(64, "0"),
-  updated_at_ms: NOW_MS,
-  evidence_event_id: `event-${value}`,
   facts: { status: "awaiting_rpc" },
 });
 

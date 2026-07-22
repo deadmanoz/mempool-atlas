@@ -2,15 +2,41 @@ use atlas_agent::peer_observer::normalize_payload;
 use atlas_model::{
     CaptureGapCertainty, CaptureStatus, Evidence, IngestBatchRequest, IngestBatchResponse,
     IngestResponse, IngestStatus, MAX_INGEST_BATCH_BODY_BYTES, MempoolEntryFacts,
-    MempoolEntryFactsStatus, MempoolSnapshot, NormalizedEvent, ReconciledMembership,
+    MempoolEntryFactsStatus, MempoolSnapshot, NormalizedEvent, SourceReplicaEntry,
 };
 use atlas_model::{SourceId, SourceSessionId};
-use atlas_server::{Store, router};
+use atlas_server::{Store, experimental_evidence_router as router, router as production_router};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+mod support;
+
+use support::install_checkpoint;
+
 const TXID: &str = "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100";
+
+#[tokio::test]
+async fn production_router_does_not_mount_legacy_event_ingest() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let database = temporary.path().join("atlas.db");
+    Store::migrate(&database).expect("migrate");
+    let application = production_router(Store::open(database).expect("store"));
+
+    for path in ["/api/v1/events", "/api/v1/events/batch"] {
+        let response = application
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}
 
 fn event() -> NormalizedEvent {
     event_for("source-a", "session-a")
@@ -29,7 +55,7 @@ fn event_for(source_id: &str, session_id: &str) -> NormalizedEvent {
 }
 
 #[tokio::test]
-async fn event_is_idempotent_and_visible_in_read_api() {
+async fn event_is_idempotent_but_cannot_establish_product_state() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let database = temporary.path().join("atlas.db");
     Store::migrate(&database).expect("migrate");
@@ -63,19 +89,7 @@ async fn event_is_idempotent_and_visible_in_read_api() {
         )
         .await
         .expect("response");
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("response body");
-    let snapshot: MempoolSnapshot = serde_json::from_slice(&bytes).expect("snapshot");
-    assert_eq!(snapshot.source_id.as_str(), "source-a");
-    assert_eq!(snapshot.health.capture, CaptureStatus::NoReportedGaps);
-    assert_eq!(snapshot.memberships.len(), 1);
-    assert_eq!(snapshot.memberships[0].txid, TXID);
-    assert_eq!(
-        snapshot.memberships[0].facts,
-        MempoolEntryFactsStatus::AwaitingRpc
-    );
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -83,38 +97,19 @@ async fn source_read_exposes_reconciled_mempool_facts() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let database = temporary.path().join("atlas.db");
     Store::migrate(&database).expect("migrate");
-    let application = router(Store::open(database).expect("store"));
+    let store = Store::open(database).expect("store");
     let facts = MempoolEntryFacts {
         vsize: 141,
         fee_sats: 1_200,
         entered_at_ms: 1_721_234_000_000,
     };
-    let event = NormalizedEvent::new(
-        SourceId::new("source-a").expect("source"),
-        SourceSessionId::new("session-a").expect("session"),
-        1,
+    install_checkpoint(
+        &store,
+        "source-a",
         1_721_234_567_890,
-        1_721_234_567_897,
-        Evidence::MempoolReconciled {
-            txid: TXID.to_owned(),
-            membership: ReconciledMembership::Present {
-                facts: facts.clone(),
-            },
-        },
-    )
-    .expect("reconciliation event");
-
-    let response = application
-        .clone()
-        .oneshot(
-            Request::post("/api/v1/events")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&event).expect("event json")))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+        vec![SourceReplicaEntry::new(TXID, facts.clone()).expect("entry")],
+    );
+    let application = production_router(store);
 
     let response = application
         .oneshot(
@@ -247,24 +242,21 @@ async fn same_txid_from_two_sources_remains_isolated_by_source_endpoint() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let database = temporary.path().join("atlas.db");
     Store::migrate(&database).expect("migrate");
-    let application = router(Store::open(database).expect("store"));
-
-    for event in [
-        event_for("source-a", "session-a"),
-        event_for("source-b", "session-b"),
-    ] {
-        let response = application
-            .clone()
-            .oneshot(
-                Request::post("/api/v1/events")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&event).expect("event json")))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let store = Store::open(database).expect("store");
+    let facts = MempoolEntryFacts {
+        vsize: 141,
+        fee_sats: 1_200,
+        entered_at_ms: 1_721_234_000_000,
+    };
+    for source_id in ["source-a", "source-b"] {
+        install_checkpoint(
+            &store,
+            source_id,
+            1_721_234_567_890,
+            vec![SourceReplicaEntry::new(TXID, facts.clone()).expect("entry")],
+        );
     }
+    let application = production_router(store);
 
     for source_id in ["source-a", "source-b"] {
         let response = application
@@ -311,11 +303,13 @@ async fn source_read_rejects_invalid_source_id_and_returns_not_found_for_unknown
 }
 
 #[tokio::test]
-async fn gap_only_source_exposes_capture_integrity_with_an_empty_mempool() {
+async fn gap_evidence_does_not_replace_state_health_or_membership() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let database = temporary.path().join("atlas.db");
     Store::migrate(&database).expect("migrate");
-    let application = router(Store::open(database).expect("store"));
+    let store = Store::open(database).expect("store");
+    install_checkpoint(&store, "source-a", 1_721_234_567_890, vec![]);
+    let application = router(store);
     let gap = NormalizedEvent::new(
         SourceId::new("source-a").expect("source"),
         SourceSessionId::new("session-a").expect("session"),
@@ -356,17 +350,7 @@ async fn gap_only_source_exposes_capture_integrity_with_an_empty_mempool() {
         .expect("response body");
     let snapshot: MempoolSnapshot = serde_json::from_slice(&bytes).expect("snapshot");
     assert!(snapshot.memberships.is_empty());
-    assert_eq!(
-        snapshot.health.capture,
-        CaptureStatus::ContainsGaps {
-            first_gap_at_ms: 1_721_234_567_897,
-            latest_gap_at_ms: 1_721_234_567_897,
-            marker_count: 1,
-            strongest_certainty: CaptureGapCertainty::KnownLoss,
-            latest_input: "peer_observer_nats".to_owned(),
-            latest_reason: "slow_consumer".to_owned(),
-        }
-    );
+    assert_eq!(snapshot.health.capture, CaptureStatus::NotCollected);
 }
 
 #[tokio::test]

@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ModelError, SourceHealth, SourceId};
+use crate::{ModelError, ReplicaCursor, SourceHealth, SourceId};
 
 /// Interior fee-rate bin edges in sat/vB. Bins are half-open `[lower, upper)`
 /// with an implicit zero lower bound and unbounded top bin:
@@ -441,8 +441,12 @@ pub struct MempoolSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceDescriptor {
     pub source_id: SourceId,
-    pub last_seen_at_ms: u64,
-    /// Current memberships including entries still awaiting RPC facts.
+    /// Exact active SourceReplica epoch and revision represented by the read.
+    pub state_cursor: ReplicaCursor,
+    /// Agent completion time for the RPC observation represented by the
+    /// active SourceReplica generation.
+    pub state_observed_at_ms: u64,
+    /// Current fact-bearing memberships in the active SourceReplica generation.
     pub membership_count: u64,
 }
 
@@ -520,14 +524,26 @@ pub struct RejectionRecord {
     pub verdicts: Vec<(String, String)>,
 }
 
+/// Whether the server is collecting the rejection evidence represented by
+/// this read surface. `not_collected` is distinct from an available window
+/// whose count happens to be zero.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RejectionAvailability {
+    Available,
+    NotCollected,
+}
+
 /// The source-scoped rejection read model. The aggregate covers the bounded
 /// recent window; `recent` is a separately paginated slice of the same
 /// rejection stream, newest first, with `next_cursor` set when older
-/// rejections remain.
+/// rejections remain. Consumers must inspect `availability` before reading an
+/// empty window as an observed zero.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceRejections {
     pub source_id: SourceId,
     pub as_of_ms: u64,
+    pub availability: RejectionAvailability,
     pub window: RejectionWindow,
     pub by_reason: Vec<RejectionReasonCount>,
     pub attribution: RejectionAttribution,
@@ -542,8 +558,8 @@ pub struct SourceRejections {
 pub struct RegionAggregate {
     /// Fact-bearing members of the region.
     pub present: AggregateBin,
-    /// Region members still awaiting RPC facts; counted, never given a vsize
-    /// or folded into a histogram.
+    /// Legacy compatibility count. Complete SourceReplica state always emits
+    /// zero here.
     pub awaiting_rpc: AwaitingRpcTotal,
     pub bins: BinCatalog,
     pub histograms: SummaryHistograms,
@@ -1014,6 +1030,7 @@ mod tests {
         let rejections = SourceRejections {
             source_id: SourceId::new("source-a").expect("source"),
             as_of_ms: 1_752_710_400_000,
+            availability: RejectionAvailability::NotCollected,
             window: RejectionWindow {
                 count: 0,
                 oldest_at_ms: None,
@@ -1033,6 +1050,7 @@ mod tests {
             serde_json::json!({
                 "source_id": "source-a",
                 "as_of_ms": 1_752_710_400_000_u64,
+                "availability": { "status": "not_collected" },
                 "window": { "count": 0 },
                 "by_reason": [],
                 "attribution": {

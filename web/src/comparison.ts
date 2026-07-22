@@ -14,6 +14,7 @@ import {
   type ComparisonRequestTicket,
 } from "./comparison-lifecycle";
 import {
+  rejectionAvailabilityMessage,
   rejectionVerdictSegments,
   rejectionReasonLabel,
   sharedView,
@@ -474,6 +475,16 @@ export const initComparison = (): ComparisonHandle => {
     }
 
     const rejections = result.value;
+    const unavailableMessage = rejectionAvailabilityMessage(
+      rejections.availability,
+    );
+    if (unavailableMessage !== null) {
+      const note = document.createElement("p");
+      note.className = "rejection-note";
+      note.textContent = unavailableMessage;
+      panel.append(note);
+      return panel;
+    }
     const count = document.createElement("span");
     count.className = "rejection-count mono";
     count.textContent = formatCount(rejections.window.count);

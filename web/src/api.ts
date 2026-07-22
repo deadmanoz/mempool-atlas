@@ -3,6 +3,7 @@ import type {
   MempoolEntry,
   MempoolFacts,
   MempoolResponse,
+  ReplicaCursor,
   SourceHealth,
 } from "./types";
 
@@ -56,17 +57,13 @@ const parseMembership = (value: unknown, index: number): MempoolEntry => {
     !isRecord(value) ||
     typeof value.txid !== "string" ||
     value.txid.length === 0 ||
-    !isNonNegativeInteger(value.updated_at_ms) ||
-    typeof value.evidence_event_id !== "string" ||
-    value.evidence_event_id.length === 0
+    !hasOnlyKeys(value, ["txid", "facts"])
   ) {
     throw new TypeError(`Invalid membership at index ${index}`);
   }
 
   return {
     txid: value.txid,
-    updated_at_ms: value.updated_at_ms,
-    evidence_event_id: value.evidence_event_id,
     facts: parseMempoolFacts(value.facts, index),
   };
 };
@@ -76,7 +73,11 @@ const parseCaptureStatus = (value: unknown): CaptureStatus => {
     throw new TypeError("Invalid capture status");
   }
 
-  if (value.status === "no_reported_gaps") {
+  if (value.status === "not_collected" && hasOnlyKeys(value, ["status"])) {
+    return { status: "not_collected" };
+  }
+
+  if (value.status === "no_reported_gaps" && hasOnlyKeys(value, ["status"])) {
     return { status: "no_reported_gaps" };
   }
 
@@ -108,13 +109,32 @@ const parseCaptureStatus = (value: unknown): CaptureStatus => {
   };
 };
 
+export const parseReplicaCursor = (value: unknown): ReplicaCursor => {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["epoch_id", "revision"]) ||
+    typeof value.epoch_id !== "string" ||
+    !/^[A-Za-z0-9._-]+$/.test(value.epoch_id) ||
+    !isNonNegativeInteger(value.revision) ||
+    value.revision === 0
+  ) {
+    throw new TypeError("Invalid source state cursor");
+  }
+  return { epoch_id: value.epoch_id, revision: value.revision };
+};
+
 export const parseSourceHealth = (value: unknown): SourceHealth => {
-  if (!isRecord(value) || !isNonNegativeInteger(value.last_seen_at_ms)) {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["state_cursor", "state_observed_at_ms", "capture"]) ||
+    !isNonNegativeInteger(value.state_observed_at_ms)
+  ) {
     throw new TypeError("Invalid source health");
   }
 
   return {
-    last_seen_at_ms: value.last_seen_at_ms,
+    state_cursor: parseReplicaCursor(value.state_cursor),
+    state_observed_at_ms: value.state_observed_at_ms,
     capture: parseCaptureStatus(value.capture),
   };
 };

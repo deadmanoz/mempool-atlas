@@ -2,7 +2,7 @@
   "as_of_ms": 1752710400000,
   "shared": {
     "awaiting_rpc": {
-      "count": 1
+      "count": 0
     },
     "bins": {
       "age_ms_edges": [
@@ -179,8 +179,8 @@
             "vsize": 0
           },
           {
-            "count": 2,
-            "vsize": 450
+            "count": 3,
+            "vsize": 630
           },
           {
             "count": 0,
@@ -220,8 +220,8 @@
             "vsize": 0
           },
           {
-            "count": 1,
-            "vsize": 250
+            "count": 2,
+            "vsize": 430
           },
           {
             "count": 1,
@@ -275,8 +275,8 @@
         ],
         "status": "available",
         "underived": {
-          "count": 0,
-          "vsize": 0
+          "count": 1,
+          "vsize": 180
         }
       },
       "outputs": {
@@ -304,8 +304,8 @@
         ],
         "status": "available",
         "underived": {
-          "count": 0,
-          "vsize": 0
+          "count": 1,
+          "vsize": 180
         }
       },
       "script": {
@@ -341,8 +341,8 @@
         ],
         "status": "available",
         "underived": {
-          "count": 0,
-          "vsize": 0
+          "count": 1,
+          "vsize": 180
         }
       },
       "taxonomies": [
@@ -373,8 +373,8 @@
               "vsize": 0
             },
             {
-              "count": 0,
-              "vsize": 0
+              "count": 1,
+              "vsize": 180
             }
           ],
           "key": "behavior",
@@ -419,8 +419,8 @@
               "vsize": 0
             },
             {
-              "count": 0,
-              "vsize": 0
+              "count": 1,
+              "vsize": 180
             }
           ],
           "key": "bip110",
@@ -465,8 +465,8 @@
               "vsize": 450
             },
             {
-              "count": 0,
-              "vsize": 0
+              "count": 1,
+              "vsize": 180
             }
           ],
           "key": "data_protocol",
@@ -506,14 +506,14 @@
         ],
         "status": "available",
         "underived": {
-          "count": 0,
-          "vsize": 0
+          "count": 1,
+          "vsize": 180
         }
       }
     },
     "present": {
-      "count": 2,
-      "vsize": 450
+      "count": 3,
+      "vsize": 630
     }
   },
   "source_totals": [
@@ -539,11 +539,11 @@
     },
     {
       "awaiting_rpc": {
-        "count": 1
+        "count": 0
       },
       "present": {
-        "count": 4,
-        "vsize": 1600
+        "count": 5,
+        "vsize": 1780
       },
       "source_id": "libre-relay"
     }

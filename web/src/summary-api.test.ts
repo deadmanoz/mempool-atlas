@@ -111,8 +111,9 @@ const validSummary = (): Record<string, unknown> => ({
     ],
   },
   health: {
-    last_seen_at_ms: 1_752_710_000_000,
-    capture: { status: "no_reported_gaps" },
+    state_cursor: { epoch_id: "epoch-a", revision: 7 },
+    state_observed_at_ms: 1_752_710_000_000,
+    capture: { status: "not_collected" },
   },
 });
 
@@ -261,7 +262,12 @@ describe("parseSourcesResponse", () => {
   it("accepts a source listing", () => {
     const sources = parseSourcesResponse({
       sources: [
-        { source_id: "source-a", last_seen_at_ms: 5, membership_count: 2 },
+        {
+          source_id: "source-a",
+          state_cursor: { epoch_id: "epoch-a", revision: 7 },
+          state_observed_at_ms: 5,
+          membership_count: 2,
+        },
       ],
     });
     expect(sources).toHaveLength(1);
@@ -271,7 +277,13 @@ describe("parseSourcesResponse", () => {
   it("rejects descriptors with missing counts", () => {
     expect(() =>
       parseSourcesResponse({
-        sources: [{ source_id: "source-a", last_seen_at_ms: 5 }],
+        sources: [
+          {
+            source_id: "source-a",
+            state_cursor: { epoch_id: "epoch-a", revision: 7 },
+            state_observed_at_ms: 5,
+          },
+        ],
       }),
     ).toThrow(TypeError);
   });

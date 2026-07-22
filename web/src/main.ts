@@ -132,7 +132,6 @@ const renderMembership = (membership: MempoolEntry): HTMLTableRowElement => {
     );
   }
 
-  appendCell(row, new Date(membership.updated_at_ms).toLocaleString());
   return row;
 };
 
@@ -193,6 +192,11 @@ const renderCaptureStatus = (
   capture: CaptureStatus,
 ): void => {
   captureStatus.hidden = false;
+  if (capture.status === "not_collected") {
+    captureStatus.dataset.certainty = "none";
+    captureStatus.textContent = `Peer-observer evidence is not being collected for ${sourceId}. Current membership comes from RPC state only.`;
+    return;
+  }
   if (capture.status === "no_reported_gaps") {
     captureStatus.dataset.certainty = "none";
     captureStatus.textContent = `No capture gaps have been reported for ${sourceId}. This is not proof of complete forensic coverage.`;
@@ -242,7 +246,7 @@ const loadMemberships = async (): Promise<void> => {
       scheduleVisualRender();
     }
     status.dataset.state = "ready";
-    status.textContent = `${countFormat.format(currentMemberships.length)} transaction${currentMemberships.length === 1 ? "" : "s"} currently present. Latest source evidence arrived ${new Date(response.health.last_seen_at_ms).toLocaleString()}.`;
+    status.textContent = `${countFormat.format(currentMemberships.length)} transaction${currentMemberships.length === 1 ? "" : "s"} currently present. RPC state ${response.health.state_cursor.epoch_id}@${response.health.state_cursor.revision} observed ${new Date(response.health.state_observed_at_ms).toLocaleString()}.`;
   } catch (error) {
     clearMemberships();
     empty.hidden = true;

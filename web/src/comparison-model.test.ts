@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   anomalyView,
   regionMagnitude,
+  rejectionAvailabilityMessage,
   rejectionReasonLabel,
   rejectionVerdictSegments,
   sharedView,
@@ -213,5 +214,14 @@ describe("rejectionReasonLabel", () => {
     expect(rejectionReasonLabel({ reason: "other", is_rollup: true })).toBe(
       "Other reasons",
     );
+  });
+});
+
+describe("rejectionAvailabilityMessage", () => {
+  it("distinguishes unavailable evidence from an observed empty window", () => {
+    expect(rejectionAvailabilityMessage({ status: "not_collected" })).toBe(
+      "Rejection evidence is not collected in state-only mode.",
+    );
+    expect(rejectionAvailabilityMessage({ status: "available" })).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 //! Server-side assembly of the read-time source comparison.
 //!
 //! Atlas never stores a combined mempool. The comparison is derived on demand
-//! from the source-partitioned `current_membership` projections: the store
+//! from the source-partitioned active SourceReplica projections: the store
 //! computes each membership-set region with set-algebra SQL and gathers only
 //! the designated facts source's rows for that region, and this module runs the
 //! summary aggregation over each region so only aggregates ever leave the
@@ -21,8 +21,9 @@ use atlas_model::{
 
 use crate::summary::{RegionFacts, anomaly_region, region_aggregate};
 
-/// One compared source's whole-membership totals: fact-bearing count and summed
-/// virtual size, plus the count of members still awaiting RPC facts.
+/// One compared source's whole-membership totals. `awaiting_rpc_count` is
+/// retained for wire compatibility and remains zero for complete SourceReplica
+/// state.
 #[derive(Clone, Debug, Default)]
 pub struct SourceTotal {
     pub present: AggregateBin,

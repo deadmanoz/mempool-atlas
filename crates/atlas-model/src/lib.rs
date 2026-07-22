@@ -1,5 +1,6 @@
 //! Shared Mempool Atlas domain and wire types.
 
+mod source_replica;
 mod summary;
 
 use std::fmt;
@@ -9,6 +10,7 @@ use bitcoin::{Txid, Wtxid};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use source_replica::*;
 pub use summary::*;
 
 pub const SCHEMA_VERSION: u16 = 3;
@@ -381,8 +383,6 @@ impl MembershipMutation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MempoolEntry {
     pub txid: String,
-    pub updated_at_ms: u64,
-    pub evidence_event_id: String,
     pub facts: MempoolEntryFactsStatus,
 }
 
@@ -405,13 +405,20 @@ pub struct MempoolSnapshot {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceHealth {
-    pub last_seen_at_ms: u64,
+    /// Exact active SourceReplica epoch and revision represented by the read.
+    pub state_cursor: ReplicaCursor,
+    /// Agent completion time for the RPC observation represented by the
+    /// active SourceReplica generation.
+    pub state_observed_at_ms: u64,
     pub capture: CaptureStatus,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CaptureStatus {
+    /// Peer evidence is not being collected for this source. This makes no
+    /// statement about the completeness of its history.
+    NotCollected,
     NoReportedGaps,
     ContainsGaps {
         first_gap_at_ms: u64,
@@ -798,6 +805,29 @@ mod tests {
                 "vsize": 141,
                 "fee_sats": 1_200,
                 "entered_at_ms": 1_721_234_000_000_u64,
+            })
+        );
+    }
+
+    #[test]
+    fn not_collected_capture_status_is_explicit_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(CaptureStatus::NotCollected).expect("capture status"),
+            serde_json::json!({ "status": "not_collected" })
+        );
+
+        let health = SourceHealth {
+            state_cursor: ReplicaCursor::new(SourceEpochId::new("epoch-a").expect("epoch"), 7)
+                .expect("cursor"),
+            state_observed_at_ms: 1_721_234_000_000,
+            capture: CaptureStatus::NotCollected,
+        };
+        assert_eq!(
+            serde_json::to_value(health).expect("source health"),
+            serde_json::json!({
+                "state_cursor": { "epoch_id": "epoch-a", "revision": 7 },
+                "state_observed_at_ms": 1_721_234_000_000_u64,
+                "capture": { "status": "not_collected" },
             })
         );
     }

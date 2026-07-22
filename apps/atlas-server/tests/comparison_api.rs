@@ -1,12 +1,12 @@
 //! HTTP behavior of the read-time source comparison endpoint: strict query
-//! validation, the ordered staged deltas, honest awaiting-RPC separation, and
+//! validation, ordered staged deltas, complete state facts, and
 //! correct taxonomy attribution of the `added` regions. Region aggregation
 //! arithmetic is shared with the summary engine and unit-tested there; fixture
 //! parity lives in the fixture contract test.
 
 use atlas_model::{
     AggregateBin, DimensionHistogram, Evidence, MempoolEntryFacts, NormalizedEvent,
-    ReconciledMembership, SourceComparison, SourceId, SourceSessionId,
+    SourceComparison, SourceId, SourceReplicaEntry, SourceSessionId,
 };
 use atlas_server::{Store, router_with_clock};
 use axum::Router;
@@ -19,6 +19,10 @@ use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, WPubkeyHash, Witness,
 };
 use tower::ServiceExt;
+
+mod support;
+
+use support::install_checkpoint;
 
 const AS_OF_MS: u64 = 1_752_710_400_000;
 const MINUTE_MS: u64 = 60_000;
@@ -89,17 +93,16 @@ fn event(source_id: &str, session: &str, sequence: u64, evidence: Evidence) -> N
     .expect("event")
 }
 
-fn present(txid: String, vsize: u64, fee_sats: u64) -> Evidence {
-    Evidence::MempoolReconciled {
+fn state_entry(txid: String, vsize: u64, fee_sats: u64) -> SourceReplicaEntry {
+    SourceReplicaEntry::new(
         txid,
-        membership: ReconciledMembership::Present {
-            facts: MempoolEntryFacts {
-                vsize,
-                fee_sats,
-                entered_at_ms: AS_OF_MS - 300_000,
-            },
+        MempoolEntryFacts {
+            vsize,
+            fee_sats,
+            entered_at_ms: AS_OF_MS - 300_000,
         },
-    }
+    )
+    .expect("state entry")
 }
 
 fn p2p(transaction: &Transaction) -> Evidence {
@@ -117,7 +120,7 @@ fn p2p(transaction: &Transaction) -> Evidence {
 /// A three-source staged fork over `strict` (subset), `mid`, and `loose`
 /// (superset):
 /// - `pay` is shared by all three.
-/// - `shared_await` is a member of all three but awaits RPC facts in `loose`.
+/// - `shared_second` is a second member of all three.
 /// - `mid_data` is relayed by `mid` and `loose` but filtered by `strict`
 ///   (added at the strict -> mid stage).
 /// - `loose_data` is relayed only by `loose` (added at the mid -> loose stage).
@@ -130,66 +133,55 @@ fn fork_store() -> (tempfile::TempDir, Router) {
     let pay_txid = pay.compute_txid().to_string();
     let mid_data_txid = mid_data.compute_txid().to_string();
     let loose_data_txid = loose_data.compute_txid().to_string();
-    let shared_await_txid = txid(0xa1);
+    let shared_second_txid = txid(0xa1);
     let strict_only_txid = txid(0xb2);
 
-    let events = vec![
-        // strict: the shared payment, the shared awaiting member (present here),
-        // and its own transaction the more-permissive sources never saw.
-        event(
-            "strict",
-            "strict-s",
-            1,
-            present(pay_txid.clone(), 200, 1_800),
-        ),
-        event(
-            "strict",
-            "strict-s",
-            2,
-            present(shared_await_txid.clone(), 180, 900),
-        ),
-        event("strict", "strict-s", 3, present(strict_only_txid, 210, 700)),
-        // mid: the shared payment, the shared awaiting member, and the data
-        // carrier strict filtered out.
-        event("mid", "mid-s", 1, present(pay_txid.clone(), 200, 2_000)),
-        event(
-            "mid",
-            "mid-s",
-            2,
-            present(shared_await_txid.clone(), 180, 950),
-        ),
-        event(
-            "mid",
-            "mid-s",
-            3,
-            present(mid_data_txid.clone(), 600, 6_000),
-        ),
-        // loose: observes every shared and added tx's bytes so classification
-        // derives, holds the shared awaiting member without RPC facts, and
-        // additionally relays loose_data.
+    let evidence = vec![
+        // Loose observes every shared and added transaction's bytes so
+        // intrinsic classification derives independently of membership.
         event("loose", "loose-s", 1, p2p(&pay)),
-        event("loose", "loose-s", 2, present(pay_txid, 200, 2_100)),
         event("loose", "loose-s", 3, p2p(&mid_data)),
-        event("loose", "loose-s", 4, present(mid_data_txid, 600, 6_200)),
         event("loose", "loose-s", 5, p2p(&loose_data)),
-        event("loose", "loose-s", 6, present(loose_data_txid, 550, 5_500)),
-        event(
-            "loose",
-            "loose-s",
-            7,
-            Evidence::MempoolAdded {
-                txid: shared_await_txid,
-            },
-        ),
     ];
 
     let temporary = tempfile::tempdir().expect("temporary directory");
     let database = temporary.path().join("atlas.db");
     Store::migrate(&database).expect("migrate");
     let store = Store::open(database).expect("open");
-    for event in &events {
+    for event in &evidence {
         store.ingest(event).expect("ingest");
     }
+    install_checkpoint(
+        &store,
+        "strict",
+        AS_OF_MS - 1_000,
+        vec![
+            state_entry(pay_txid.clone(), 200, 1_800),
+            state_entry(shared_second_txid.clone(), 180, 900),
+            state_entry(strict_only_txid, 210, 700),
+        ],
+    );
+    install_checkpoint(
+        &store,
+        "mid",
+        AS_OF_MS - 1_000,
+        vec![
+            state_entry(pay_txid.clone(), 200, 2_000),
+            state_entry(shared_second_txid.clone(), 180, 950),
+            state_entry(mid_data_txid.clone(), 600, 6_000),
+        ],
+    );
+    install_checkpoint(
+        &store,
+        "loose",
+        AS_OF_MS - 1_000,
+        vec![
+            state_entry(pay_txid, 200, 2_100),
+            state_entry(shared_second_txid, 180, 975),
+            state_entry(mid_data_txid, 600, 6_200),
+            state_entry(loose_data_txid, 550, 5_500),
+        ],
+    );
     (temporary, router_with_clock(store, || AS_OF_MS))
 }
 
@@ -246,16 +238,15 @@ async fn three_source_comparison_reports_staged_deltas_and_shared_intersection()
     );
     assert_eq!(comparison.as_of_ms, AS_OF_MS);
 
-    // The shared intersection is the shared payment (present) plus the shared
-    // awaiting-RPC member, which is counted separately and never given a vsize.
+    // The shared intersection contains both fact-bearing shared transactions.
     assert_eq!(
         comparison.shared.present,
         AggregateBin {
-            count: 1,
-            vsize: 200
+            count: 2,
+            vsize: 380
         }
     );
-    assert_eq!(comparison.shared.awaiting_rpc.count, 1);
+    assert_eq!(comparison.shared.awaiting_rpc.count, 0);
     let shared_behavior = behavior_bins(&comparison.shared.histograms);
     assert_eq!(shared_behavior[bin_for(&comparison, 0, "payment")].count, 1);
 
@@ -273,7 +264,7 @@ async fn three_source_comparison_reports_staged_deltas_and_shared_intersection()
         .collect();
     assert_eq!(
         totals,
-        vec![("strict", 3, 0), ("mid", 3, 0), ("loose", 3, 1)]
+        vec![("strict", 3, 0), ("mid", 3, 0), ("loose", 4, 0)]
     );
 
     assert_eq!(comparison.stages.len(), 2);
@@ -344,8 +335,7 @@ async fn two_source_comparison_has_one_stage_over_the_leading_pair() {
             .collect::<Vec<_>>(),
         vec!["strict", "mid"]
     );
-    // strict and mid both carry the payment and the shared awaiting member with
-    // facts, so the intersection has two present members and none awaiting.
+    // Strict and mid both carry two shared fact-bearing transactions.
     assert_eq!(
         comparison.shared.present,
         AggregateBin {

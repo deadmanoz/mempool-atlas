@@ -1,4 +1,4 @@
-import { parseSourceHealth } from "./api";
+import { parseReplicaCursor, parseSourceHealth } from "./api";
 import {
   isFiniteNumber,
   isNonEmptyString,
@@ -178,14 +178,15 @@ export const parseSourcesResponse = (value: unknown): SourceDescriptor[] => {
       !isRecord(entry) ||
       typeof entry.source_id !== "string" ||
       entry.source_id.trim().length === 0 ||
-      !isNonNegativeInteger(entry.last_seen_at_ms) ||
+      !isNonNegativeInteger(entry.state_observed_at_ms) ||
       !isNonNegativeInteger(entry.membership_count)
     ) {
       throw new TypeError(`Invalid source descriptor at index ${index}`);
     }
     return {
       source_id: entry.source_id,
-      last_seen_at_ms: entry.last_seen_at_ms,
+      state_cursor: parseReplicaCursor(entry.state_cursor),
+      state_observed_at_ms: entry.state_observed_at_ms,
       membership_count: entry.membership_count,
     };
   });

@@ -1,43 +1,47 @@
 # Mempool Atlas
 
-Mempool Atlas lets you explore one Bitcoin node's observed mempool. Its MVP includes server-side, extensible transaction classification. An optional Core and Knots comparison workspace supports the 2026 fork-monitoring work as a read-time derived view over independent source snapshots rather than the core product model.
+Mempool Atlas lets you explore one Bitcoin node's current mempool. Its primary product is a source-scoped aggregate workbench, with an optional read-time comparison across independent sources. Absence from one source is never presented as proof of rejection, filtering, or relay causality.
 
-The project treats five claims independently: a node received a transaction, admitted it, currently holds it, organically rejected it, or produced a classifier result. In particular, absence from one mempool is not labelled as rejection without supporting evidence.
+## Current architecture
 
-## Initial architecture
+The first production-shaped deployment is deliberately state-only. It proves bounded current-state convergence before peer evidence is reintroduced.
 
 ```text
-node + peer-observer + verbose RPC
-              |
-         atlas-agent
-      SQLite durable outbox
-  single live / bounded RPC batches
-              |
-         atlas-server
-   source-labelled event ledger
-  source-partitioned membership + facts
-  raw variants -> shape + classifications
-       capture integrity + rejections
-              |
- source discovery + source-scoped JSON API
- membership inspector | aggregate summary
- rejection window     | comparison aggregates
-              |
- aggregate single-source workbench (primary)
- Canvas membership inspector + optional comparison
+Bitcoin Core or Knots
+  getrawmempool true
+          |
+          v
+atlas-agent, one per source
+  persisted epoch + revision
+  current fact-bearing membership
+  coalesced dirty set
+  one frozen delta or checkpoint
+          |
+          | POST /api/v1/state
+          v
+atlas-server
+  at most one active + one staging generation per source
+  verify checkpoint counts, chunks, and digest
+  atomically activate complete generations
+          |
+          +--> single-source snapshot and aggregate summary
+          +--> read-time comparison across independent sources
+          |
+          v
+dependency-free browser workbench and inspector
 ```
 
-RPC reconciliation is the authoritative current-membership plane. peer-observer adds low-latency admission, removal, replacement, rejection, peer, and raw-transaction evidence. On each node, `atlas-agent` subscribes to peer-observer's `mempool` and `netmsg` NATS subjects, persists supported observations in a source-bound SQLite outbox, and continuously reconciles its effective local projection with verbose `getrawmempool`. The agent retains the current common Core and Knots subset: virtual size, exact base fee in satoshis, and the node-reported mempool entry time. A peer-observer admission can be visible while those RPC facts are still pending.
+RPC is the sole authority for current membership. Each successful full observation retains the common Core and Knots facts: virtual size, exact base fee in integer satoshis, and node-reported mempool entry time. The first complete observation, including an empty mempool, establishes revision 1. A changed snapshot advances the source revision once; an unchanged snapshot refreshes observation time without inventing a membership revision.
 
-Full mode preserves all supported mempool NATS evidence. P2P transaction capture defaults to explicitly inbound observations with `ATLAS_P2P_POLICY=inbound`, preserving peer evidence from before node admission or rejection; use `all` only for a bounded P2P transaction relay diagnostic. This reduces outbound relay fan-out before persistence. It is not transaction deduplication, and the observation model remains able to retain every raw peer sighting when requested. Periodic capture accounting reports persisted and policy-suppressed observations alongside the pending outbox depth.
+The node-local `SourceReplica` stores the latest complete snapshot and a coalesced dirty record per changed txid. Healthy changes are delivered as sorted deltas from an acknowledged base revision. Dirty pressure, bootstrap, database reset, or a server cursor conflict produces a full checkpoint. One action is frozen before delivery, so retries and process restarts reproduce the same payload. Newer RPC observations may continue while that action is in flight.
 
-Delivery is strict FIFO across capture sessions. Live and other non-reconciliation evidence uses the single-event endpoint. A contiguous prefix of `mempool_reconciled` events is delivered in an atomic batch of at most 512 events and 4 MiB, without coalescing or replacing their individual identities. The agent removes a single event or whole batch only after Atlas returns HTTP 202 with complete, same-order acknowledgements. Non-202 diagnostics retain a safely rendered prefix of at most 1,024 response bytes. Transport failures, HTTP 408, 425, 429, and 5xx responses use deterministic equal-jitter exponential backoff up to a configured maximum; other statuses and invalid acknowledgements enter the maximum retry band immediately. Both classes retain the unchanged FIFO head. Delivery keeps running while NATS or RPC is unavailable, and the two inputs retry independently. An explicit `rpc-only` mode provides the guaranteed operating floor when peer-observer is unavailable.
+The server stages checkpoints outside the reader-visible generation. It verifies declared entries, contiguous chunks, and the canonical whole-snapshot digest before replacing the active generation in one SQLite transaction. A different begin may replace abandoned staging only by naming that exact checkpoint ID, which prevents delayed requests from evicting newer staging work. Product reads use active SourceReplica views only, so a partial checkpoint and legacy experimental evidence can never leak into current membership.
 
-The central service co-locates data without merging node state. Events retain their source identity, current membership and capture integrity are maintained independently for each source, and the primary read returns exactly one source snapshot. The optional comparison workspace derives membership-set regions at read time from two to four source projections and returns only aggregates. A transaction present in one source and absent from another is a set difference, not proof of filtering, rejection, or relay causality. Atlas does not maintain a canonical combined mempool, and rejection evidence remains a separate per-source read model.
+This fixes the failure mode learned from the experimental canaries: a central outage no longer creates a mutation log proportional to outage duration. Local state is bounded by current membership, a small coalesced dirty set, and at most one frozen snapshot. Before requesting verbose RPC state, the agent checks `getmempoolinfo.size` against `ATLAS_MAX_MEMPOOL_ENTRIES`, then decodes directly into one validated snapshot map and checks the limit again. The main agent SQLite file defaults to a 1 GiB `max_page_count` circuit breaker. Transient WAL peak, the RPC transport's buffered response, and filesystem free-space reserve still require measured deployment guards before the 2 GiB source-VPS envelope is considered complete.
 
-Current status: the live node-local capture, durable outbox, fact-bearing RPC reconciliation, source-scoped SQLite/API service, aggregate workbench, on-demand Canvas inspector, server-side shape and multi-taxonomy classification, bounded rejection surface, and optional read-time comparison workspace are implemented and component-tested. The registered packs include baseline behavior heuristics, BIP-110 conformance, and data-carrying-protocol fingerprints.
+Peer-observer decoding, classifiers, and the old evidence reducer remain available only as experimental building blocks. The production agent has no NATS or capture mode, and the production server does not mount `/api/v1/events` or `/api/v1/events/batch`. Reads therefore report capture and rejection evidence as `not_collected`; classifications without prior derived bytes are honestly `unknown`. Bounded recent evidence and verified off-VPS forensic archives are separate future data products, not extensions of the state FIFO.
 
-See the [system architecture visualisation](docs/mempool-atlas-system.html) for the implemented live data path, primary single-source aggregate experience, source-partitioned storage, classification and rejection reads, optional derived comparison, and the distinction between peer-observer evidence and RPC-authoritative membership.
+See the [system architecture visualisation](docs/mempool-atlas-system.html), [architecture guide](docs/architecture.md), and [ADR 0002](docs/adr/0002-separate-source-state-from-bounded-evidence.md).
 
 ## Development
 
@@ -51,25 +55,44 @@ just lint
 just proto-check
 ```
 
-Run `just test-baseline-scale` for the explicit release-mode acceptance test that reconciles and delivers a 200,000-transaction baseline.
+`just test-baseline-scale` runs the release-mode acceptance path with a 200,000-transaction agent checkpoint, real HTTP reduction, database reopen, and active-read verification.
 
-Use `just seed-forks` to load the deterministic `knots`, `core`, and `libre-relay` comparison dataset through the real batch-ingest path. Its order is strictest to most permissive for the comparison UI, but the resulting membership-set differences are not evidence of rejection or relay causality.
+Run the central API with `just dev`, and run Vite in a second terminal with `just web-dev`. `just seed-dev` refreshes a deterministic 20,000-transaction source through the real checkpoint endpoint. `just seed-forks` refreshes deterministic `knots`, `core`, and `libre-relay` snapshots for the optional comparison workspace. Re-running either command replaces source state rather than growing a history.
 
-Database changes must use the backup-first `just` targets. Fresh databases use `just db-migrate-dev` and `just agent-db-migrate-dev`. The central database is schema generation 6, including the partial rejection lookup index; the source-bound agent outbox remains generation 3. Both deliberately reject stale generations. For an existing preproduction deployment, stop Atlas and every agent, run `just db-reinitialize-deploy` centrally and `just agent-db-reinitialize-deploy` for every source, then restart matching binaries. Reinitialization preserves a verified backup before replacing each database; central state and all source outboxes must be replaced together.
+The read API provides:
 
-Run the central API with `just dev`, and run the Vite client in a second terminal with `just web-dev`.
+- `GET /api/v1/sources`
+- `GET /api/v1/sources/{source_id}/mempool`
+- `GET /api/v1/sources/{source_id}/mempool/summary`
+- `GET /api/v1/sources/{source_id}/rejections`
+- `GET /api/v1/sources/compare?sources=a,b,c`
 
-Select the browser source with `?source=<source-id>` or set `VITE_ATLAS_SOURCE_ID` when building the web client. The read API provides source discovery at `GET /api/v1/sources`, the full membership inspector at `GET /api/v1/sources/{source_id}/mempool`, the primary aggregate workbench at `GET /api/v1/sources/{source_id}/mempool/summary`, and the separate rejection window at `GET /api/v1/sources/{source_id}/rejections`. `GET /api/v1/sources/compare?sources=a,b,c` derives aggregate membership-set regions for two to four ordered sources without creating a combined mempool. The Canvas inspector plots membership in individual base-fee-rate and age bands, scales glyph area by virtual size, and shows entries awaiting RPC facts separately. It does not claim to represent ancestor-package mining priority.
+Select the browser source with `?source=<source-id>` or set `VITE_ATLAS_SOURCE_ID` when building the client.
 
-For each node, put its source-specific settings in an untracked `.env`, then initialize and run the agent with:
+## Agent configuration
+
+Initialize and run one persistent agent database per source:
 
 ```bash
 just agent-db-migrate-dev
 just agent-dev
 ```
 
-`ATLAS_SOURCE_ID`, `ATLAS_SERVER_URL`, `ATLAS_RPC_USERNAME`, and `ATLAS_RPC_PASSWORD` are required. `ATLAS_AGENT_MODE` defaults to `full`; set it to `rpc-only` to omit NATS capture. In full mode, `ATLAS_P2P_POLICY` accepts `inbound` or `all` and defaults to `inbound`. The agent database defaults to `var/atlas-agent.db` and must live on persistent storage. Use one writer and one database per source, and do not delete the database as a recovery shortcut. A protocol for explicitly resetting central source state after agent database loss is deferred.
+Required settings are `ATLAS_SOURCE_ID`, `ATLAS_SERVER_URL`, `ATLAS_RPC_USERNAME`, and `ATLAS_RPC_PASSWORD`. The database defaults to `var/atlas-agent.db`. Useful bounds and cadence settings are:
 
-`just proto-check` expects the local peer-observer checkout at `../peer-observer`; set `PEER_OBSERVER_REPO` to override that location.
+- `ATLAS_RPC_POLL_SECONDS=5`
+- `ATLAS_MAX_MEMPOOL_ENTRIES=1000000`
+- `ATLAS_MAX_DIRTY_MUTATIONS=4096`
+- `ATLAS_MAX_DIRTY_BYTES=1048576`
+- `ATLAS_CHECKPOINT_CHUNK_ENTRIES=512`
+- `ATLAS_AGENT_DB_MAX_BYTES=1073741824`
 
-See `AGENTS.md` for repository conventions. Active implementation work is tracked in Beads.
+An ordinary restart retains the source epoch. Reinitializing or losing the database creates a new epoch; the next checkpoint explicitly replaces the server's active cursor. Do not hand-delete a production database as an operational shortcut.
+
+## Database safety
+
+All database operations use backup-first `just` targets. The clean preproduction generations are central schema 7 and agent schema 4; stale generations are rejected rather than migrated in place.
+
+For a preproduction reset, stop the relevant processes, run `just db-reinitialize-deploy` centrally and `just agent-db-reinitialize-deploy` for each source, then restart matching binaries. Reinitialization preserves a verified backup before replacement.
+
+`just proto-check` expects the local peer-observer checkout at `../peer-observer`; set `PEER_OBSERVER_REPO` to override it. Repository conventions and the detailed runtime contract are indexed from `AGENTS.md`.

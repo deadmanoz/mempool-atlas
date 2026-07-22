@@ -4,6 +4,7 @@ import { parseSourceRejections } from "./rejections-api";
 const validRejections = (): Record<string, unknown> => ({
   source_id: "source-a",
   as_of_ms: 1_752_710_400_000,
+  availability: { status: "available" },
   window: {
     count: 2,
     oldest_at_ms: 1_752_707_280_000,
@@ -54,6 +55,7 @@ describe("parseSourceRejections", () => {
   it("accepts a full rejections payload", () => {
     const rejections = parseSourceRejections(validRejections());
     expect(rejections.source_id).toBe("source-a");
+    expect(rejections.availability.status).toBe("available");
     expect(rejections.window.count).toBe(2);
     expect(rejections.window.oldest_at_ms).toBe(1_752_707_280_000);
     expect(rejections.window.newest_at_ms).toBe(1_752_707_400_000);
@@ -78,6 +80,7 @@ describe("parseSourceRejections", () => {
     const rejections = parseSourceRejections({
       source_id: "source-a",
       as_of_ms: 1_752_710_400_000,
+      availability: { status: "available" },
       window: { count: 0 },
       by_reason: [],
       attribution: {
@@ -92,6 +95,33 @@ describe("parseSourceRejections", () => {
     expect(rejections.window.newest_at_ms).toBeUndefined();
     expect(rejections.next_cursor).toBeUndefined();
     expect(rejections.recent).toEqual([]);
+  });
+
+  it("accepts an honest not-collected envelope", () => {
+    const rejections = parseSourceRejections({
+      source_id: "source-a",
+      as_of_ms: 1_752_710_400_000,
+      availability: { status: "not_collected" },
+      window: { count: 0 },
+      by_reason: [],
+      attribution: {
+        classified_count: 0,
+        unclassified_count: 0,
+        taxonomies: [],
+      },
+      recent: [],
+    });
+
+    expect(rejections.availability.status).toBe("not_collected");
+    expect(rejections.window.count).toBe(0);
+  });
+
+  it("rejects observations when evidence is marked not collected", () => {
+    const payload = validRejections();
+    payload.availability = { status: "not_collected" };
+    expect(() => parseSourceRejections(payload)).toThrow(
+      "Rejection evidence marked not_collected must not contain observations",
+    );
   });
 
   it("distinguishes a literal other reason from the synthetic rollup", () => {
@@ -110,6 +140,18 @@ describe("parseSourceRejections", () => {
   });
 
   it.each([
+    [
+      "a missing availability",
+      (payload: Record<string, unknown>): void => {
+        delete payload.availability;
+      },
+    ],
+    [
+      "an unknown availability status",
+      (payload: Record<string, unknown>): void => {
+        payload.availability = { status: "unknown" };
+      },
+    ],
     [
       "a negative window count",
       (payload: Record<string, unknown>): void => {

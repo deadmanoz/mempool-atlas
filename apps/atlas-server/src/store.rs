@@ -6,9 +6,9 @@ use atlas_classifiers::{
     ClassificationInput, ClassificationStatus, TransactionShape, registered_packs,
 };
 use atlas_model::{
-    AggregateBin, CaptureGapCertainty, CaptureStatus, Evidence, IngestBatchRequest, IngestStatus,
-    MembershipMutation, MempoolEntry, MempoolEntryFacts, MempoolEntryFactsStatus, MempoolSnapshot,
-    NormalizedEvent, ScriptType, SourceDescriptor, SourceHealth, SourceId,
+    AggregateBin, CaptureGapCertainty, CaptureStatus, CheckpointId, Evidence, IngestBatchRequest,
+    IngestStatus, MempoolEntry, MempoolEntryFacts, MempoolEntryFactsStatus, MempoolSnapshot,
+    NormalizedEvent, ReplicaCursor, ScriptType, SourceDescriptor, SourceHealth, SourceId,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter};
 use thiserror::Error;
@@ -18,8 +18,9 @@ use crate::comparison::{ComparisonInputs, ComparisonOutcome, SourceTotal, StageI
 use crate::rejections::{REJECTION_WINDOW_MAX, RejectionCursor, RejectionInputs, RejectionRow};
 use crate::summary::{FactsRow, RegionFacts, ShapeRow, SourceMembershipFacts};
 
-const LATEST_SCHEMA_VERSION: i64 = 6;
+const LATEST_SCHEMA_VERSION: i64 = 7;
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
+const MIGRATION_2: &str = include_str!("../migrations/0002_source_replica.sql");
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -34,6 +35,8 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("event model error: {0}")]
     Model(#[from] atlas_model::ModelError),
+    #[error("source replica model error: {0}")]
+    SourceReplicaModel(#[from] atlas_model::SourceReplicaError),
     #[error("event serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("database schema is at version {found}, expected {expected}")]
@@ -44,6 +47,23 @@ pub enum StoreError {
     InvalidRawTransaction { event_id: String },
     #[error("event {event_id} conflicts with an already ingested event")]
     ConflictingEvent { event_id: String },
+    #[error("{code}: {message}")]
+    SourceReplicaConflict {
+        code: &'static str,
+        message: String,
+        active_cursor: Option<ReplicaCursor>,
+        staging_checkpoint_id: Option<CheckpointId>,
+    },
+    #[error("capacity_exceeded: {message}")]
+    SourceReplicaCapacity {
+        message: String,
+        active_cursor: Option<ReplicaCursor>,
+    },
+    #[error("invalid_state_request: {message}")]
+    InvalidSourceReplica {
+        message: String,
+        active_cursor: Option<ReplicaCursor>,
+    },
 }
 
 impl Store {
@@ -81,6 +101,7 @@ impl Store {
         }
         let transaction = connection.transaction()?;
         transaction.execute_batch(MIGRATION_1)?;
+        transaction.execute_batch(MIGRATION_2)?;
         transaction.pragma_update(None, "user_version", LATEST_SCHEMA_VERSION)?;
         transaction.commit()?;
         Ok(())
@@ -126,9 +147,8 @@ impl Store {
 
         let memberships = {
             let mut statement = transaction.prepare(
-                "SELECT txid, updated_at_ms, evidence_event_id,
-                        vsize, fee_sats, entered_at_ms
-                 FROM current_membership
+                "SELECT txid, vsize, fee_sats, entered_at_ms
+                 FROM active_source_replica_membership
                  WHERE source_id = ?1
                  ORDER BY txid",
             )?;
@@ -147,8 +167,10 @@ impl Store {
         }))
     }
 
-    /// Reads only what the aggregate summary needs: source health, the fact
-    /// triples of fact-bearing memberships, and the awaiting-RPC count. The
+    /// Reads only what the aggregate summary needs: source health and the fact
+    /// triples of active memberships. The legacy awaiting-RPC count is always
+    /// zero because SourceReplica membership comes only from complete RPC
+    /// observations. The
     /// fact-row and verdict gathering is shared with the comparison region
     /// paths through [`gather_region_facts`].
     pub fn mempool_facts(
@@ -175,29 +197,52 @@ impl Store {
     pub fn sources(&self) -> Result<Vec<SourceDescriptor>, StoreError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT source.source_id, source.last_seen_at_ms, COUNT(current_membership.txid)
-             FROM source
-             LEFT JOIN current_membership USING (source_id)
-             GROUP BY source.source_id, source.last_seen_at_ms
-             ORDER BY source.source_id",
+            "SELECT replica.source_id, replica.epoch_id, replica.revision,
+                    replica.state_observed_at_ms, COUNT(membership.txid)
+             FROM active_source_replica AS replica
+             LEFT JOIN active_source_replica_membership AS membership
+               ON membership.source_id = replica.source_id
+              AND membership.generation_id = replica.generation_id
+             GROUP BY replica.source_id, replica.epoch_id, replica.revision,
+                      replica.state_observed_at_ms
+             ORDER BY replica.source_id",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                nonnegative_integer_from_row(row.get(1)?, 1)?,
+                row.get::<_, String>(1)?,
                 nonnegative_integer_from_row(row.get(2)?, 2)?,
+                nonnegative_integer_from_row(row.get(3)?, 3)?,
+                nonnegative_integer_from_row(row.get(4)?, 4)?,
             ))
         })?;
         let mut sources = Vec::new();
         for row in rows {
-            let (source_id, last_seen_at_ms, membership_count) = row?;
+            let (source_id, epoch_id, revision, state_observed_at_ms, membership_count) = row?;
             sources.push(SourceDescriptor {
                 source_id: SourceId::new(source_id)?,
-                last_seen_at_ms,
+                state_cursor: ReplicaCursor::new(
+                    atlas_model::SourceEpochId::new(epoch_id)?,
+                    revision,
+                )?,
+                state_observed_at_ms,
                 membership_count,
             });
         }
         Ok(sources)
+    }
+
+    /// Returns whether one reader-visible SourceReplica is active for a
+    /// source. Evidence-ledger rows alone do not establish a known source.
+    pub fn active_source_exists(&self, source_id: &SourceId) -> Result<bool, StoreError> {
+        let connection = self.connect()?;
+        Ok(connection.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM active_source_replica WHERE source_id = ?1
+             )",
+            [source_id.as_str()],
+            |row| row.get(0),
+        )?)
     }
 
     /// Reads the rejection read model inputs for one source: the most recent
@@ -215,7 +260,9 @@ impl Store {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         let known = transaction.query_row(
-            "SELECT EXISTS (SELECT 1 FROM source WHERE source_id = ?1)",
+            "SELECT EXISTS (
+                SELECT 1 FROM active_source_replica WHERE source_id = ?1
+             )",
             [source_id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
@@ -277,7 +324,7 @@ impl Store {
     /// [`ComparisonOutcome::UnknownSource`] naming the first requested source
     /// that does not exist, mirroring the not-found contract of the
     /// single-source read paths. All set math is SQL over the
-    /// source-partitioned `current_membership`; only region aggregates and
+    /// active SourceReplica memberships; only region aggregates and
     /// per-source totals are gathered, never a combined cross-source mempool.
     pub fn source_comparison(&self, sources: &[SourceId]) -> Result<ComparisonOutcome, StoreError> {
         let mut connection = self.connect()?;
@@ -285,7 +332,9 @@ impl Store {
 
         for source in sources {
             let known = transaction.query_row(
-                "SELECT EXISTS (SELECT 1 FROM source WHERE source_id = ?1)",
+                "SELECT EXISTS (
+                    SELECT 1 FROM active_source_replica WHERE source_id = ?1
+                 )",
                 [source.as_str()],
                 |row| row.get::<_, bool>(0),
             )?;
@@ -355,7 +404,7 @@ impl Store {
         }))
     }
 
-    fn connect(&self) -> Result<Connection, StoreError> {
+    pub(crate) fn connect(&self) -> Result<Connection, StoreError> {
         open_existing_connection(&self.path)
     }
 }
@@ -393,7 +442,7 @@ impl<'a> RegionSpec<'a> {
             let index = params.len();
             clause.push_str(&format!(
                 " AND cm.txid IN \
-                 (SELECT txid FROM current_membership WHERE source_id = ?{index})"
+                 (SELECT txid FROM active_source_replica_membership WHERE source_id = ?{index})"
             ));
         }
         if let Some(source) = self.absent_from {
@@ -401,15 +450,16 @@ impl<'a> RegionSpec<'a> {
             let index = params.len();
             clause.push_str(&format!(
                 " AND cm.txid NOT IN \
-                 (SELECT txid FROM current_membership WHERE source_id = ?{index})"
+                 (SELECT txid FROM active_source_replica_membership WHERE source_id = ?{index})"
             ));
         }
         (clause, params)
     }
 }
 
-/// Gathers the fact-bearing rows and awaiting-RPC count of one region: the
-/// designated facts source's `current_membership` rows restricted by `spec`,
+/// Gathers the fact-bearing rows of one region. SourceReplica has complete RPC
+/// facts for every membership, so the legacy awaiting-RPC count remains zero.
+/// The designated facts source's active rows are restricted by `spec`,
 /// each joined to its intrinsic shape facts and its stored classifier verdicts
 /// folded on. Shared by [`Store::mempool_facts`] (whole membership) and the
 /// comparison region paths so the fact-row and verdict SQL lives in one place.
@@ -430,7 +480,7 @@ fn gather_region_facts(
                     transaction_shape.total_output_sats, transaction_shape.input_count,
                     transaction_shape.output_count, transaction_shape.script_type,
                     cm.txid
-             FROM current_membership AS cm
+             FROM active_source_replica_membership AS cm
              LEFT JOIN transaction_shape ON transaction_shape.txid = cm.txid
              WHERE {where_clause}"
         );
@@ -450,7 +500,7 @@ fn gather_region_facts(
         let verdicts_sql = format!(
             "SELECT cm.txid, transaction_classification.taxonomy,
                     transaction_classification.verdict
-             FROM current_membership AS cm
+             FROM active_source_replica_membership AS cm
              JOIN transaction_classification
                  ON transaction_classification.txid = cm.txid
              WHERE {where_clause}"
@@ -459,8 +509,6 @@ fn gather_region_facts(
         let mut rows = statement.query(params_from_iter(params.iter()))?;
         while let Some(row) = rows.next()? {
             let txid = row.get::<_, String>(0)?;
-            // Verdicts for awaiting-RPC memberships have no fact row to land on;
-            // they surface once RPC facts arrive.
             if let Some(&index) = row_index_by_txid.get(&txid) {
                 available[index]
                     .verdicts
@@ -474,16 +522,13 @@ fn gather_region_facts(
     })
 }
 
-/// One source's whole-membership totals: the fact-bearing count and summed
-/// virtual size, plus the count of members still awaiting RPC facts.
+/// One source's whole active-membership totals. SourceReplica members always
+/// carry RPC facts, so the legacy awaiting-RPC count is zero.
 fn source_total(transaction: &Transaction<'_>, source_id: &str) -> Result<SourceTotal, StoreError> {
     transaction
         .query_row(
-            "SELECT
-                COALESCE(SUM(CASE WHEN vsize IS NOT NULL THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(vsize), 0),
-                COALESCE(SUM(CASE WHEN vsize IS NULL THEN 1 ELSE 0 END), 0)
-             FROM current_membership
+            "SELECT COUNT(*), COALESCE(SUM(vsize), 0)
+             FROM active_source_replica_membership
              WHERE source_id = ?1",
             [source_id],
             |row| {
@@ -492,7 +537,7 @@ fn source_total(transaction: &Transaction<'_>, source_id: &str) -> Result<Source
                         count: nonnegative_integer_from_row(row.get(0)?, 0)?,
                         vsize: nonnegative_integer_from_row(row.get(1)?, 1)?,
                     },
-                    awaiting_rpc_count: nonnegative_integer_from_row(row.get(2)?, 2)?,
+                    awaiting_rpc_count: 0,
                 })
             },
         )
@@ -507,17 +552,9 @@ fn query_source_health(
 ) -> Result<Option<SourceHealth>, StoreError> {
     Ok(transaction
         .query_row(
-            "SELECT
-                source.last_seen_at_ms,
-                source_capture_state.first_gap_at_ms,
-                source_capture_state.latest_gap_at_ms,
-                source_capture_state.marker_count,
-                source_capture_state.strongest_certainty,
-                source_capture_state.latest_input,
-                source_capture_state.latest_reason
-             FROM source
-             LEFT JOIN source_capture_state USING (source_id)
-             WHERE source.source_id = ?1",
+            "SELECT epoch_id, revision, state_observed_at_ms
+             FROM active_source_replica
+             WHERE source_id = ?1",
             [source_id.as_str()],
             source_health_from_row,
         )
@@ -700,10 +737,6 @@ fn apply_evidence(
     transaction: &Transaction<'_>,
     event: &NormalizedEvent,
 ) -> Result<(), StoreError> {
-    for mutation in event.membership_mutations() {
-        apply_membership_mutation(transaction, event, mutation)?;
-    }
-
     if let Evidence::P2pTransaction {
         txid,
         wtxid,
@@ -875,94 +908,16 @@ const fn classification_status_as_str(status: ClassificationStatus) -> &'static 
     }
 }
 
-fn apply_membership_mutation(
-    transaction: &Transaction<'_>,
-    event: &NormalizedEvent,
-    mutation: MembershipMutation,
-) -> Result<(), StoreError> {
-    match mutation {
-        MembershipMutation::Absent { txid } => {
-            transaction.execute(
-                "DELETE FROM current_membership
-                 WHERE source_id = ?1 AND txid = ?2",
-                params![event.source_id.as_str(), txid],
-            )?;
-        }
-        MembershipMutation::Present { txid, facts: None } => {
-            transaction.execute(
-                "INSERT INTO current_membership (
-                    source_id, txid, updated_at_ms, evidence_event_id
-                 ) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (source_id, txid) DO UPDATE SET
-                    updated_at_ms = excluded.updated_at_ms,
-                    evidence_event_id = excluded.evidence_event_id",
-                params![
-                    event.source_id.as_str(),
-                    txid,
-                    to_sqlite_integer(event.observed_at_ms, "observed_at_ms")?,
-                    event.event_id,
-                ],
-            )?;
-        }
-        MembershipMutation::Present {
-            txid,
-            facts: Some(facts),
-        } => {
-            transaction.execute(
-                "INSERT INTO current_membership (
-                    source_id, txid, updated_at_ms, evidence_event_id,
-                    vsize, fee_sats, entered_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT (source_id, txid) DO UPDATE SET
-                    updated_at_ms = excluded.updated_at_ms,
-                    evidence_event_id = excluded.evidence_event_id,
-                    vsize = excluded.vsize,
-                    fee_sats = excluded.fee_sats,
-                    entered_at_ms = excluded.entered_at_ms",
-                params![
-                    event.source_id.as_str(),
-                    txid,
-                    to_sqlite_integer(event.observed_at_ms, "observed_at_ms")?,
-                    event.event_id,
-                    to_sqlite_integer(facts.vsize, "vsize")?,
-                    to_sqlite_integer(facts.fee_sats, "fee_sats")?,
-                    to_sqlite_integer(facts.entered_at_ms, "entered_at_ms")?,
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
 fn mempool_entry_from_row(row: &rusqlite::Row<'_>) -> Result<MempoolEntry, rusqlite::Error> {
-    let vsize = row.get::<_, Option<i64>>(3)?;
-    let fee_sats = row.get::<_, Option<i64>>(4)?;
-    let entered_at_ms = row.get::<_, Option<i64>>(5)?;
-    let facts = match (vsize, fee_sats, entered_at_ms) {
-        (None, None, None) => MempoolEntryFactsStatus::AwaitingRpc,
-        (Some(vsize), Some(fee_sats), Some(entered_at_ms)) => MempoolEntryFactsStatus::Available {
-            facts: MempoolEntryFacts {
-                vsize: nonnegative_integer_from_row(vsize, 3)?,
-                fee_sats: nonnegative_integer_from_row(fee_sats, 4)?,
-                entered_at_ms: nonnegative_integer_from_row(entered_at_ms, 5)?,
-            },
-        },
-        _ => {
-            return Err(rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Null,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "mempool entry contains incomplete facts",
-                )),
-            ));
-        }
-    };
     Ok(MempoolEntry {
         txid: row.get(0)?,
-        updated_at_ms: nonnegative_integer_from_row(row.get(1)?, 1)?,
-        evidence_event_id: row.get(2)?,
-        facts,
+        facts: MempoolEntryFactsStatus::Available {
+            facts: MempoolEntryFacts {
+                vsize: nonnegative_integer_from_row(row.get(1)?, 1)?,
+                fee_sats: nonnegative_integer_from_row(row.get(2)?, 2)?,
+                entered_at_ms: nonnegative_integer_from_row(row.get(3)?, 3)?,
+            },
+        },
     })
 }
 
@@ -1013,24 +968,15 @@ fn shape_row_from_row(row: &rusqlite::Row<'_>) -> Result<Option<ShapeRow>, rusql
 }
 
 fn source_health_from_row(row: &rusqlite::Row<'_>) -> Result<SourceHealth, rusqlite::Error> {
-    let last_seen_at_ms = nonnegative_integer_from_row(row.get(0)?, 0)?;
-    let first_gap_at_ms = row.get::<_, Option<i64>>(1)?;
-    let capture = if let Some(first_gap_at_ms) = first_gap_at_ms {
-        let certainty = row.get::<_, String>(4)?;
-        CaptureStatus::ContainsGaps {
-            first_gap_at_ms: nonnegative_integer_from_row(first_gap_at_ms, 1)?,
-            latest_gap_at_ms: nonnegative_integer_from_row(row.get(2)?, 2)?,
-            marker_count: nonnegative_integer_from_row(row.get(3)?, 3)?,
-            strongest_certainty: capture_gap_certainty_from_str(&certainty, 4)?,
-            latest_input: row.get(5)?,
-            latest_reason: row.get(6)?,
-        }
-    } else {
-        CaptureStatus::NoReportedGaps
-    };
+    let epoch_id = atlas_model::SourceEpochId::new(row.get::<_, String>(0)?)
+        .map_err(|error| model_conversion_from_sql(0, error))?;
+    let revision = nonnegative_integer_from_row(row.get(1)?, 1)?;
+    let state_cursor = ReplicaCursor::new(epoch_id, revision)
+        .map_err(|error| model_conversion_from_sql(1, error))?;
     Ok(SourceHealth {
-        last_seen_at_ms,
-        capture,
+        state_cursor,
+        state_observed_at_ms: nonnegative_integer_from_row(row.get(2)?, 2)?,
+        capture: CaptureStatus::NotCollected,
     })
 }
 
@@ -1041,25 +987,10 @@ const fn capture_gap_certainty_as_str(certainty: CaptureGapCertainty) -> &'stati
     }
 }
 
-fn capture_gap_certainty_from_str(
-    certainty: &str,
+pub(crate) fn nonnegative_integer_from_row(
+    value: i64,
     column: usize,
-) -> Result<CaptureGapCertainty, rusqlite::Error> {
-    match certainty {
-        "possible_loss" => Ok(CaptureGapCertainty::PossibleLoss),
-        "known_loss" => Ok(CaptureGapCertainty::KnownLoss),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(
-            column,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unsupported capture gap certainty {certainty}"),
-            )),
-        )),
-    }
-}
-
-fn nonnegative_integer_from_row(value: i64, column: usize) -> Result<u64, rusqlite::Error> {
+) -> Result<u64, rusqlite::Error> {
     u64::try_from(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             column,
@@ -1069,15 +1000,24 @@ fn nonnegative_integer_from_row(value: i64, column: usize) -> Result<u64, rusqli
     })
 }
 
-fn to_sqlite_integer(value: u64, field: &'static str) -> Result<i64, StoreError> {
+fn model_conversion_from_sql(
+    column: usize,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(error))
+}
+
+pub(crate) fn to_sqlite_integer(value: u64, field: &'static str) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| StoreError::NumericOverflow { field })
 }
 
 #[cfg(test)]
 mod tests {
     use atlas_model::{
-        CaptureGapCertainty, CaptureStatus, Evidence, NormalizedEvent, ReconciledMembership,
-        SourceSessionId,
+        CaptureGapCertainty, CaptureStatus, CheckpointBegin, CheckpointChunk, CheckpointCommit,
+        CheckpointId, Evidence, MAX_CHECKPOINT_CHUNK_ENTRIES, NormalizedEvent,
+        ReconciledMembership, SourceEpochId, SourceReplicaCommand, SourceReplicaEntry,
+        SourceReplicaRequest, SourceSessionId,
     };
     use tempfile::TempDir;
 
@@ -1117,28 +1057,86 @@ mod tests {
         }
     }
 
-    fn reconciled_present(txid: &str) -> Evidence {
-        Evidence::MempoolReconciled {
-            txid: txid.to_owned(),
-            membership: ReconciledMembership::Present { facts: facts() },
+    fn state_entry(txid: &str, facts: MempoolEntryFacts) -> SourceReplicaEntry {
+        SourceReplicaEntry::new(txid, facts).expect("state entry")
+    }
+
+    /// Installs one complete RPC-authoritative state generation through the
+    /// same begin/chunk/commit reducer used by the HTTP endpoint. Repeated
+    /// calls advance the existing source epoch by one revision.
+    fn install_state(store: &Store, source_id: &str, mut entries: Vec<SourceReplicaEntry>) {
+        entries.sort_by(|left, right| left.txid.cmp(&right.txid));
+        let source_id = SourceId::new(source_id).expect("source");
+        let active = store
+            .active_source_replica(&source_id)
+            .expect("active state read");
+        let (epoch_id, revision, observed_at_ms, replaces) = match active {
+            Some(active) => (
+                active.cursor.epoch_id.clone(),
+                active.cursor.revision + 1,
+                active.state_observed_at_ms + 1,
+                Some(active.cursor),
+            ),
+            None => (
+                SourceEpochId::new(format!("test-epoch-{source_id}")).expect("epoch"),
+                1,
+                101,
+                None,
+            ),
+        };
+        let checkpoint_id = CheckpointId::new(format!("test-checkpoint-{source_id}-{revision}"))
+            .expect("checkpoint");
+        let expected_chunks = u32::try_from(entries.len().div_ceil(MAX_CHECKPOINT_CHUNK_ENTRIES))
+            .expect("checkpoint chunk count");
+        let begin = CheckpointBegin::new(
+            checkpoint_id.clone(),
+            replaces,
+            revision,
+            observed_at_ms,
+            expected_chunks,
+            &entries,
+        )
+        .expect("checkpoint begin");
+        let request = |command| {
+            SourceReplicaRequest::new(source_id.clone(), epoch_id.clone(), command)
+                .expect("state request")
+        };
+        store
+            .apply_source_replica(&request(SourceReplicaCommand::CheckpointBegin(
+                begin.clone(),
+            )))
+            .expect("begin checkpoint");
+        for (chunk_index, entries) in entries.chunks(MAX_CHECKPOINT_CHUNK_ENTRIES).enumerate() {
+            let chunk = CheckpointChunk::new(
+                checkpoint_id.clone(),
+                u32::try_from(chunk_index).expect("chunk index"),
+                entries.to_vec(),
+            )
+            .expect("checkpoint chunk");
+            store
+                .apply_source_replica(&request(SourceReplicaCommand::CheckpointChunk(chunk)))
+                .expect("stage checkpoint");
         }
+        let commit = CheckpointCommit::new(checkpoint_id, revision, begin.content_sha256)
+            .expect("checkpoint commit");
+        store
+            .apply_source_replica(&request(SourceReplicaCommand::CheckpointCommit(commit)))
+            .expect("commit checkpoint");
     }
 
     fn comparison_txid(index: u64) -> String {
         format!("{index:064x}")
     }
 
-    fn present_with(txid: &str, vsize: u64) -> Evidence {
-        Evidence::MempoolReconciled {
-            txid: txid.to_owned(),
-            membership: ReconciledMembership::Present {
-                facts: MempoolEntryFacts {
-                    vsize,
-                    fee_sats: vsize * 2,
-                    entered_at_ms: 1_000,
-                },
+    fn state_entry_with(txid: &str, vsize: u64) -> SourceReplicaEntry {
+        state_entry(
+            txid,
+            MempoolEntryFacts {
+                vsize,
+                fee_sats: vsize * 2,
+                entered_at_ms: 1_000,
             },
-        }
+        )
     }
 
     fn added_event() -> NormalizedEvent {
@@ -1185,13 +1183,31 @@ mod tests {
         .expect("event")
     }
 
-    fn capture_status(store: &Store, source_id: &SourceId) -> CaptureStatus {
-        store
-            .mempool(source_id)
-            .expect("mempool")
-            .expect("known source")
-            .health
-            .capture
+    fn capture_projection(
+        store: &Store,
+        source_id: &SourceId,
+    ) -> Option<(u64, u64, u64, String, String, String)> {
+        let connection = store.connect().expect("connect");
+        connection
+            .query_row(
+                "SELECT first_gap_at_ms, latest_gap_at_ms, marker_count,
+                        strongest_certainty, latest_input, latest_reason
+                 FROM source_capture_state
+                 WHERE source_id = ?1",
+                [source_id.as_str()],
+                |row| {
+                    Ok((
+                        nonnegative_integer_from_row(row.get(0)?, 0)?,
+                        nonnegative_integer_from_row(row.get(1)?, 1)?,
+                        nonnegative_integer_from_row(row.get(2)?, 2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .expect("capture projection")
     }
 
     #[test]
@@ -1203,24 +1219,13 @@ mod tests {
             store.ingest(&event).expect("duplicate"),
             IngestStatus::Duplicate
         );
-        let snapshot = store
-            .mempool(&source())
-            .expect("mempool")
-            .expect("known source");
-        assert_eq!(snapshot.memberships.len(), 1);
-        assert_eq!(snapshot.memberships[0].txid, TXID);
-        assert_eq!(
-            snapshot.memberships[0].facts,
-            MempoolEntryFactsStatus::AwaitingRpc
-        );
+        assert_eq!(store.mempool(&source()).expect("mempool"), None);
     }
 
     #[test]
-    fn reconciliation_exposes_and_updates_available_facts() {
+    fn state_checkpoint_exposes_and_updates_available_facts() {
         let (_temporary, store) = test_store();
-        store
-            .ingest(&event_for("session-a", 1, reconciled_present(TXID)))
-            .expect("initial reconciliation");
+        install_state(&store, "source-a", vec![state_entry(TXID, facts())]);
         let entry = store
             .mempool(&source())
             .expect("mempool")
@@ -1236,18 +1241,7 @@ mod tests {
         let mut changed = facts();
         changed.fee_sats += 1;
         changed.entered_at_ms += 1_000;
-        store
-            .ingest(&event_for(
-                "session-a",
-                2,
-                Evidence::MempoolReconciled {
-                    txid: TXID.to_owned(),
-                    membership: ReconciledMembership::Present {
-                        facts: changed.clone(),
-                    },
-                },
-            ))
-            .expect("fact update");
+        install_state(&store, "source-a", vec![state_entry(TXID, changed.clone())]);
         let entry = store
             .mempool(&source())
             .expect("mempool")
@@ -1262,15 +1256,13 @@ mod tests {
     }
 
     #[test]
-    fn live_presence_preserves_known_facts_until_removal_and_readd() {
+    fn legacy_evidence_cannot_mutate_active_state() {
         let (_temporary, store) = test_store();
-        store
-            .ingest(&event_for("session-a", 1, reconciled_present(TXID)))
-            .expect("initial reconciliation");
+        install_state(&store, "source-a", vec![state_entry(TXID, facts())]);
         store
             .ingest(&event_for(
                 "session-a",
-                2,
+                1,
                 Evidence::MempoolAdded {
                     txid: TXID.to_owned(),
                 },
@@ -1289,7 +1281,7 @@ mod tests {
         store
             .ingest(&event_for(
                 "session-a",
-                3,
+                2,
                 Evidence::MempoolRemoved {
                     txid: TXID.to_owned(),
                     reason: Some("removed".to_owned()),
@@ -1299,20 +1291,21 @@ mod tests {
         store
             .ingest(&event_for(
                 "session-a",
-                4,
+                3,
                 Evidence::MempoolAdded {
                     txid: TXID.to_owned(),
                 },
             ))
             .expect("readd");
+        let snapshot = store
+            .mempool(&source())
+            .expect("mempool")
+            .expect("known source");
+        assert_eq!(snapshot.memberships.len(), 1);
+        assert_eq!(snapshot.memberships[0].txid, TXID);
         assert_eq!(
-            store
-                .mempool(&source())
-                .expect("mempool")
-                .expect("known source")
-                .memberships[0]
-                .facts,
-            MempoolEntryFactsStatus::AwaitingRpc
+            snapshot.memberships[0].facts,
+            MempoolEntryFactsStatus::Available { facts: facts() }
         );
     }
 
@@ -1349,9 +1342,16 @@ mod tests {
     }
 
     #[test]
-    fn batch_ingest_applies_membership_mutations_in_request_order() {
+    fn batch_ingest_does_not_establish_product_state() {
         let (temporary, store) = test_store();
-        let present = event_for("session-a", 1, reconciled_present(TXID));
+        let present = event_for(
+            "session-a",
+            1,
+            Evidence::MempoolReconciled {
+                txid: TXID.to_owned(),
+                membership: ReconciledMembership::Present { facts: facts() },
+            },
+        );
         let absent = event_for(
             "session-a",
             2,
@@ -1367,24 +1367,16 @@ mod tests {
             })
             .expect("ordered batch");
 
-        assert!(
-            store
-                .mempool(&source())
-                .expect("mempool")
-                .expect("known source")
-                .memberships
-                .is_empty()
-        );
-        let membership_count = Connection::open(temporary.path().join("atlas.db"))
+        assert_eq!(store.mempool(&source()).expect("mempool"), None);
+        let event_count = Connection::open(temporary.path().join("atlas.db"))
             .expect("inspect database")
             .query_row(
-                "SELECT COUNT(*) FROM current_membership
-                 WHERE source_id = 'source-a' AND txid = ?1",
-                [TXID],
+                "SELECT COUNT(*) FROM event WHERE source_id = 'source-a'",
+                [],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("membership count");
-        assert_eq!(membership_count, 0);
+            .expect("event count");
+        assert_eq!(event_count, 2);
     }
 
     #[test]
@@ -1425,14 +1417,7 @@ mod tests {
             store.ingest_batch(&request),
             Err(StoreError::ConflictingEvent { .. })
         ));
-        assert!(
-            store
-                .mempool(&source())
-                .expect("mempool")
-                .expect("known source")
-                .memberships
-                .is_empty()
-        );
+        assert_eq!(store.mempool(&source()).expect("mempool"), None);
         let event_count = Connection::open(temporary.path().join("atlas.db"))
             .expect("inspect database")
             .query_row("SELECT COUNT(*) FROM event", [], |row| row.get::<_, i64>(0))
@@ -1482,6 +1467,7 @@ mod tests {
     #[test]
     fn rejection_is_evidence_without_membership() {
         let (_temporary, store) = test_store();
+        install_state(&store, "source-a", vec![]);
         let event = NormalizedEvent::new(
             source(),
             SourceSessionId::new("session-a").expect("session"),
@@ -1506,17 +1492,21 @@ mod tests {
     }
 
     #[test]
-    fn known_source_without_gap_markers_reports_no_reported_gaps() {
+    fn only_active_state_establishes_a_known_source() {
         let (_temporary, store) = test_store();
         store.ingest(&added_event()).expect("ingest");
+
+        assert_eq!(store.mempool(&source()).expect("mempool"), None);
+        install_state(&store, "source-a", vec![state_entry(TXID, facts())]);
 
         let snapshot = store
             .mempool(&source())
             .expect("mempool")
             .expect("known source");
         assert_eq!(snapshot.source_id, source());
-        assert_eq!(snapshot.health.last_seen_at_ms, 101);
-        assert_eq!(snapshot.health.capture, CaptureStatus::NoReportedGaps);
+        assert_eq!(snapshot.health.state_cursor.revision, 1);
+        assert_eq!(snapshot.health.state_observed_at_ms, 101);
+        assert_eq!(snapshot.health.capture, CaptureStatus::NotCollected);
         assert_eq!(snapshot.memberships.len(), 1);
         assert_eq!(
             store
@@ -1558,15 +1548,15 @@ mod tests {
         store.ingest(&known).expect("known gap");
 
         assert_eq!(
-            capture_status(&store, &source()),
-            CaptureStatus::ContainsGaps {
-                first_gap_at_ms: 200,
-                latest_gap_at_ms: 300,
-                marker_count: 2,
-                strongest_certainty: CaptureGapCertainty::KnownLoss,
-                latest_input: "peer_observer_nats".to_owned(),
-                latest_reason: "slow_consumer".to_owned(),
-            }
+            capture_projection(&store, &source()),
+            Some((
+                200,
+                300,
+                2,
+                "known_loss".to_owned(),
+                "peer_observer_nats".to_owned(),
+                "slow_consumer".to_owned(),
+            ))
         );
     }
 
@@ -1591,13 +1581,17 @@ mod tests {
             store.ingest(&gap).expect("duplicate"),
             IngestStatus::Duplicate
         );
-        assert!(matches!(
-            capture_status(&store, &source()),
-            CaptureStatus::ContainsGaps {
-                marker_count: 1,
-                ..
-            }
-        ));
+        assert_eq!(
+            capture_projection(&store, &source()),
+            Some((
+                200,
+                200,
+                1,
+                "possible_loss".to_owned(),
+                "peer_observer_nats".to_owned(),
+                "disconnected".to_owned(),
+            ))
+        );
     }
 
     #[test]
@@ -1616,7 +1610,7 @@ mod tests {
             },
         );
         store.ingest(&gap).expect("gap");
-        let before = capture_status(&store, &source());
+        let before = capture_projection(&store, &source());
         store
             .ingest(&event_for_source_at(
                 "source-a",
@@ -1631,11 +1625,11 @@ mod tests {
             ))
             .expect("reconcile");
 
-        assert_eq!(capture_status(&store, &source()), before);
+        assert_eq!(capture_projection(&store, &source()), before);
     }
 
     #[test]
-    fn gap_only_source_is_visible_empty_and_capture_state_is_source_local() {
+    fn evidence_only_sources_are_hidden_until_state_is_committed() {
         let (_temporary, store) = test_store();
         store
             .ingest(&event_for_source_at(
@@ -1664,22 +1658,25 @@ mod tests {
             ))
             .expect("membership");
 
+        let source_b_id = SourceId::new("source-b").expect("source");
+        assert_eq!(store.mempool(&source()).expect("mempool"), None);
+        assert_eq!(store.mempool(&source_b_id).expect("mempool"), None);
+
+        install_state(&store, "source-a", vec![]);
+        install_state(&store, "source-b", vec![state_entry(TXID, facts())]);
+
         let source_a = store
             .mempool(&source())
             .expect("mempool")
             .expect("source a");
         assert!(source_a.memberships.is_empty());
-        assert!(matches!(
-            source_a.health.capture,
-            CaptureStatus::ContainsGaps { .. }
-        ));
-        let source_b_id = SourceId::new("source-b").expect("source");
+        assert_eq!(source_a.health.capture, CaptureStatus::NotCollected);
         let source_b = store
             .mempool(&source_b_id)
             .expect("mempool")
             .expect("source b");
         assert_eq!(source_b.memberships.len(), 1);
-        assert_eq!(source_b.health.capture, CaptureStatus::NoReportedGaps);
+        assert_eq!(source_b.health.capture, CaptureStatus::NotCollected);
     }
 
     #[test]
@@ -1715,15 +1712,15 @@ mod tests {
         }
 
         assert_eq!(
-            capture_status(&store, &source()),
-            CaptureStatus::ContainsGaps {
-                first_gap_at_ms: 100,
-                latest_gap_at_ms: 300,
-                marker_count: 2,
-                strongest_certainty: CaptureGapCertainty::KnownLoss,
-                latest_input: "newer-input".to_owned(),
-                latest_reason: "newer-reason".to_owned(),
-            }
+            capture_projection(&store, &source()),
+            Some((
+                100,
+                300,
+                2,
+                "known_loss".to_owned(),
+                "newer-input".to_owned(),
+                "newer-reason".to_owned(),
+            ))
         );
     }
 
@@ -1778,16 +1775,7 @@ mod tests {
                 },
             ))
             .expect("p2p evidence");
-        store
-            .ingest(&event_for(
-                "session-a",
-                2,
-                Evidence::MempoolReconciled {
-                    txid,
-                    membership: ReconciledMembership::Present { facts: facts() },
-                },
-            ))
-            .expect("reconciled facts");
+        install_state(&store, "source-a", vec![state_entry(&txid, facts())]);
 
         let membership = store
             .mempool_facts(&source())
@@ -1826,16 +1814,7 @@ mod tests {
                 },
             ))
             .expect("p2p evidence");
-        store
-            .ingest(&event_for(
-                "session-a",
-                2,
-                Evidence::MempoolReconciled {
-                    txid: TXID.to_owned(),
-                    membership: ReconciledMembership::Present { facts: facts() },
-                },
-            ))
-            .expect("reconciled facts");
+        install_state(&store, "source-a", vec![state_entry(TXID, facts())]);
 
         let membership = store
             .mempool_facts(&source())
@@ -1866,16 +1845,7 @@ mod tests {
                 },
             ))
             .expect("p2p evidence");
-        store
-            .ingest(&event_for(
-                "session-a",
-                2,
-                Evidence::MempoolReconciled {
-                    txid: TXID.to_owned(),
-                    membership: ReconciledMembership::Present { facts: facts() },
-                },
-            ))
-            .expect("reconciled facts");
+        install_state(&store, "source-a", vec![state_entry(TXID, facts())]);
 
         let membership = store
             .mempool_facts(&source())
@@ -1899,7 +1869,7 @@ mod tests {
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
                 found: 5,
-                expected: 6
+                expected: 7
             })
         ));
     }
@@ -1910,15 +1880,15 @@ mod tests {
         let path = temporary.path().join("atlas.db");
         let connection = Connection::open(&path).expect("create database");
         connection
-            .pragma_update(None, "user_version", 7)
+            .pragma_update(None, "user_version", 8)
             .expect("schema version");
         drop(connection);
 
         assert!(matches!(
             Store::migrate(path),
             Err(StoreError::SchemaVersion {
-                found: 7,
-                expected: 6
+                found: 8,
+                expected: 7
             })
         ));
     }
@@ -1926,8 +1896,8 @@ mod tests {
     #[test]
     fn source_comparison_computes_regions_over_partitioned_membership() {
         let (_temporary, store) = test_store();
-        // A shared by all three; B in mid+loose; C in loose only; D in strict
-        // only; E shared but awaiting RPC facts in loose.
+        // A and E shared by all three; B in mid+loose; C in loose only; D in
+        // strict only.
         let (a, b, c, d, e) = (
             comparison_txid(1),
             comparison_txid(2),
@@ -1935,30 +1905,34 @@ mod tests {
             comparison_txid(4),
             comparison_txid(5),
         );
-        let mut sequence = 0;
-        let mut ingest = |source: &str, evidence| {
-            sequence += 1;
-            store
-                .ingest(&event_for_source_at(
-                    source,
-                    "session-a",
-                    sequence,
-                    100,
-                    101,
-                    evidence,
-                ))
-                .expect("ingest");
-        };
-        ingest("strict", present_with(&a, 100));
-        ingest("strict", present_with(&d, 400));
-        ingest("strict", present_with(&e, 150));
-        ingest("mid", present_with(&a, 100));
-        ingest("mid", present_with(&b, 200));
-        ingest("mid", present_with(&e, 150));
-        ingest("loose", present_with(&a, 100));
-        ingest("loose", present_with(&b, 200));
-        ingest("loose", present_with(&c, 300));
-        ingest("loose", Evidence::MempoolAdded { txid: e.clone() });
+        install_state(
+            &store,
+            "strict",
+            vec![
+                state_entry_with(&a, 100),
+                state_entry_with(&d, 400),
+                state_entry_with(&e, 150),
+            ],
+        );
+        install_state(
+            &store,
+            "mid",
+            vec![
+                state_entry_with(&a, 100),
+                state_entry_with(&b, 200),
+                state_entry_with(&e, 150),
+            ],
+        );
+        install_state(
+            &store,
+            "loose",
+            vec![
+                state_entry_with(&a, 100),
+                state_entry_with(&b, 200),
+                state_entry_with(&c, 300),
+                state_entry_with(&e, 150),
+            ],
+        );
 
         let sources = [
             SourceId::new("strict").expect("source"),
@@ -1972,7 +1946,7 @@ mod tests {
         };
 
         // Per-source totals in request order: fact-bearing count, summed vsize,
-        // and the awaiting-RPC count. Loose holds E awaiting.
+        // and the awaiting-RPC count. SourceReplica state always carries facts.
         let totals: Vec<(u64, u64, u64)> = inputs
             .source_totals
             .iter()
@@ -1984,13 +1958,20 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(totals, vec![(3, 650, 0), (3, 450, 0), (3, 600, 1)]);
+        assert_eq!(totals, vec![(3, 650, 0), (3, 450, 0), (4, 750, 0)]);
 
-        // The shared intersection {A, E} is read from loose (most permissive):
-        // A is present, E awaits RPC facts and is counted separately.
-        assert_eq!(inputs.shared.available.len(), 1);
-        assert_eq!(inputs.shared.available[0].vsize, 100);
-        assert_eq!(inputs.shared.awaiting_rpc_count, 1);
+        // The shared intersection {A, E} is read from loose (most permissive).
+        assert_eq!(inputs.shared.available.len(), 2);
+        assert_eq!(
+            inputs
+                .shared
+                .available
+                .iter()
+                .map(|facts| facts.vsize)
+                .collect::<Vec<_>>(),
+            vec![100, 150]
+        );
+        assert_eq!(inputs.shared.awaiting_rpc_count, 0);
 
         assert_eq!(inputs.stages.len(), 2);
         let first = &inputs.stages[0];
@@ -2015,18 +1996,7 @@ mod tests {
     #[test]
     fn source_comparison_names_the_first_unknown_source() {
         let (_temporary, store) = test_store();
-        store
-            .ingest(&event_for_source_at(
-                "strict",
-                "session-a",
-                1,
-                100,
-                101,
-                Evidence::MempoolAdded {
-                    txid: TXID.to_owned(),
-                },
-            ))
-            .expect("ingest");
+        install_state(&store, "strict", vec![state_entry(TXID, facts())]);
         let sources = [
             SourceId::new("strict").expect("source"),
             SourceId::new("ghost").expect("source"),
@@ -2046,7 +2016,7 @@ mod tests {
             Store::open(path),
             Err(StoreError::SchemaVersion {
                 found: 0,
-                expected: 6
+                expected: 7
             })
         ));
     }

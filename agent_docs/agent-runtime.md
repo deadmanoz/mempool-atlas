@@ -1,65 +1,74 @@
 # Atlas Agent Runtime
 
-`atlas-agent` is the node-local durability boundary between peer-observer and Bitcoin RPC on one side, and central Atlas ingest on the other. One process instance and SQLite database represent exactly one configured source.
+`atlas-agent` is the source-local state durability boundary. One process and one persistent SQLite database represent exactly one configured Bitcoin node. The current production runtime observes RPC state only; peer evidence capture is not mounted.
 
-## Data flow
+## Runtime loops
 
-In `full` mode, the agent subscribes to peer-observer's Core NATS `mempool` and `netmsg` subjects. Each payload is an unframed protobuf `Event`. Supported evidence is normalized, assigned a per-process source session and a transactionally allocated sequence, then committed to the outbox before capture continues (`capture_loop`, `capture_message`, and `Outbox::enqueue_observation`).
+`state_runtime::run` starts two independent loops:
 
-All supported mempool-subject evidence is retained. P2P transaction observations are subject to `ATLAS_P2P_POLICY`: the default `inbound` policy retains observations explicitly marked inbound and suppresses other P2P sightings before persistence, while `all` retains the full P2P transaction relay stream. Inbound sightings preserve peer evidence from before the node admits or rejects a transaction. `all` is intended for bounded relay diagnostics. The policy reduces peer-level fan-out volume; it does not deduplicate transactions or narrow the underlying observation model.
+- The RPC loop connects with `corepc-client`, preflights `getmempoolinfo.size` against `ATLAS_MAX_MEMPOOL_ENTRIES`, obtains an initial verbose `getrawmempool` snapshot, then polls at the configured cadence. A failed poll retains the last complete snapshot.
+- The delivery loop asks `SourceReplica::next_action` for one frozen delta, checkpoint, or heartbeat and sends it to `POST /api/v1/state`. Delivery continues while RPC is unavailable.
 
-Every queued membership mutation updates `projected_membership` in the same SQLite transaction. The projection therefore represents the effective source state after all locally accepted evidence, including events not yet delivered to Atlas. A missing transaction key means absent, a row with null fact columns means present while awaiting RPC, and an all-non-null fact bundle means present with verbose RPC state. Live additions create the pending form without erasing facts already known for the same uninterrupted membership; removals delete the row, preventing a later re-entry from inheriting stale facts.
+Both blocking RPC and SQLite work run outside Tokio worker threads. SQLite `BUSY` and `LOCKED` results are transient: delivery retries without changing the frozen action, and RPC persistence retains the last complete replica until the next full poll. This prevents a long snapshot replacement or checkpoint freeze in one loop from terminating the other. Shutdown signals stop both loops cleanly.
 
-Periodic `getrawmempool true` results are decoded as a transaction-ID-keyed map using only the common Core and Knots fields `vsize`, `time`, and `fees.base`. The base BTC amount is deserialized exactly and converted to integer satoshis; entry seconds are checked before conversion to milliseconds. Unknown fields are ignored, while a missing, malformed, overflowing, or non-exact JSON integer fact rejects that poll without changing the projection. Results are diffed against both membership and facts, then emit explicit tagged `mempool_reconciled` events in deterministic removal-then-upsert order (`Outbox::reconcile_rpc_snapshot`). This means a peer-observer admission is enriched on the next successful poll even though its transaction ID was already present. An unchanged full snapshot emits no events.
+The runtime caps the `corepc` log target at debug even under a broader `RUST_LOG=trace`. `corepc-client` trace records contain complete raw RPC results, which would otherwise write one verbose mempool response per poll.
 
-Capture and RPC use a shared asynchronous projection fence. Capture holds it while committing a supported observation. RPC holds it from immediately before requesting its snapshot until reconciliation commits. A one-shot initial guard lets a healthy RPC baseline commit before NATS consumption, but releases capture after the first failed RPC attempt. This prevents an older RPC result from overwriting newer captured evidence without keeping a SQLite transaction open across a network call (`runtime::run`, `capture_message`, and `rpc_loop`).
+## Persistent identity and revision
+
+`SourceReplica::open` binds a migrated database to one `source_id`. First use creates a random `epoch_id`; reopening the same database preserves it. A different configured source is rejected.
+
+Revision zero means no complete RPC observation has been accepted. The first valid observation becomes revision 1 and requires a checkpoint, including when the mempool is empty. Later changed snapshots advance once per complete observation. Unchanged snapshots retain the revision and update freshness only.
+
+The wire cursor is `(epoch_id, revision)`. A new database creates a new epoch and checkpoints over the server's old active cursor. A checkpoint in the same epoch must strictly advance the replaced revision. If the server reports that epoch at or ahead of local state, the agent treats that as local rollback, rotates its epoch, and republishes the current complete snapshot as revision 1.
+
+## Local tables and bounds
+
+| Table | Role | Bound |
+| --- | --- | --- |
+| `source_replica_state` | Singleton identity, cursors, freshness, and checkpoint flags | One row |
+| `source_replica_membership` | Latest complete fact-bearing RPC snapshot | `ATLAS_MAX_MEMPOOL_ENTRIES` |
+| `source_replica_dirty` | Net divergence per txid | `ATLAS_MAX_DIRTY_MUTATIONS` and `ATLAS_MAX_DIRTY_BYTES` |
+| `source_replica_frozen_action` | Metadata for the exact retryable action | One row |
+| `source_replica_frozen_delta` | Stable sorted delta mutations | Dirty mutation bound |
+| `source_replica_frozen_checkpoint` | Stable complete checkpoint indexed by ordinal | Membership bound |
+
+The diff is a merge stream over sorted stored membership and the validated RPC `BTreeMap`. Once the remaining dirty budget would be exceeded, the collector stops retaining detailed changes, clears any partial detail, counts the remainder only, and directly replaces membership from the already-held RPC map. This avoids an additional full diff allocation.
+
+A frozen action is immutable across retries and restarts. New observations update current membership while retaining it. Dirty state after acknowledgement is rebased against the membership that the frozen action delivered.
 
 ## Delivery contract
 
-Outbox rows are ordered globally by their insertion ID, including rows from different process sessions. `Outbox::next_delivery` returns either the single FIFO head or a contiguous prefix containing only `mempool_reconciled` events. The prefix is capped at 512 events and an exact 4 MiB encoded request body. Encountering live or other non-reconciliation evidence ends the prefix, so nothing can overtake it.
+Deltas bind base revision, target revision, observation time, sorted mutations, and a canonical SHA-256 digest. Checkpoints bind the replacement cursor, optional exact staging checkpoint to supersede, target cursor, observation time, total entries, total chunks, and a chunk-independent canonical digest. Each chunk has a separate digest that includes checkpoint ID and chunk index.
 
-Live and capture-gap events use `POST /api/v1/events`. Reconciliation prefixes use `POST /api/v1/events/batch`; the server validates one source and applies every event sequentially in one SQLite transaction. The agent deletes the prefix atomically only when HTTP 202 contains exactly one `applied` or `duplicate` acknowledgement per requested event, with the same IDs in the same order (`delivery::deliver_next`, `Store::ingest_batch`, and `Outbox::mark_delivered_prefix`). Network failures, non-202 responses, malformed, short, or reordered acknowledgements, and event conflicts retain the whole prefix and increment only the head's attempt count.
+The agent validates every successful acknowledgement before changing local delivery state. Exact lost-ack retries are safe. Cursor, epoch, checkpoint, or replay conflicts trigger a replacement checkpoint against the server's reported active cursor and staging checkpoint ID. That staging ID is a compare-and-swap token: a delayed begin cannot delete a different checkpoint. Other operator-action failures and transient failures differ only in retry delay; neither discards state.
 
-For a non-202 response, the stored diagnostic includes a safely escaped prefix of at most 1,024 response bytes and marks both capture and escaped-rendering truncation. A later body-read failure preserves any prefix already received. Transport failures, HTTP 408, 425, 429, and 5xx responses are transient; other non-202 statuses, serialization failures, and invalid acknowledgements require operator action. Transient retries use a deterministic equal-jitter exponential ceiling from `ATLAS_DELIVERY_RETRY_MILLISECONDS` to `ATLAS_DELIVERY_RETRY_MAX_MILLISECONDS`. Operator-action failures enter the maximum band immediately. The failure class changes only the delay: neither class may skip or reorder the FIFO head.
+Checkpoint requests are resumable from server-reported progress. The agent sends only the remaining sequential chunks, then commits. It clears the frozen action only after the expected active cursor is acknowledged.
 
-Delivery starts independently of NATS and RPC availability. Each input retries separately, so already-persisted events can drain during a node or peer-observer outage. If the process crashes or loses the response after central acceptance but before local deletion, the same head or prefix is sent again; central event ingest is idempotent by event ID and returns duplicate acknowledgements. Run matching agent and server event schemas in a controlled preproduction release.
+## Configuration
 
-Core NATS is not durable. If the bounded subscriber channel fills, `async-nats` drops the affected message and emits a slow-consumer event. The NATS callback sends rare control notices to the capture loop, which persists `slow_consumer` as known loss and `disconnected` as possible loss through the ordinary source-bound FIFO. Other NATS lifecycle events remain logs. Intentional P2P policy suppression is not a capture gap.
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `ATLAS_SOURCE_ID` | yes | none | Stable logical source identity |
+| `ATLAS_AGENT_DATABASE` | no | `var/atlas-agent.db` | Persistent source-local SQLite database |
+| `ATLAS_SERVER_URL` | yes | none | Central Atlas base URL |
+| `ATLAS_RPC_URL` | no | `http://127.0.0.1:8332` | Bitcoin RPC endpoint |
+| `ATLAS_RPC_USERNAME` | yes | none | RPC username |
+| `ATLAS_RPC_PASSWORD` | yes | none | RPC password |
+| `ATLAS_RPC_POLL_SECONDS` | no | `5` | Full observation cadence |
+| `ATLAS_DELIVERY_RETRY_MILLISECONDS` | no | `1000` | Initial retry band |
+| `ATLAS_DELIVERY_RETRY_MAX_MILLISECONDS` | no | `60000` | Maximum retry band |
+| `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `1000000` | Maximum complete membership |
+| `ATLAS_MAX_DIRTY_MUTATIONS` | no | `4096` | Maximum coalesced delta rows |
+| `ATLAS_MAX_DIRTY_BYTES` | no | `1048576` | Estimated coalesced delta bytes |
+| `ATLAS_CHECKPOINT_CHUNK_ENTRIES` | no | `512` | Entries per checkpoint chunk |
+| `ATLAS_AGENT_DB_MAX_BYTES` | no | `1073741824` | Main SQLite page cap, excluding WAL |
 
-The central service reduces those events into monotonic source capture state. It records marker times and certainty, not a continuous outage interval or an estimated transaction-loss count. RPC can repair current membership but cannot reconstruct missing rejection, peer, timing, or raw-transaction evidence, so RPC reconciliation never clears or weakens this historical integrity state. A source with no gap marker means only that no gap has been reported, not that capture is proven complete.
+The agent sets SQLite temporary storage to memory, journal mode to WAL, retained journal size to 64 MiB, WAL auto-checkpoint to 1,000 pages, and `max_page_count` from `ATLAS_AGENT_DB_MAX_BYTES`. The page cap is a hard circuit breaker for the main database. It does not reserve filesystem space or bound transient WAL peak.
 
-Every 30 seconds, capture accounting logs cumulative total NATS messages, supported persisted observations, policy-suppressed P2P observations, ignored unsupported messages, invalid messages, and the current pending outbox depth. Policy suppression is intentional volume control and is distinct from a slow-consumer loss.
+## Recovery and deployment
 
-## Modes and configuration
+Use `just agent-db-migrate-deploy` for a fresh database, `just agent-db-backup` for an explicit backup, and `just agent-db-reinitialize-deploy` for a deliberate preproduction replacement. Schema generation 4 rejects stale databases. Every migration or reinitialization must go through the backup-first wrapper.
 
-| Environment variable                          |       Required | Default                 | Purpose                                                                              |
-| --------------------------------------------- | -------------: | ----------------------- | ------------------------------------------------------------------------------------ |
-| `ATLAS_SOURCE_ID`                             |            yes | none                    | Stable logical identity for this node source                                         |
-| `ATLAS_AGENT_DATABASE`                        |             no | `var/atlas-agent.db`    | Node-local SQLite outbox and projection                                              |
-| `ATLAS_SERVER_URL`                            |            yes | none                    | Base URL for central Atlas ingest                                                    |
-| `ATLAS_AGENT_MODE`                            |             no | `full`                  | `full` or `rpc-only`                                                                 |
-| `ATLAS_NATS_ADDRESS`                          | full mode only | `127.0.0.1:4222`        | Core NATS endpoint for peer-observer                                                 |
-| `ATLAS_NATS_USERNAME` / `ATLAS_NATS_PASSWORD` |             no | none                    | Optional pair; configure both or neither                                             |
-| `ATLAS_P2P_POLICY`                            |             no | `inbound`               | `inbound` for explicitly inbound P2P transactions or `all` for the full P2P transaction relay stream |
-| `ATLAS_RPC_URL`                               |             no | `http://127.0.0.1:8332` | Bitcoin node RPC endpoint                                                            |
-| `ATLAS_RPC_USERNAME` / `ATLAS_RPC_PASSWORD`   |            yes | none                    | Bitcoin RPC credentials                                                              |
-| `ATLAS_RPC_POLL_SECONDS`                      |             no | `5`                     | Reconciliation interval                                                              |
-| `ATLAS_DELIVERY_RETRY_MILLISECONDS`           |             no | `1000`                  | Initial transient delivery retry ceiling; also the NATS reconnect delay              |
-| `ATLAS_DELIVERY_RETRY_MAX_MILLISECONDS`       |             no | `60000`                 | Maximum head-delivery retry ceiling; must be at least the initial value               |
+An ordinary restart needs no special action. A lost HTTP response retries the exact frozen payload. A central reset causes the agent to checkpoint against no active cursor. A deliberate agent reset creates a new epoch and replaces the server cursor on the next checkpoint.
 
-`rpc-only` omits peer-observer capture and preserves RPC-authoritative current membership. It does not synthesize admission, rejection, peer, raw-transaction, or short-lived evidence that was never observed (`AgentMode::RpcOnly`). `ATLAS_P2P_POLICY` does not alter RPC-only operation because no NATS input is active.
-
-## Persistent state and recovery
-
-The schema stores the source binding, last successful RPC time, per-session sequence counters, pending events, delivery failure state, and effective membership plus its all-or-none fact bundle (`apps/atlas-agent/migrations/0001_initial.sql`). Raw NATS subject and payload bytes are retained with a row only while that event remains pending. Every agent-owned SQLite connection uses memory-backed temporary tables, indices, and statement journals, while the persistent database, WAL, and SHM files remain in the configured database directory. This prevents those runtime spills from requiring a writable operating-system temporary directory.
-
-Use one writer and one persistent database per source. Opening an existing database with a different `ATLAS_SOURCE_ID` fails. Initialize it only through the backup-first wrapper:
-
-```bash
-just agent-db-migrate-dev
-just agent-dev
-```
-
-Use `just agent-db-migrate-deploy` for a fresh deployment and `just agent-db-backup` for an explicit backup. Schema generation 3 rejects every stale generation. During this preproduction phase, replace a stale outbox with `just agent-db-reinitialize-deploy` only as part of the coordinated central and all-source reinitialization described in the architecture guide. Put source-specific settings in an untracked `.env`; never commit credentials or deployment inventory.
-
-Deleting the database by hand is not a supported reset. It loses queued forensic evidence and the effective membership baseline, which can leave central source state without the removals needed to converge. Restore a verified backup after local loss. The backup-first preproduction reinitialization is safe only because central state and every source outbox are replaced together. A production source reset and full rebaseline protocol remains deferred.
+The verbose RPC response decodes directly into the one full `BTreeMap` used for an observation, rather than first building a second raw map. The agent checks the node-reported count before the verbose call and the decoded count afterwards. `corepc-client` still buffers the HTTP response body, so this is an entry-count guard rather than a complete response-byte bound. Checkpoint freezing can temporarily retain a second membership copy in SQLite. Deployment capacity testing must include the snapshot map, both SQLite copies, indexes, the RPC body buffer, and transient WAL headroom before enabling a canary.

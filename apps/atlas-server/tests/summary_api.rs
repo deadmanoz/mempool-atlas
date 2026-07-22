@@ -1,11 +1,11 @@
 //! HTTP behavior of the aggregate summary and source-listing endpoints:
-//! strict query validation, honest awaiting-RPC separation, and stable
-//! source discovery. Aggregation arithmetic is unit-tested in the summary
-//! module; fixture parity lives in the fixture contract test.
+//! strict query validation, complete SourceReplica facts, and stable source
+//! discovery. Aggregation arithmetic is unit-tested in the summary module;
+//! fixture parity lives in the fixture contract test.
 
 use atlas_model::{
     AggregateBin, DimensionHistogram, Evidence, MempoolEntryFacts, MempoolSummary, NormalizedEvent,
-    ReconciledMembership, SourceId, SourceSessionId, SourcesResponse,
+    SourceId, SourceReplicaEntry, SourceSessionId, SourcesResponse,
 };
 use atlas_server::{Store, router_with_clock};
 use axum::Router;
@@ -18,6 +18,10 @@ use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, WPubkeyHash, Witness,
 };
 use tower::ServiceExt;
+
+mod support;
+
+use support::install_checkpoint;
 
 const AS_OF_MS: u64 = 1_752_710_400_000;
 
@@ -37,26 +41,35 @@ fn event(source_id: &str, sequence: u64, evidence: Evidence) -> NormalizedEvent 
     .expect("event")
 }
 
-fn present(txid: String, vsize: u64, fee_sats: u64) -> Evidence {
-    Evidence::MempoolReconciled {
+fn state_entry(txid: String, vsize: u64, fee_sats: u64) -> SourceReplicaEntry {
+    SourceReplicaEntry::new(
         txid,
-        membership: ReconciledMembership::Present {
-            facts: MempoolEntryFacts {
-                vsize,
-                fee_sats,
-                entered_at_ms: AS_OF_MS - 300_000,
-            },
+        MempoolEntryFacts {
+            vsize,
+            fee_sats,
+            entered_at_ms: AS_OF_MS - 300_000,
         },
-    }
+    )
+    .expect("state entry")
 }
 
-fn application(events: &[NormalizedEvent]) -> (tempfile::TempDir, Router) {
+fn application(
+    state: &[(&str, SourceReplicaEntry)],
+    evidence: &[NormalizedEvent],
+) -> (tempfile::TempDir, Router) {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let database = temporary.path().join("atlas.db");
     Store::migrate(&database).expect("migrate");
     let store = Store::open(database).expect("open");
-    for event in events {
+    for event in evidence {
         store.ingest(event).expect("ingest");
+    }
+    let mut by_source = std::collections::BTreeMap::<&str, Vec<SourceReplicaEntry>>::new();
+    for (source_id, entry) in state {
+        by_source.entry(source_id).or_default().push(entry.clone());
+    }
+    for (source_id, entries) in by_source {
+        install_checkpoint(&store, source_id, AS_OF_MS - 1_000, entries);
     }
     (temporary, router_with_clock(store, || AS_OF_MS))
 }
@@ -74,12 +87,14 @@ async fn get(application: Router, uri: &str) -> (StatusCode, serde_json::Value) 
 }
 
 #[tokio::test]
-async fn summary_separates_awaiting_rpc_from_fact_bearing_totals() {
-    let (_temporary, application) = application(&[
-        event("source-a", 1, present(txid(1), 200, 1_700)),
-        event("source-a", 2, Evidence::MempoolAdded { txid: txid(2) }),
-        event("source-a", 3, Evidence::MempoolAdded { txid: txid(3) }),
-    ]);
+async fn summary_uses_state_and_ignores_factless_membership_evidence() {
+    let (_temporary, application) = application(
+        &[("source-a", state_entry(txid(1), 200, 1_700))],
+        &[
+            event("source-a", 2, Evidence::MempoolAdded { txid: txid(2) }),
+            event("source-a", 3, Evidence::MempoolAdded { txid: txid(3) }),
+        ],
+    );
 
     let (status, body) = get(application, "/api/v1/sources/source-a/mempool/summary").await;
     assert_eq!(status, StatusCode::OK);
@@ -93,17 +108,20 @@ async fn summary_separates_awaiting_rpc_from_fact_bearing_totals() {
         }
     );
     assert_eq!(summary.totals.matching, summary.totals.all);
-    assert_eq!(summary.totals.awaiting_rpc.count, 2);
+    assert_eq!(summary.totals.awaiting_rpc.count, 0);
     assert!(summary.ecdf.is_none());
     assert!(summary.joint_fee_size.is_none());
 }
 
 #[tokio::test]
 async fn summary_applies_filters_from_query_parameters() {
-    let (_temporary, application) = application(&[
-        event("source-a", 1, present(txid(1), 200, 1_700)), // 8.5 sat/vB
-        event("source-a", 2, present(txid(2), 800, 200)),   // 0.25 sat/vB
-    ]);
+    let (_temporary, application) = application(
+        &[
+            ("source-a", state_entry(txid(1), 200, 1_700)), // 8.5 sat/vB
+            ("source-a", state_entry(txid(2), 800, 200)),   // 0.25 sat/vB
+        ],
+        &[],
+    );
 
     let (status, body) = get(
         application,
@@ -152,7 +170,7 @@ async fn summary_rejects_malformed_queries_with_json_errors() {
     ];
     for uri in cases {
         let (_temporary, application) =
-            application(&[event("source-a", 1, present(txid(1), 200, 1_700))]);
+            application(&[("source-a", state_entry(txid(1), 200, 1_700))], &[]);
         let (status, body) = get(application, uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
         assert!(
@@ -192,12 +210,16 @@ async fn summary_carries_taxonomy_bins_and_derived_verdicts_land_in_them() {
         ],
     };
     let data_txid = data_transaction.compute_txid().to_string();
-    let (_temporary, application) = application(&[
-        event(
+    let (_temporary, application) = application(
+        &[
+            ("source-a", state_entry(data_txid.clone(), 200, 1_700)),
+            ("source-a", state_entry(txid(1), 400, 800)),
+        ],
+        &[event(
             "source-a",
             1,
             Evidence::P2pTransaction {
-                txid: data_txid.clone(),
+                txid: data_txid,
                 wtxid: data_transaction.compute_wtxid().to_string(),
                 raw_transaction_hex: Some(hex::encode(bitcoin::consensus::encode::serialize(
                     &data_transaction,
@@ -205,10 +227,8 @@ async fn summary_carries_taxonomy_bins_and_derived_verdicts_land_in_them() {
                 peer_id: Some(7),
                 inbound: Some(true),
             },
-        ),
-        event("source-a", 2, present(data_txid, 200, 1_700)),
-        event("source-a", 3, present(txid(1), 400, 800)),
-    ]);
+        )],
+    );
 
     let (status, body) = get(application, "/api/v1/sources/source-a/mempool/summary").await;
     assert_eq!(status, StatusCode::OK);
@@ -280,12 +300,16 @@ async fn summary_carries_the_bip110_taxonomy_and_filters_on_its_verdicts() {
         ],
     };
     let conforming_txid = conforming_transaction.compute_txid().to_string();
-    let (_temporary, application) = application(&[
-        event(
+    let (_temporary, application) = application(
+        &[
+            ("source-a", state_entry(conforming_txid.clone(), 200, 1_700)),
+            ("source-a", state_entry(txid(1), 400, 800)),
+        ],
+        &[event(
             "source-a",
             1,
             Evidence::P2pTransaction {
-                txid: conforming_txid.clone(),
+                txid: conforming_txid,
                 wtxid: conforming_transaction.compute_wtxid().to_string(),
                 raw_transaction_hex: Some(hex::encode(bitcoin::consensus::encode::serialize(
                     &conforming_transaction,
@@ -293,10 +317,8 @@ async fn summary_carries_the_bip110_taxonomy_and_filters_on_its_verdicts() {
                 peer_id: Some(3),
                 inbound: Some(true),
             },
-        ),
-        event("source-a", 2, present(conforming_txid, 200, 1_700)),
-        event("source-a", 3, present(txid(1), 400, 800)),
-    ]);
+        )],
+    );
 
     let (status, body) = get(
         application.clone(),
@@ -389,12 +411,16 @@ async fn summary_carries_the_data_protocol_taxonomy_and_filters_on_its_verdicts(
         ],
     };
     let carrier_txid = carrier_transaction.compute_txid().to_string();
-    let (_temporary, application) = application(&[
-        event(
+    let (_temporary, application) = application(
+        &[
+            ("source-a", state_entry(carrier_txid.clone(), 200, 1_700)),
+            ("source-a", state_entry(txid(1), 400, 800)),
+        ],
+        &[event(
             "source-a",
             1,
             Evidence::P2pTransaction {
-                txid: carrier_txid.clone(),
+                txid: carrier_txid,
                 wtxid: carrier_transaction.compute_wtxid().to_string(),
                 raw_transaction_hex: Some(hex::encode(bitcoin::consensus::encode::serialize(
                     &carrier_transaction,
@@ -402,10 +428,8 @@ async fn summary_carries_the_data_protocol_taxonomy_and_filters_on_its_verdicts(
                 peer_id: Some(5),
                 inbound: Some(true),
             },
-        ),
-        event("source-a", 2, present(carrier_txid, 200, 1_700)),
-        event("source-a", 3, present(txid(1), 400, 800)),
-    ]);
+        )],
+    );
 
     let (status, body) = get(
         application.clone(),
@@ -469,7 +493,7 @@ async fn summary_carries_the_data_protocol_taxonomy_and_filters_on_its_verdicts(
 
 #[tokio::test]
 async fn summary_for_unknown_source_is_not_found() {
-    let (_temporary, application) = application(&[]);
+    let (_temporary, application) = application(&[], &[]);
     let (status, body) = get(application, "/api/v1/sources/absent-node/mempool/summary").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(
@@ -480,11 +504,14 @@ async fn summary_for_unknown_source_is_not_found() {
 
 #[tokio::test]
 async fn sources_lists_membership_counts_in_stable_order() {
-    let (_temporary, application) = application(&[
-        event("source-b", 1, present(txid(1), 200, 400)),
-        event("source-a", 1, present(txid(2), 300, 600)),
-        event("source-a", 2, Evidence::MempoolAdded { txid: txid(3) }),
-    ]);
+    let (_temporary, application) = application(
+        &[
+            ("source-b", state_entry(txid(1), 200, 400)),
+            ("source-a", state_entry(txid(2), 300, 600)),
+            ("source-a", state_entry(txid(3), 350, 700)),
+        ],
+        &[],
+    );
 
     let (status, body) = get(application, "/api/v1/sources").await;
     assert_eq!(status, StatusCode::OK);
@@ -499,7 +526,7 @@ async fn sources_lists_membership_counts_in_stable_order() {
 
 #[tokio::test]
 async fn sources_is_empty_before_any_ingest() {
-    let (_temporary, application) = application(&[]);
+    let (_temporary, application) = application(&[], &[]);
     let (status, body) = get(application, "/api/v1/sources").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, serde_json::json!({ "sources": [] }));

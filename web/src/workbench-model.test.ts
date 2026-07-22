@@ -69,8 +69,9 @@ const summaryWithTaxonomyUnderived = (underived: {
     feerate: { status: "unavailable", reason: "requires_raw_transaction" },
   },
   health: {
-    last_seen_at_ms: 0,
-    capture: { status: "no_reported_gaps" },
+    state_cursor: { epoch_id: "epoch-a", revision: 1 },
+    state_observed_at_ms: 0,
+    capture: { status: "not_collected" },
   },
 });
 

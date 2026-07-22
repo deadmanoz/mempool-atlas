@@ -1,7 +1,5 @@
 export interface MempoolEntry {
   txid: string;
-  updated_at_ms: number;
-  evidence_event_id: string;
   facts: MempoolFacts;
 }
 
@@ -18,7 +16,15 @@ export type MempoolFacts =
 
 export type CaptureGapCertainty = "possible_loss" | "known_loss";
 
+export interface ReplicaCursor {
+  epoch_id: string;
+  revision: number;
+}
+
 export type CaptureStatus =
+  | {
+      status: "not_collected";
+    }
   | {
       status: "no_reported_gaps";
     }
@@ -33,7 +39,8 @@ export type CaptureStatus =
     };
 
 export interface SourceHealth {
-  last_seen_at_ms: number;
+  state_cursor: ReplicaCursor;
+  state_observed_at_ms: number;
   capture: CaptureStatus;
 }
 
@@ -146,7 +153,8 @@ export interface MempoolSummary {
 
 export interface SourceDescriptor {
   source_id: string;
-  last_seen_at_ms: number;
+  state_cursor: ReplicaCursor;
+  state_observed_at_ms: number;
   membership_count: number;
 }
 
@@ -155,6 +163,7 @@ export interface SourceDescriptor {
  * `bins` and `histograms` are the summary wire shapes. */
 export interface RegionAggregate {
   present: AggregateBin;
+  /** Legacy compatibility count; zero for complete SourceReplica state. */
   awaiting_rpc: { count: number };
   bins: BinCatalog;
   histograms: SummaryHistograms;
@@ -165,6 +174,7 @@ export interface RegionAggregate {
  * ordering and does not warrant full histograms. */
 export interface AnomalyRegion {
   present: AggregateBin;
+  /** Legacy compatibility count; zero for complete SourceReplica state. */
   awaiting_rpc: { count: number };
 }
 
@@ -249,11 +259,17 @@ export interface RejectionRecord {
   verdicts: [string, string][];
 }
 
+/** Distinguishes an observed empty rejection window from a server that is not
+ * collecting rejection evidence at all. */
+export type RejectionAvailability =
+  { status: "available" } | { status: "not_collected" };
+
 /** The source-scoped rejection read model: what a single source refused,
  * distinct from any set difference in a comparison. */
 export interface SourceRejections {
   source_id: string;
   as_of_ms: number;
+  availability: RejectionAvailability;
   window: RejectionWindow;
   by_reason: RejectionReasonCount[];
   attribution: RejectionAttribution;

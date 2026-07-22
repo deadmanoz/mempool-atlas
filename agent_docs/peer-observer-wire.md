@@ -1,5 +1,10 @@
 # peer-observer wire contract
 
+Status: retained experimental input contract. The state-only production agent
+does not currently subscribe to NATS. This reference remains authoritative for
+the later bounded HotStore and EvidenceArchive implementation; it must not be
+used to re-enable the retired generic evidence FIFO.
+
 Atlas vendors the peer-observer protobuf schema at commit
 `dbff1e37693716358fa414ea961894c16f9a962d`. The same value is recorded in
 `proto/peer-observer/PINNED_COMMIT`.
