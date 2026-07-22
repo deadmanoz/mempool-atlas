@@ -57,18 +57,27 @@ Checkpoint requests are resumable from server-reported progress. The agent sends
 | `ATLAS_RPC_POLL_SECONDS` | no | `5` | Full observation cadence |
 | `ATLAS_DELIVERY_RETRY_MILLISECONDS` | no | `1000` | Initial retry band |
 | `ATLAS_DELIVERY_RETRY_MAX_MILLISECONDS` | no | `60000` | Maximum retry band |
-| `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `1000000` | Maximum complete membership |
+| `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `200000` | Maximum complete membership |
 | `ATLAS_MAX_DIRTY_MUTATIONS` | no | `4096` | Maximum coalesced delta rows |
 | `ATLAS_MAX_DIRTY_BYTES` | no | `1048576` | Estimated coalesced delta bytes |
 | `ATLAS_CHECKPOINT_CHUNK_ENTRIES` | no | `512` | Entries per checkpoint chunk |
 | `ATLAS_AGENT_DB_MAX_BYTES` | no | `1073741824` | Main SQLite page cap, excluding WAL |
+| `ATLAS_AGENT_STORAGE_MAX_BYTES` | no | `1879048192` | DB/WAL/SHM write-admission envelope |
+| `ATLAS_FILESYSTEM_RESERVE_BYTES` | no | `134217728` | Minimum absolute filesystem reserve |
+| `ATLAS_FILESYSTEM_RESERVE_PERCENT` | no | `5` | Minimum percentage filesystem reserve |
+| `ATLAS_AGENT_WAL_RETAINED_BYTES` | no | `67108864` | WAL retention and pressure target |
+| `ATLAS_AGENT_WAL_AUTOCHECKPOINT_PAGES` | no | `1000` | WAL auto-checkpoint interval |
 
-The agent sets SQLite temporary storage to memory, journal mode to WAL, retained journal size to 64 MiB, WAL auto-checkpoint to 1,000 pages, and `max_page_count` from `ATLAS_AGENT_DB_MAX_BYTES`. The page cap is a hard circuit breaker for the main database. It does not reserve filesystem space or bound transient WAL peak.
+The agent sets SQLite temporary storage to memory and journal mode to WAL. It applies and verifies `max_page_count` from `ATLAS_AGENT_DB_MAX_BYTES`, the 64 MiB retained WAL target, and the 1,000-page auto-checkpoint interval. Before a write transaction it attempts to truncate an oversized WAL, then checks the main database, the combined DB/WAL/SHM envelope, and non-privileged filesystem space. It repeats admission inside the transaction before mutation. A pinned WAL checkpoint or a high-water crossing between those checks is retryable contention, so the current replica and any frozen action remain intact.
+
+The 1.75 GiB SQLite envelope is proactive admission control, not a filesystem quota. SQLite can temporarily grow its WAL beyond the 64 MiB target during a transaction, and `corepc-client` buffers the verbose RPC response before decoding. The fixed canary filesystem and memory cgroup therefore remain the hard limits.
 
 ## Recovery and deployment
 
-Use `just agent-db-migrate-deploy` for a fresh database, `just agent-db-backup` for an explicit backup, and `just agent-db-reinitialize-deploy` for a deliberate preproduction replacement. Schema generation 4 rejects stale databases. Every migration or reinitialization must go through the backup-first wrapper.
+Use `just agent-db-migrate-deploy` for a fresh database, `just agent-db-backup` for an explicit backup, and `just agent-db-reinitialize-deploy` for a deliberate preproduction replacement. Schema generation 5 rejects stale databases. Every migration or reinitialization must go through the backup-first wrapper.
 
 An ordinary restart needs no special action. A lost HTTP response retries the exact frozen payload. A central reset causes the agent to checkpoint against no active cursor. A deliberate agent reset creates a new epoch and replaces the server cursor on the next checkpoint.
 
-The verbose RPC response decodes directly into the one full `BTreeMap` used for an observation, rather than first building a second raw map. The agent checks the node-reported count before the verbose call and the decoded count afterwards. `corepc-client` still buffers the HTTP response body, so this is an entry-count guard rather than a complete response-byte bound. Checkpoint freezing can temporarily retain a second membership copy in SQLite. Deployment capacity testing must include the snapshot map, both SQLite copies, indexes, the RPC body buffer, and transient WAL headroom before enabling a canary.
+The verbose RPC response decodes directly into the one full `BTreeMap` used for an observation, rather than first building a second raw map. The agent checks the node-reported count before the verbose call and the decoded count afterwards. This is an entry-count guard rather than a complete response-byte bound. Checkpoint freezing can temporarily retain a second membership copy in SQLite, so the release scale test exercises the 200,000-entry checkpoint path and records the resulting SQLite footprint. Live canary acceptance separately observes cgroup memory while the agent performs the real verbose RPC call, which includes the buffered response and snapshot map.
+
+The canary service profile mounts an exactly 2 GiB ext4 image at `/var/lib/mempool-atlas-agent`. It runs each agent with `MemoryHigh=768M`, `MemoryMax=1G`, `MemorySwapMax=0`, a 50 percent CPU quota, 25 MiB/s read and 10 MiB/s write limits on the deployment disk, and `TasksMax=64`. The image is fully allocated before mounting, and image creation or service start is refused unless the host root filesystem retains the greater of 5 GiB or 20 percent free. These deployment controls bound failure impact even if a buffered response, transient WAL, or allocator peak occurs before the application can reject work.

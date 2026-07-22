@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Mempool Atlas bounded data architecture</title>
+    <title>Mempool Atlas bounded SourceReplica architecture</title>
     <link rel="icon" href="data:," />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=Sora:wght@400;500;600;700&amp;display=swap"
       rel="stylesheet"
     />
     <style>
@@ -562,6 +562,131 @@
         font-size: 12px;
       }
 
+      .bound-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .bound-stack {
+        min-width: 0;
+        padding: 20px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .bound-stack__head {
+        display: flex;
+        gap: 12px;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 14px;
+      }
+
+      .bound-stack__head h3 {
+        margin: 0;
+        font-size: 20px;
+      }
+
+      .bound-stack__head span {
+        color: var(--text-dim);
+        font: 500 9px var(--font-mono);
+        letter-spacing: 0.1em;
+        text-align: right;
+        text-transform: uppercase;
+      }
+
+      .bound-layer {
+        display: grid;
+        grid-template-columns: minmax(105px, 0.32fr) minmax(0, 1fr);
+        gap: 14px;
+        align-items: start;
+        padding: 14px;
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--tone);
+        background: var(--surface-raised);
+      }
+
+      .bound-layer:first-of-type {
+        border-radius: 10px 10px 0 0;
+      }
+
+      .bound-layer:last-child {
+        border-radius: 0 0 10px 10px;
+      }
+
+      .bound-layer + .bound-layer {
+        border-top: 0;
+      }
+
+      .bound-layer--semantic {
+        --tone: var(--state);
+      }
+
+      .bound-layer--sqlite {
+        --tone: var(--delivery);
+      }
+
+      .bound-layer--filesystem {
+        --tone: var(--bitcoin);
+      }
+
+      .bound-layer--process {
+        --tone: var(--future);
+      }
+
+      .bound-layer__name {
+        color: var(--tone);
+        font: 600 9px var(--font-mono);
+        letter-spacing: 0.1em;
+        line-height: 1.5;
+        text-transform: uppercase;
+      }
+
+      .bound-layer__value {
+        color: var(--text-dim);
+        font-size: 11px;
+        line-height: 1.65;
+      }
+
+      .bound-layer__value strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .policy-strip {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1px;
+        margin-top: 16px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--border);
+      }
+
+      .policy-item {
+        min-width: 0;
+        padding: 16px;
+        background: var(--surface-raised);
+      }
+
+      .policy-item__label {
+        margin-bottom: 7px;
+        color: var(--future);
+        font: 600 9px var(--font-mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .policy-item__value {
+        color: var(--text-dim);
+        font-size: 11px;
+        line-height: 1.65;
+      }
+
       footer {
         margin-top: 58px;
         padding-top: 18px;
@@ -626,7 +751,8 @@
 
       @media (max-width: 820px) {
         .diff-panels,
-        .phase-grid {
+        .phase-grid,
+        .bound-grid {
           grid-template-columns: 1fr;
         }
 
@@ -637,6 +763,10 @@
 
         .kpi-row {
           grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .policy-strip {
+          grid-template-columns: 1fr;
         }
       }
 
@@ -661,6 +791,11 @@
           margin-top: 54px;
         }
 
+        .bound-layer {
+          grid-template-columns: 1fr;
+          gap: 7px;
+        }
+
         .mermaid-wrap {
           min-height: 390px;
           padding-right: 12px;
@@ -682,65 +817,71 @@
     <div class="wrap">
       <nav class="toc" id="toc" aria-label="Page sections">
         <div class="toc-title">Architecture map</div>
-        <a href="#s1">1. What changed</a>
-        <a href="#s2">2. Current system</a>
-        <a href="#s3">3. Convergence</a>
-        <a href="#s4">4. Bounds</a>
-        <a href="#s5">5. Data roadmap</a>
+        <a href="#s1">1. Safety layers</a>
+        <a href="#s2">2. State path</a>
+        <a href="#s3">3. Recovery</a>
+        <a href="#s4">4. Capacity</a>
+        <a href="#s5">5. Boundary</a>
       </nav>
 
       <main class="main">
-        <p class="eyebrow">Mempool Atlas · bounded data architecture</p>
-        <h1>Current state must stay correct even when evidence cannot keep up.</h1>
+        <p class="eyebrow">Mempool Atlas · bounded SourceReplica architecture</p>
+        <h1>Correct state, guarded writes, and hard deployment containment.</h1>
         <p class="lede">
-          The first canaries taught us that one permanent FIFO cannot safely own
-          both current mempool state and open-ended forensic evidence. The new
-          design gives current state its own bounded, convergent lifecycle. It
-          then adds recent evidence and historical archives as separate products
-          with separate quotas and failure behavior.
+          RPC is the sole authority for current membership. Each source replica
+          is constrained first by logical limits, then by SQLite admission, and
+          finally by a fixed filesystem image and a resource-limited service.
+          The central reader sees only complete active generations. Peer and
+          forensic evidence remains a separate, deferred product.
         </p>
         <div class="status-row" aria-label="Implementation status">
-          <span class="status status--built">SourceReplica implemented</span>
-          <span class="status status--built">production path state-only</span>
-          <span class="status status--next">bounded HotStore next</span>
-          <span class="status status--open">WAL reserve guard open</span>
+          <span class="status status--built">200,000 entries per source</span>
+          <span class="status status--built">two persistent source IDs</span>
+          <span class="status status--built">fixed data images + cgroups</span>
+          <span class="status status--next">evidence deferred</span>
         </div>
 
         <section class="section" id="s1">
           <div class="sec-head">
             <span class="sec-number">01</span>
-            <h2>What changed</h2>
+            <h2>Three safety layers</h2>
           </div>
           <p class="section-intro">
-            The old unit of durability was every observation. The new unit is a
-            complete source state plus the smallest bounded information needed
-            to converge it.
+            Each layer controls a different failure mode. Logical limits bound
+            what Atlas represents, SQLite admission decides whether a mutation
+            may begin, and deployment containment prevents Atlas from consuming
+            the host resources reserved for Bitcoin.
           </p>
-          <div class="diff-panels">
-            <article class="diff-panel diff-panel--old">
-              <div class="diff-panel__header">Experimental design</div>
-              <div class="diff-panel__body">
-                <h3>One global FIFO for state and evidence</h3>
-                <p>
-                  Peer sightings, rejection events, capture gaps, and RPC
-                  corrections all accumulated behind the same failed delivery
-                  head. Storage grew with event rate multiplied by outage
-                  duration. Knots reached 26.87 GiB and exhausted its root
-                  filesystem.
-                </p>
-              </div>
+          <div class="phase-grid">
+            <article class="phase-card phase-card--built">
+              <div class="phase-card__status">Layer 1 · logical</div>
+              <h3>Bound the state model</h3>
+              <p>
+                A source has at most 200,000 current memberships. Changes are
+                coalesced by txid, and delivery holds at most one stable action.
+                The server admits two persistent source identities and keeps no
+                more than one active plus one staging generation for each.
+              </p>
             </article>
-            <article class="diff-panel diff-panel--new">
-              <div class="diff-panel__header">Current design</div>
-              <div class="diff-panel__body">
-                <h3>Independent lifecycle for current state</h3>
-                <p>
-                  One complete RPC snapshot, one coalesced dirty row per txid,
-                  and one frozen delivery action replace the mutation history.
-                  A central outage now costs storage proportional to mempool
-                  size, not elapsed outage time.
-                </p>
-              </div>
+            <article class="phase-card phase-card--later">
+              <div class="phase-card__status">Layer 2 · application</div>
+              <h3>Admit writes before growth</h3>
+              <p>
+                Atlas verifies <code>max_page_count</code>, accounts for the
+                database, WAL, and SHM together, preserves filesystem reserve,
+                and attempts WAL relief before growth. Busy relief is retried;
+                real capacity pressure is explicit.
+              </p>
+            </article>
+            <article class="phase-card phase-card--next">
+              <div class="phase-card__status">Layer 3 · deployment</div>
+              <h3>Contain the process and disk</h3>
+              <p>
+                Fully allocated ext4 images put a hard edge around data files.
+                systemd cgroups cap memory and swap while throttling CPU and
+                disk I/O. Required mounts fail closed, so services cannot fall
+                back to the VPS root filesystem.
+              </p>
             </article>
           </div>
         </section>
@@ -748,73 +889,78 @@
         <section class="section" id="s2">
           <div class="sec-head">
             <span class="sec-number">02</span>
-            <h2>The implemented system</h2>
+            <h2>The implemented state path</h2>
           </div>
           <p class="section-intro">
-            One agent owns one logical source. The central service may co-locate
-            sources, but it never mixes their membership. Solid paths are in the
-            production runtime today.
+            One state-only agent owns one logical source. The source side is
+            repeated for the two configured production identities. Only the
+            WireGuard path reaches the central state endpoint, and every read is
+            derived from a complete active generation.
           </p>
           <div class="mermaid-wrap">
             <div class="zoom-controls" aria-label="System diagram zoom controls">
-              <button type="button" onclick="zoomDiagram(this, 1.2)" title="Zoom in">+</button>
-              <button type="button" onclick="zoomDiagram(this, 1 / 1.2)" title="Zoom out">−</button>
-              <button type="button" onclick="resetZoom(this)" title="Reset zoom">⟲</button>
+              <button type="button" onclick="zoomDiagram(this, 1.2)" title="Zoom in" aria-label="Zoom system diagram in">+</button>
+              <button type="button" onclick="zoomDiagram(this, 1 / 1.2)" title="Zoom out" aria-label="Zoom system diagram out">−</button>
+              <button type="button" onclick="resetZoom(this)" title="Reset zoom" aria-label="Reset system diagram zoom">⟲</button>
             </div>
-            <pre class="mermaid">
-flowchart LR
-  NODE["Bitcoin Core or Knots<br/>one logical source"]
-
-  subgraph AGENT["atlas-agent · source local"]
-    PREFLIGHT["Entry-count preflight<br/>getmempoolinfo"]
-    RPC["Verbose RPC snapshot<br/>getrawmempool true"]
-    VALIDATE["Validate complete snapshot<br/>txid · vsize · fee · entry time"]
-    LOCAL[("SourceReplica SQLite<br/>epoch + revision<br/>current membership")]
-    DIRTY[("Coalesced dirty set<br/>bounded rows + bytes")]
-    FROZEN[("One frozen action<br/>delta or checkpoint")]
-    DELIVER["Independent delivery loop"]
+            <pre class="mermaid" role="img" aria-label="End-to-end SourceReplica state path from a Bitcoin node through a bounded agent and WireGuard to active central state">
+---
+config:
+  layout: dagre
+---
+flowchart TB
+  subgraph SOURCE["Source VPS · atlas-agent cgroup MemoryMax 1 GiB · repeated for two sources"]
+    direction LR
+    NODE["Bitcoin Core or Knots"]
+    OBSERVE["getmempoolinfo ≤ 200,000<br/>getrawmempool true<br/>validate complete snapshot"]
+    LOCAL[("SourceReplica<br/>current membership<br/>epoch + revision")]
+    ACTION[("Coalesced dirty state<br/>4,096 rows · 1 MiB<br/>one stable action")]
+    DELIVER["Idempotent delivery loop"]
+    AGENTFS[("Dedicated 2 GiB ext4 image<br/>1 GiB DB · 1.75 GiB SQLite envelope")]
   end
 
-  STATEAPI["POST /api/v1/state<br/>versioned idempotent contract"]
+  WG["WireGuard-only path"]
 
-  subgraph SERVER["atlas-server · central state"]
-    REDUCER["State reducer<br/>cursor compare-and-swap"]
-    STAGING[("At most one staging generation<br/>exact-ID supersession · reader invisible")]
-    VERIFY["Verify counts · chunks<br/>canonical digest"]
-    ACTIVE[("One active generation<br/>reader visible")]
+  subgraph CENTRAL["Central VPS · atlas-server cgroup MemoryMax 1 GiB"]
+    direction LR
+    STATEAPI["POST /api/v1/state<br/>exact allowlist of two configured source IDs"]
+    REDUCER["Versioned reducer<br/>cursor compare-and-swap"]
+    STAGING[("One staging generation per source<br/>reader invisible")]
+    VERIFY["Verify entries · chunks<br/>canonical digest"]
+    ACTIVE[("One active generation per source<br/>reader visible")]
     READS["Source snapshot · summary<br/>comparison aggregates"]
+    SERVERFS[("Dedicated 4 GiB ext4 image<br/>3 GiB DB · 3.5 GiB SQLite envelope")]
   end
 
   WEB["Browser workbench<br/>selected source primary"]
 
-  NODE --> PREFLIGHT
-  PREFLIGHT --> RPC
-  RPC --> VALIDATE
-  VALIDATE -->|"complete observation"| LOCAL
-  LOCAL --> DIRTY
-  DIRTY --> FROZEN
-  FROZEN --> DELIVER
-  DELIVER --> STATEAPI
+  NODE --> OBSERVE
+  OBSERVE -->|"complete RPC observation"| LOCAL
+  LOCAL --> ACTION
+  ACTION --> DELIVER
+  LOCAL --- AGENTFS
+  DELIVER --> WG
+  WG --> STATEAPI
   STATEAPI --> REDUCER
   REDUCER -->|"checkpoint begin + chunks"| STAGING
   STAGING --> VERIFY
   VERIFY -->|"atomic commit"| ACTIVE
   REDUCER -->|"delta or heartbeat"| ACTIVE
+  ACTIVE --- SERVERFS
   ACTIVE --> READS
   READS --> WEB
-  VALIDATE -. "RPC continues during central outage" .-> LOCAL
 
   class NODE bitcoin
-  class RPC,VALIDATE,LOCAL,DIRTY,FROZEN state
-  class DELIVER,STATEAPI,REDUCER delivery
+  class OBSERVE,LOCAL,ACTION state
+  class DELIVER,WG,STATEAPI,REDUCER delivery
   class STAGING,VERIFY,ACTIVE,READS state
-  class WEB bitcoin
+  class AGENTFS,SERVERFS,WEB bitcoin
   classDef bitcoin fill:#fff3e8,stroke:#f7931a,stroke-width:2px
   classDef state fill:#e7f6ef,stroke:#07845c,stroke-width:2px
   classDef delivery fill:#e8f2fb,stroke:#1769aa,stroke-width:2px
 
-  style AGENT fill:transparent,stroke:#07845c,stroke-width:1px
-  style SERVER fill:transparent,stroke:#1769aa,stroke-width:1px
+  style SOURCE fill:transparent,stroke:#f7931a,stroke-width:1px
+  style CENTRAL fill:transparent,stroke:#1769aa,stroke-width:1px
             </pre>
           </div>
         </section>
@@ -822,65 +968,82 @@ flowchart LR
         <section class="section" id="s3">
           <div class="sec-head">
             <span class="sec-number">03</span>
-            <h2>How state converges</h2>
+            <h2>Convergence and recovery</h2>
           </div>
           <p class="section-intro">
-            Revision zero is pre-baseline only. Every successful branch either
-            publishes a stable action or updates freshness without growing a
-            history.
+            A write begins only after WAL relief and capacity admission. Normal
+            contention retries without changing the committed replica. A full
+            checkpoint is the safe fallback for bootstrap, pressure, reset, or
+            cursor disagreement.
           </p>
           <div class="mermaid-wrap">
             <div class="zoom-controls" aria-label="Lifecycle diagram zoom controls">
-              <button type="button" onclick="zoomDiagram(this, 1.2)" title="Zoom in">+</button>
-              <button type="button" onclick="zoomDiagram(this, 1 / 1.2)" title="Zoom out">−</button>
-              <button type="button" onclick="resetZoom(this)" title="Reset zoom">⟲</button>
+              <button type="button" onclick="zoomDiagram(this, 1.2)" title="Zoom in" aria-label="Zoom recovery diagram in">+</button>
+              <button type="button" onclick="zoomDiagram(this, 1 / 1.2)" title="Zoom out" aria-label="Zoom recovery diagram out">−</button>
+              <button type="button" onclick="resetZoom(this)" title="Reset zoom" aria-label="Reset recovery diagram zoom">⟲</button>
             </div>
-            <pre class="mermaid">
-flowchart LR
-  POLL(["Complete RPC poll"])
-  VALID{"All required facts valid?"}
-  RETAIN["Reject poll<br/>retain last complete state"]
-  FIRST{"First complete snapshot?"}
-  BASELINE["Install revision 1<br/>require checkpoint"]
+            <pre class="mermaid" role="img" aria-label="SourceReplica write admission, WAL relief, delta delivery, and full checkpoint recovery flow">
+flowchart TD
+  POLL(["RPC poll"])
+  PREFLIGHT{"Node reports at most<br/>200,000 entries?"}
+  SNAPSHOT["Fetch and validate<br/>one complete snapshot"]
+  RETAIN["Reject observation<br/>retain last complete state"]
+  WAL{"WAL above the<br/>64 MiB retained target?"}
+  RELIEF["TRUNCATE checkpoint<br/>outside the transaction"]
+  BUSY{"Checkpoint busy<br/>or SQLite locked?"}
+  RETRY["Retry after bounded delay<br/>leave committed state unchanged"]
+  ADMIT{"DB + WAL + SHM envelope<br/>and filesystem reserve available?"}
+  PROTECT["Reject capacity growth<br/>agent stops protectively<br/>server returns explicit failure"]
   CHANGED{"Membership or facts changed?"}
-  HEARTBEAT["Keep revision<br/>publish freshness heartbeat"]
-  DIFF["Merge-stream old and new<br/>count every mutation"]
-  PRESSURE{"Fits remaining dirty<br/>row and byte budget?"}
-  DELTA["Coalesce by txid<br/>freeze sorted delta"]
-  CHECKPOINT["Replace current snapshot<br/>freeze full checkpoint"]
-  SEND["Send exact frozen action"]
-  ACK{"Expected 202 acknowledgement?"}
-  APPLIED["Advance acknowledged cursor<br/>rebase newer dirty state"]
-  RETRY["Retain unchanged action<br/>bounded backoff"]
-  CONFLICT{"Server cursor conflict?"}
-  REBASE["Checkpoint against<br/>server active cursor"]
+  HEARTBEAT["Same revision<br/>freshness heartbeat"]
+  FALLBACK{"Bootstrap, dirty pressure,<br/>reset, or cursor conflict?"}
+  DELTA["Coalesced sorted delta"]
+  CHECKPOINT["Full checkpoint fallback<br/>frozen begin + chunks + commit"]
+  CPSEND["Send resumable checkpoint<br/>begin · chunks · commit"]
+  CPack{"Exact HTTP 202<br/>checkpoint progress?"}
+  CPSAME["Retain checkpoint<br/>and resume or retry"]
+  STAGE["Build staging generation<br/>active readers continue"]
+  VERIFY["Verify count, chunk order,<br/>and whole-snapshot digest"]
+  PROMOTE["Atomic promotion<br/>new active generation"]
+  SEND["Send versioned action"]
+  ACK{"Exact HTTP 202<br/>acknowledgement?"}
+  SAME["Retain exact action<br/>and retry"]
+  APPLIED["Advance active cursor<br/>or freshness"]
 
-  POLL --> VALID
-  VALID -->|"no"| RETAIN
-  VALID -->|"yes"| FIRST
-  FIRST -->|"yes"| BASELINE
-  FIRST -->|"no"| CHANGED
+  POLL --> PREFLIGHT
+  PREFLIGHT -->|"no"| RETAIN
+  PREFLIGHT -->|"yes"| SNAPSHOT
+  SNAPSHOT --> WAL
+  WAL -->|"yes"| RELIEF
+  WAL -->|"no"| ADMIT
+  RELIEF --> BUSY
+  BUSY -->|"yes"| RETRY
+  RETRY --> WAL
+  BUSY -->|"no"| ADMIT
+  ADMIT -->|"no"| PROTECT
+  ADMIT -->|"yes"| CHANGED
   CHANGED -->|"no"| HEARTBEAT
-  CHANGED -->|"yes"| DIFF
-  DIFF --> PRESSURE
-  PRESSURE -->|"yes"| DELTA
-  PRESSURE -->|"no"| CHECKPOINT
-  BASELINE --> CHECKPOINT
-  DELTA --> SEND
-  CHECKPOINT --> SEND
+  CHANGED -->|"yes"| FALLBACK
+  FALLBACK -->|"no"| DELTA
+  FALLBACK -->|"yes"| CHECKPOINT
   HEARTBEAT --> SEND
+  DELTA --> SEND
   SEND --> ACK
+  ACK -->|"no"| SAME
+  SAME --> SEND
   ACK -->|"yes"| APPLIED
-  ACK -->|"no"| CONFLICT
-  CONFLICT -->|"no"| RETRY
-  RETRY --> SEND
-  CONFLICT -->|"yes"| REBASE
-  REBASE --> CHECKPOINT
+  CHECKPOINT --> CPSEND
+  CPSEND --> CPack
+  CPack -->|"no"| CPSAME
+  CPSAME --> CPSEND
+  CPack -->|"yes"| STAGE
+  STAGE --> VERIFY
+  VERIFY --> PROMOTE
 
-  class POLL,FIRST,CHANGED,DIFF,PRESSURE bitcoin
-  class BASELINE,HEARTBEAT,DELTA,CHECKPOINT,APPLIED state
-  class SEND,ACK,RETRY,CONFLICT,REBASE delivery
-  class RETAIN warning
+  class POLL,PREFLIGHT,SNAPSHOT,WAL,BUSY,ADMIT,CHANGED,FALLBACK bitcoin
+  class HEARTBEAT,DELTA,CHECKPOINT,STAGE,VERIFY,PROMOTE,APPLIED state
+  class RELIEF,RETRY,SEND,ACK,SAME,CPSEND,CPack,CPSAME delivery
+  class RETAIN,PROTECT warning
   classDef bitcoin fill:#fff3e8,stroke:#f7931a,stroke-width:2px
   classDef state fill:#e7f6ef,stroke:#07845c,stroke-width:2px
   classDef delivery fill:#e8f2fb,stroke:#1769aa,stroke-width:2px
@@ -892,81 +1055,140 @@ flowchart LR
         <section class="section" id="s4">
           <div class="sec-head">
             <span class="sec-number">04</span>
-            <h2>What is bounded now</h2>
+            <h2>Capacity from rows to host resources</h2>
           </div>
           <p class="section-intro">
-            Semantic bounds stop current state from becoming an open-ended log.
-            The database cap adds a hard local circuit breaker, while transient
-            WAL and filesystem reserve remain explicit deployment work.
+            The limits deliberately overlap. Application checks protect SQLite
+            invariants and preserve headroom. Fixed ext4 images and cgroups are
+            the outer hard boundaries that protect the rest of each VPS.
           </p>
           <div class="kpi-row">
             <article class="kpi-card kpi-card--state">
-              <div class="kpi-card__value">1,000,000</div>
-              <div class="kpi-card__label">maximum membership entries</div>
+              <div class="kpi-card__value">200,000</div>
+              <div class="kpi-card__label">memberships per source</div>
             </article>
             <article class="kpi-card kpi-card--delivery">
-              <div class="kpi-card__value">4,096</div>
-              <div class="kpi-card__label">dirty mutations or checkpoint chunks</div>
+              <div class="kpi-card__value">2</div>
+              <div class="kpi-card__label">persistent production source IDs</div>
             </article>
             <article class="kpi-card kpi-card--bitcoin">
-              <div class="kpi-card__value">4 MiB</div>
-              <div class="kpi-card__label">maximum state request body</div>
+              <div class="kpi-card__value">4,096</div>
+              <div class="kpi-card__label">dirty rows · 1 MiB estimate</div>
             </article>
             <article class="kpi-card kpi-card--warning">
-              <div class="kpi-card__value">1 GiB</div>
-              <div class="kpi-card__label">default main agent database cap</div>
+              <div class="kpi-card__value">4 MiB</div>
+              <div class="kpi-card__label">request body · 512 entries per chunk</div>
             </article>
           </div>
-          <div class="table-wrap">
-            <div class="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Structure</th>
-                    <th>Bound</th>
-                    <th>Why it cannot grow with outage duration</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>Current membership</td>
-                    <td><code>1,000,000</code> rows</td>
-                    <td>The count is preflighted, then each complete observation replaces current facts.</td>
-                  </tr>
-                  <tr>
-                    <td>Dirty state</td>
-                    <td><code>4,096</code> rows and <code>1 MiB</code> estimated</td>
-                    <td>Repeated changes to one txid overwrite one coalesced row.</td>
-                  </tr>
-                  <tr>
-                    <td>Frozen action</td>
-                    <td>One delta or one checkpoint</td>
-                    <td>New observations never append another in-flight action.</td>
-                  </tr>
-                  <tr>
-                    <td>Central generations</td>
-                    <td>One active and one staging per source</td>
-                    <td>Unique indexes forbid a third generation.</td>
-                  </tr>
-                  <tr>
-                    <td>HTTP payload</td>
-                    <td><code>4 MiB</code>, with <code>512</code> entries per chunk</td>
-                    <td>Large snapshots are resumed as bounded deterministic chunks.</td>
-                  </tr>
-                </tbody>
-              </table>
+          <div class="bound-grid">
+            <article class="bound-stack">
+              <div class="bound-stack__head">
+                <h3>Each source agent</h3>
+                <span>one service · one data image</span>
+              </div>
+              <div class="bound-layer bound-layer--semantic">
+                <div class="bound-layer__name">Logical state</div>
+                <div class="bound-layer__value">
+                  <strong>200,000 memberships</strong>; 4,096 dirty rows and
+                  1 MiB estimated dirty bytes; one stable delivery action.
+                </div>
+              </div>
+              <div class="bound-layer bound-layer--sqlite">
+                <div class="bound-layer__name">SQLite admission</div>
+                <div class="bound-layer__value">
+                  <strong>1 GiB main DB</strong>; <strong>1.75 GiB</strong>
+                  DB + WAL + SHM envelope; 64 MiB retained WAL target;
+                  autocheckpoint every 1,000 pages; preserve the greater of
+                  128 MiB or 5% filesystem space.
+                </div>
+              </div>
+              <div class="bound-layer bound-layer--filesystem">
+                <div class="bound-layer__name">Disk boundary</div>
+                <div class="bound-layer__value">
+                  <strong>2 GiB fully allocated ext4 image</strong>, never
+                  automatically grown. The service requires the mount and
+                  refuses a root-filesystem fallback.
+                </div>
+              </div>
+              <div class="bound-layer bound-layer--process">
+                <div class="bound-layer__name">Memory boundary</div>
+                <div class="bound-layer__value">
+                  <strong>MemoryHigh 768 MiB</strong>; MemoryMax 1 GiB;
+                  MemorySwapMax 0.
+                </div>
+              </div>
+            </article>
+
+            <article class="bound-stack">
+              <div class="bound-stack__head">
+                <h3>Central server</h3>
+                <span>two sources · one data image</span>
+              </div>
+              <div class="bound-layer bound-layer--semantic">
+                <div class="bound-layer__name">Logical state</div>
+                <div class="bound-layer__value">
+                  <strong>Two persistent source IDs</strong>; each active or
+                  staging generation holds at most 200,000 memberships; at most
+                  one active plus one staging generation per source.
+                </div>
+              </div>
+              <div class="bound-layer bound-layer--sqlite">
+                <div class="bound-layer__name">SQLite admission</div>
+                <div class="bound-layer__value">
+                  <strong>3 GiB main DB</strong>; <strong>3.5 GiB</strong>
+                  DB + WAL + SHM envelope; 64 MiB retained WAL target;
+                  autocheckpoint every 1,000 pages; preserve the greater of
+                  256 MiB or 5% filesystem space.
+                </div>
+              </div>
+              <div class="bound-layer bound-layer--filesystem">
+                <div class="bound-layer__name">Disk boundary</div>
+                <div class="bound-layer__value">
+                  <strong>4 GiB fully allocated ext4 image</strong>, never
+                  automatically grown. The server requires the mount and
+                  refuses a root-filesystem fallback.
+                </div>
+              </div>
+              <div class="bound-layer bound-layer--process">
+                <div class="bound-layer__name">Memory boundary</div>
+                <div class="bound-layer__value">
+                  <strong>MemoryHigh 768 MiB</strong>; MemoryMax 1 GiB;
+                  MemorySwapMax 0.
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div class="policy-strip" aria-label="Common service resource controls">
+            <div class="policy-item">
+              <div class="policy-item__label">CPU</div>
+              <div class="policy-item__value">
+                CPUWeight 10 · CPUQuota 50% · Nice 10
+              </div>
+            </div>
+            <div class="policy-item">
+              <div class="policy-item__label">Disk I/O on /dev/sda</div>
+              <div class="policy-item__value">
+                IOWeight 10 · 25 MiB/s read · 10 MiB/s write · best-effort
+                I/O priority 7
+              </div>
+            </div>
+            <div class="policy-item">
+              <div class="policy-item__label">Process count</div>
+              <div class="policy-item__value">TasksMax 64 for each service</div>
             </div>
           </div>
+
           <div class="callout">
-            <strong>Capacity acceptance is not complete yet.</strong>
+            <strong>Application admission and deployment containment are different guarantees.</strong>
             <p>
-              <code>max_page_count</code> bounds the main SQLite file, not a
-              transient WAL burst. A frozen checkpoint may coexist with current
-              membership, and <code>corepc-client</code> buffers the verbose RPC
-              response before decoding. We still need measured two-snapshot and
-              response-buffer overhead plus a filesystem guard that preserves
-              the greater of 20 percent free or 5 GiB before calling the 2 GiB
-              source-VPS envelope production-safe.
+              The SQLite policy checks the main file, sidecars, and remaining
+              filesystem reserve before a mutation. It also tries to truncate
+              an oversized WAL and retries normal checkpoint contention. The
+              fixed ext4 image is the hard disk ceiling even during transient
+              allocation, while the cgroup is the hard process-resource edge.
+              Capacity rejection leaves the last committed state intact: the
+              agent stops protectively and the server rejects the mutation.
             </p>
           </div>
         </section>
@@ -974,72 +1196,71 @@ flowchart LR
         <section class="section" id="s5">
           <div class="sec-head">
             <span class="sec-number">05</span>
-            <h2>Three separate data lifecycles</h2>
+            <h2>The production boundary</h2>
           </div>
           <p class="section-intro">
-            The production destination is not one larger database. It is three
-            products with different value, retention, and failure rules.
+            Current state is deliberately narrow. Network exposure is restricted
+            to the two configured source identities, and evidence remains
+            outside the production membership path until it has its own quotas
+            and archive contract.
           </p>
-          <div class="phase-grid">
-            <article class="phase-card phase-card--built">
-              <div class="phase-card__status">Implemented now</div>
-              <h3>SourceReplica</h3>
-              <p>
-                Exact current membership, epoch, revision, and freshness. It
-                prefers checkpoint fallback over incomplete state and must keep
-                converging when evidence is shed or unavailable.
-              </p>
+          <div class="diff-panels">
+            <article class="diff-panel diff-panel--new">
+              <div class="diff-panel__header">Production surface</div>
+              <div class="diff-panel__body">
+                <h3>State and reads only</h3>
+                <p>
+                  The agent derives membership only from complete RPC snapshots.
+                  The server accepts SourceReplica traffic only over its
+                  WireGuard deployment path and requires an exact allowlist of
+                  the two configured source IDs. Product queries read active
+                  generations only; staging is never discoverable.
+                </p>
+              </div>
             </article>
-            <article class="phase-card phase-card--next">
-              <div class="phase-card__status">Next slice</div>
-              <h3>Bounded HotStore</h3>
-              <p>
-                Recent rejections, peer metadata, capture gaps, and intrinsic
-                derivations with explicit age, count, and byte quotas. Pressure
-                may shed evidence but cannot block SourceReplica.
-              </p>
-            </article>
-            <article class="phase-card phase-card--later">
-              <div class="phase-card__status">After HotStore</div>
-              <h3>EvidenceArchive</h3>
-              <p>
-                Content-addressed raw transaction data and compact sightings in
-                sealed local segments. Delete a segment only after off-VPS size
-                and digest verification.
-              </p>
+            <article class="diff-panel" style="--tone: var(--future); --tone-dim: var(--future-dim)">
+              <div class="diff-panel__header">Deferred surface</div>
+              <div class="diff-panel__body">
+                <h3>Evidence is separate</h3>
+                <p>
+                  Peer sightings, rejections, capture gaps, raw transactions,
+                  and forensic archives are reported as not collected today.
+                  A future bounded HotStore and verified EvidenceArchive must
+                  use separate ordering, disk budgets, shedding rules, and
+                  failure behavior. They can never establish membership.
+                </p>
+              </div>
             </article>
           </div>
 
           <div class="mermaid-wrap" style="margin-top: 16px; min-height: 350px">
-            <div class="zoom-controls" aria-label="Roadmap diagram zoom controls">
-              <button type="button" onclick="zoomDiagram(this, 1.2)" title="Zoom in">+</button>
-              <button type="button" onclick="zoomDiagram(this, 1 / 1.2)" title="Zoom out">−</button>
-              <button type="button" onclick="resetZoom(this)" title="Reset zoom">⟲</button>
+            <div class="zoom-controls" aria-label="Boundary diagram zoom controls">
+              <button type="button" onclick="zoomDiagram(this, 1.2)" title="Zoom in" aria-label="Zoom boundary diagram in">+</button>
+              <button type="button" onclick="zoomDiagram(this, 1 / 1.2)" title="Zoom out" aria-label="Zoom boundary diagram out">−</button>
+              <button type="button" onclick="resetZoom(this)" title="Reset zoom" aria-label="Reset boundary diagram zoom">⟲</button>
             </div>
-            <pre class="mermaid">
+            <pre class="mermaid" role="img" aria-label="Implemented RPC membership path and separately deferred evidence products">
 flowchart LR
   INPUT["Bitcoin node"]
-  STATE["SourceReplica<br/>current RPC state"]
-  HOT["HotStore<br/>recent bounded evidence"]
-  SPOOL["Quota-bound archive spool"]
-  ARCHIVE["Verified off-VPS<br/>EvidenceArchive"]
-  PRODUCT["Current mempool product"]
-  PANELS["Recent evidence panels"]
-  FORENSICS["Historical forensic queries"]
+  RPC["Complete RPC snapshot<br/>sole membership authority"]
+  STATE["SourceReplica<br/>active current state"]
+  PRODUCT["Current mempool product<br/>source + summary + comparison"]
+  PEER["peer-observer / NATS"]
+  NOTCOLLECTED["Production status<br/>not_collected"]
+  HOT["Future bounded HotStore<br/>recent evidence"]
+  ARCHIVE["Future verified<br/>EvidenceArchive"]
 
-  INPUT --> STATE
-  INPUT -. "peer evidence later" .-> HOT
-  HOT -. "sealed segments" .-> SPOOL
-  SPOOL -. "size + digest verified" .-> ARCHIVE
+  INPUT --> RPC
+  RPC --> STATE
   STATE --> PRODUCT
-  HOT -.-> PANELS
-  ARCHIVE -.-> FORENSICS
-  HOT -. "never blocks" .-> STATE
+  INPUT -. "peer evidence" .-> PEER
+  PEER -. "deferred today" .-> NOTCOLLECTED
+  PEER -. "separate quotas later" .-> HOT
+  HOT -. "verified sealed segments" .-> ARCHIVE
 
   class INPUT bitcoin
-  class STATE,PRODUCT state
-  class HOT,SPOOL,PANELS future
-  class ARCHIVE,FORENSICS future
+  class RPC,STATE,PRODUCT state
+  class PEER,NOTCOLLECTED,HOT,ARCHIVE future
   classDef bitcoin fill:#fff3e8,stroke:#f7931a,stroke-width:2px
   classDef state fill:#e7f6ef,stroke:#07845c,stroke-width:2px
   classDef future fill:#f0eafb,stroke:#7650a6,stroke-width:2px,stroke-dasharray:7 5
@@ -1048,10 +1269,10 @@ flowchart LR
         </section>
 
         <footer>
-          Architecture status as of 22 July 2026. Solid state paths are
-          implemented and tested. Dashed evidence paths are intentionally
-          deferred until their quotas, shedding rules, archive verification,
-          and physical disk guards exist.
+          Architecture status as of 22 July 2026. SourceReplica, SQLite
+          admission, WAL recovery, fixed ext4 data images, and service cgroups
+          form the implemented state boundary. Dashed evidence paths remain
+          deferred until their independent quotas and archive guarantees exist.
         </footer>
       </main>
     </div>

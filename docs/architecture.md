@@ -1,6 +1,6 @@
 # Architecture
 
-The self-contained [system architecture visualisation](mempool-atlas-system.html) separates the implemented SourceReplica state path from the bounded evidence products that remain deferred. [ADR 0002](adr/0002-separate-source-state-from-bounded-evidence.md) records why the original shared event FIFO was abandoned.
+The self-contained [system architecture visualisation](mempool-atlas-system.html) separates the implemented SourceReplica state path from the bounded evidence products that remain deferred. [ADR 0002](adr/0002-separate-source-state-from-bounded-evidence.md) records why the former append-only mixed state-and-evidence queue was abandoned.
 
 Mempool Atlas has two Rust process boundaries and one dependency-free browser client. The current production surface is RPC-only and state-only.
 
@@ -69,8 +69,23 @@ Recent rejection, peer, capture-gap, and raw-transaction data will use a separat
 
 ## Capacity and operations
 
-Semantic bounds are enforced at both ends: one million membership entries, 4,096 dirty mutations, 4,096 checkpoint chunks, 512 entries per chunk, and a 4 MiB request body. The agent also defaults to a 1 GiB main SQLite file cap via `PRAGMA max_page_count`, a 64 MiB retained WAL journal limit, and automatic WAL checkpoints every 1,000 pages.
+The production capacity model is layered so each limit has one job:
 
-The main database cap does not bound transient WAL peak. A frozen checkpoint can coexist with the current snapshot, so physical sizing must include roughly two bounded memberships, indexes, page overhead, and WAL headroom. `corepc-client` buffers a verbose RPC response before decoding it; the small `getmempoolinfo` preflight rejects an already oversized node-reported mempool, but it is not an HTTP response-byte cap. The planned 2 GiB per-source envelope and filesystem reserve of the greater of 20 percent or 5 GiB are not yet runtime-enforced acceptance criteria.
+| Layer | Agent, per source | Central server | Enforcement purpose |
+| --- | --- | --- | --- |
+| Membership | 200,000 current entries; 4,096 dirty mutations; one frozen action | Two persistent source identities; 200,000 entries in each active or staging generation | Prevent state cardinality from following outage duration or request rate |
+| Request | 512 entries per checkpoint chunk; 4 MiB body | Same shared SourceReplica contract | Bound individual allocation and transfer size |
+| Main database | 1 GiB | 3 GiB | Verified SQLite `max_page_count` ceiling |
+| SQLite files | 1.75 GiB DB/WAL/SHM envelope | 3.5 GiB DB/WAL/SHM envelope | Reject new writes before consuming the deployment filesystem |
+| Filesystem reserve | Greater of 128 MiB or 5 percent | Greater of 256 MiB or 5 percent | Preserve non-privileged available space plus all remaining envelope growth |
+| WAL | 64 MiB high-water target; 1,000-page auto-checkpoint | 64 MiB high-water target; 1,000-page auto-checkpoint | Trigger truncation, admission failure, or retry without treating the target as a transient file-size quota |
+| Canary filesystem | Fixed 2 GiB ext4 image | Fixed 4 GiB ext4 image | Hard disk-consumption boundary independent of application behaviour |
+| Canary process | `MemoryHigh=768M`, `MemoryMax=1G`, no swap | `MemoryHigh=768M`, `MemoryMax=1G`, no swap | Hard memory boundary around buffered RPC, SQLite, and allocator peaks |
 
-Central and agent schema changes use `scripts/migrate-safe.sh`, which backs up and validates an existing database before any change. Clean preproduction databases are central generation 7 and agent generation 4. Stale generations are intentionally rejected. Reinitialize only through the backup-first `just` targets.
+The agent preflights and post-validates the 200,000-entry RPC snapshot. The server checks the configured source allowlist on every SourceReplica command, validates existing source identities and generations on startup, and rejects any non-loopback bind without an exact allowlist. Its source count is persistent rather than concurrent because SourceReplica has no source-retirement operation.
+
+The DB/WAL/SHM envelopes and filesystem reserves are application admission controls. They are not quotas and cannot prevent a transaction from temporarily growing the WAL beyond its 64 MiB high-water target. Before growth, Atlas attempts WAL relief and checks available space. A pinned checkpoint or concurrent high-water crossing is retried without changing the frozen action; sustained pressure rejects further state writes while preserving the last committed state. The fully allocated ext4 images are the hard disk boundary, and their creation or service start requires the host root filesystem to retain the greater of 5 GiB or 20 percent free.
+
+An agent can hold current membership plus one frozen checkpoint, while the server can hold one active and one staging generation for each of its two sources. Capacity sizing includes both copies, indexes, page overhead, WAL headroom, and the RPC response buffer. The canary cgroups also apply a 50 percent CPU quota, bounded disk bandwidth, and `TasksMax=64`, limiting collateral impact when a process reaches pressure.
+
+Central and agent schema changes use `scripts/migrate-safe.sh`, which backs up and validates an existing database before any change. Clean preproduction databases are central generation 8 and agent generation 5. Stale generations are intentionally rejected. Reinitialize only through the backup-first `just` targets.
