@@ -48,7 +48,7 @@ Every 30 seconds, capture accounting logs cumulative total NATS messages, suppor
 
 ## Persistent state and recovery
 
-The schema stores the source binding, last successful RPC time, per-session sequence counters, pending events, delivery failure state, and effective membership plus its all-or-none fact bundle (`apps/atlas-agent/migrations/0001_initial.sql`). Raw NATS subject and payload bytes are retained with a row only while that event remains pending.
+The schema stores the source binding, last successful RPC time, per-session sequence counters, pending events, delivery failure state, and effective membership plus its all-or-none fact bundle (`apps/atlas-agent/migrations/0001_initial.sql`). Raw NATS subject and payload bytes are retained with a row only while that event remains pending. Every agent-owned SQLite connection uses memory-backed temporary tables, indices, and statement journals, while the persistent database, WAL, and SHM files remain in the configured database directory. This prevents those runtime spills from requiring a writable operating-system temporary directory.
 
 Use one writer and one persistent database per source. Opening an existing database with a different `ATLAS_SOURCE_ID` fails. Initialize it only through the backup-first wrapper:
 

@@ -468,6 +468,7 @@ fn configure_connection(connection: &Connection) -> Result<(), rusqlite::Error> 
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "temp_store", "MEMORY")?;
     Ok(())
 }
 
@@ -701,6 +702,17 @@ mod tests {
         Outbox::migrate(&path).expect("migrate temporary outbox");
         let outbox = Outbox::open(&path, source("core-a")).expect("open outbox");
         (temporary, path, outbox)
+    }
+
+    #[test]
+    fn opened_connections_use_memory_temp_store() {
+        let (_temporary, _path, outbox) = test_outbox();
+        let connection = outbox.connect().expect("connect");
+        let temp_store = connection
+            .pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))
+            .expect("read temp store");
+
+        assert_eq!(temp_store, 2);
     }
 
     fn added(txid: &str) -> Evidence {

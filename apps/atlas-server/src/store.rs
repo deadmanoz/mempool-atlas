@@ -672,6 +672,7 @@ fn configure_connection(connection: &Connection) -> Result<(), rusqlite::Error> 
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "temp_store", "MEMORY")?;
     Ok(())
 }
 
@@ -1091,6 +1092,17 @@ mod tests {
         Store::migrate(&path).expect("migrate");
         let store = Store::open(path).expect("open");
         (temporary, store)
+    }
+
+    #[test]
+    fn opened_connections_use_memory_temp_store() {
+        let (_temporary, store) = test_store();
+        let connection = store.connect().expect("connect");
+        let temp_store = connection
+            .pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))
+            .expect("read temp store");
+
+        assert_eq!(temp_store, 2);
     }
 
     fn source() -> SourceId {

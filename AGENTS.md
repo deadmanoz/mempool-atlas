@@ -84,6 +84,7 @@ Use `just` targets when one exists:
 - Run one agent writer and one persistent agent database per source. The database is source-bound and contains pending evidence plus the effective projection; deleting it is not a supported reset path. A coordinated backup-first preproduction reinitialization of central state and every source outbox is the only current exception.
 - Outbox delivery is strict FIFO. Live and other non-reconciliation evidence is delivered singly. A contiguous `mempool_reconciled` prefix may contain at most 512 events and 4 MiB of encoded JSON.
 - Remove a single head or reconciliation prefix only after HTTP 202 with complete acknowledgements for the same event IDs in the same order. The server must apply a batch in one transaction so a lost response can safely retry the whole prefix.
+- Keep `PRAGMA temp_store=MEMORY` on every Atlas-owned SQLite connection. Hardened services may leave operating-system temporary directories read-only, but the configured database directory must remain writable for the database, WAL, and SHM files.
 
 ## Documentation
 
