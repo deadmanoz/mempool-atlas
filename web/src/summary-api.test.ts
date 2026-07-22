@@ -190,6 +190,14 @@ describe("parseMempoolSummary", () => {
       },
     ],
     [
+      "shape histogram bin count mismatch with its catalog",
+      (payload: Record<string, unknown>): void => {
+        const histograms = payload.histograms as Record<string, unknown>;
+        const age = histograms.age as Record<string, unknown>;
+        age.bins = (age.bins as unknown[]).slice(0, 5);
+      },
+    ],
+    [
       "missing histogram dimension",
       (payload: Record<string, unknown>): void => {
         delete (payload.histograms as Record<string, unknown>).age;

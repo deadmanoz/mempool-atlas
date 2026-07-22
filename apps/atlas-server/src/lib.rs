@@ -1,4 +1,6 @@
 pub mod api;
+pub mod comparison;
+pub mod rejections;
 pub mod store;
 pub mod summary;
 

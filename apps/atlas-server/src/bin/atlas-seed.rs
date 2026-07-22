@@ -5,14 +5,15 @@
 //!
 //! Every synthetic transaction is a real, consensus-serializable
 //! [`bitcoin::Transaction`] whose input and output shape is constructed to
-//! satisfy its class's server-side heuristic rule. Each transaction emits two
-//! events in order: a `p2p_transaction` observation carrying the computed
-//! txid, wtxid, and raw transaction hex, then the RPC-style membership
-//! evidence — a reconciled `present` fact triple whose vsize is the
-//! constructed transaction's real vsize, or `mempool_added` for the
-//! awaiting-RPC fraction. Server-side enrichment can therefore derive shape
-//! facts and classifier verdicts from the raw bytes instead of trusting a
-//! generator-side label.
+//! satisfy its class's server-side heuristic rule. Admitted transactions emit
+//! a `p2p_transaction` observation carrying the computed txid, wtxid, and raw
+//! transaction hex, then RPC-style membership evidence: either a reconciled
+//! `present` fact triple whose vsize is the constructed transaction's real
+//! vsize, or `mempool_added` for the awaiting-RPC fraction. Rejected
+//! transactions emit refusal evidence and may omit the P2P observation.
+//! Server-side enrichment can therefore derive shape facts and classifier
+//! verdicts from available raw bytes instead of trusting a generator-side
+//! label.
 //!
 //! Txids derive deterministically from the seed while each run uses a fresh
 //! source session, so re-running with the same seed refreshes the facts and
@@ -38,15 +39,24 @@
 //! so every verdict bin of the `bip110` and `data_protocol` taxonomies
 //! renders locally. Specials are behavior-classified however they honestly
 //! fall out: the data-carrying kinds land in `data`, the rest in `payment`.
+//!
+//! Every index selected by [`is_rejection_index`] (1.5% of the population, on
+//! offsets that are all 13 modulo 50 and therefore globally disjoint from the
+//! BIP-110 and data-protocol cycles) is refused instead of admitted: it emits
+//! a `mempool_rejected` event with a cycling realistic reason and never enters
+//! membership. Half of the rejected transactions emit their `p2p_transaction`
+//! sighting first, so their bytes classify and the rejection read surface's
+//! attribution has both classified and unclassified refusals to render.
 
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use atlas_classifiers::arc4;
 use atlas_model::{
     CaptureGapCertainty, Evidence, IngestBatchRequest, IngestBatchResponse, IngestStatus,
-    MAX_INGEST_BATCH_EVENTS, MempoolEntryFacts, NormalizedEvent, ReconciledMembership, SourceId,
-    SourceSessionId,
+    MAX_INGEST_BATCH_EVENTS, MembershipMutation, MempoolEntryFacts, MempoolSnapshot,
+    NormalizedEvent, ReconciledMembership, SourceId, SourceSessionId,
 };
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::encode::serialize_hex;
@@ -56,19 +66,34 @@ use bitcoin::{
     Amount, OutPoint, PubkeyHash, ScriptBuf, ScriptHash, Sequence, Transaction, TxIn, TxOut, Txid,
     WPubkeyHash, WScriptHash, Witness, WitnessProgram, WitnessVersion,
 };
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "atlas-seed")]
 #[command(about = "Seed a running atlas-server with a deterministic synthetic mempool")]
 struct Cli {
     /// Base URL of the running atlas-server.
-    #[arg(long, default_value = "http://127.0.0.1:3101")]
+    #[arg(long, default_value = "http://127.0.0.1:3101", global = true)]
     server: String,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Seed one source with a deterministic synthetic mempool.
+    Single(SingleArgs),
+    /// Seed three related sources (strictest to most permissive) sharing one
+    /// base population with realistic fork-relay divergence.
+    Forks(ForksArgs),
+}
+
+#[derive(Debug, Args)]
+struct SingleArgs {
     /// Source ID to seed; must not collide with a real agent-owned source.
     #[arg(long)]
     source: String,
-    /// Number of transactions to generate; each emits two events.
+    /// Number of transactions to generate.
     #[arg(long, default_value_t = 20_000)]
     count: u64,
     /// Fraction of transactions left awaiting RPC facts.
@@ -80,6 +105,67 @@ struct Cli {
     /// Also record one possible-loss capture gap so honesty surfaces render.
     #[arg(long, default_value_t = false)]
     capture_gap: bool,
+}
+
+#[derive(Debug, Args)]
+struct ForksArgs {
+    /// Strictest source ID (drops data carriers and BIP-110-nonconforming txs).
+    #[arg(long, default_value = "knots")]
+    knots_source: String,
+    /// Middle source ID (drops the most-aggressive data carriers).
+    #[arg(long, default_value = "core")]
+    core_source: String,
+    /// Most permissive source ID (relays the full base population).
+    #[arg(long, default_value = "libre-relay")]
+    libre_source: String,
+    /// Number of base-population transactions the three memberships derive from.
+    #[arg(long, default_value_t = FORKS_DEFAULT_COUNT)]
+    count: u64,
+    /// Fraction of transactions left awaiting RPC facts.
+    #[arg(long, default_value_t = 0.03)]
+    awaiting_fraction: f64,
+    /// Deterministic generator seed; also part of every session identity.
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    /// Also record one possible-loss capture gap per source.
+    #[arg(long, default_value_t = false)]
+    capture_gap: bool,
+}
+
+fn validate_count(count: u64) -> anyhow::Result<()> {
+    if count == 0 {
+        bail!("--count must be greater than zero");
+    }
+    Ok(())
+}
+
+fn validate_awaiting_fraction(awaiting_fraction: f64) -> anyhow::Result<()> {
+    if !(0.0..=1.0).contains(&awaiting_fraction) {
+        bail!("--awaiting-fraction must be between 0 and 1");
+    }
+    Ok(())
+}
+
+fn validate_single_args(args: &SingleArgs) -> anyhow::Result<()> {
+    validate_count(args.count)?;
+    validate_awaiting_fraction(args.awaiting_fraction)?;
+    SourceId::new(args.source.clone())?;
+    Ok(())
+}
+
+fn validate_fork_args(args: &ForksArgs) -> anyhow::Result<[SourceId; 3]> {
+    validate_count(args.count)?;
+    validate_awaiting_fraction(args.awaiting_fraction)?;
+    let sources = [
+        SourceId::new(args.knots_source.clone())?,
+        SourceId::new(args.core_source.clone())?,
+        SourceId::new(args.libre_source.clone())?,
+    ];
+    let distinct: BTreeSet<&str> = sources.iter().map(SourceId::as_str).collect();
+    if distinct.len() != sources.len() {
+        bail!("fork source IDs must be distinct");
+    }
+    Ok(sources)
 }
 
 /// Classification a constructed transaction is shaped to match. Ordering
@@ -391,6 +477,31 @@ fn special_for_index(index: u64) -> Option<SpecialKind> {
         return Some(SpecialKind::Bip110(kind));
     }
     protocol_kind_for_index(index).map(SpecialKind::Protocol)
+}
+
+/// Modulus and offsets of the rejection cycle: three of every two hundred
+/// transactions (1.5%) are refused instead of admitted. Each offset is 13
+/// modulo 50, so the cycle is globally disjoint from the BIP-110 (multiples of
+/// 50) and data-protocol (25 modulo 50) special cycles and can never steal a
+/// transaction those cycles need to render.
+const REJECTION_SPECIAL_INTERVAL: u64 = 200;
+const REJECTION_SPECIAL_OFFSETS: [u64; 3] = [13, 63, 113];
+
+/// Realistic node reason strings, cycled across rejections so the read
+/// surface's by-reason breakdown renders more than one bucket.
+const REJECTION_REASONS: [&str; 6] = [
+    "min relay fee not met",
+    "insufficient fee",
+    "non-mandatory-script-verify-flag",
+    "tx-size",
+    "dust",
+    "bad-txns-inputs-missingorspent",
+];
+
+/// Whether the transaction at `index` is refused by policy instead of
+/// admitted to the mempool.
+fn is_rejection_index(index: u64) -> bool {
+    REJECTION_SPECIAL_OFFSETS.contains(&(index % REJECTION_SPECIAL_INTERVAL))
 }
 
 const MAX_AGE_MS: f64 = 5.0 * 86_400_000.0;
@@ -908,7 +1019,6 @@ fn construct_protocol_transaction(
 }
 
 struct SyntheticTransaction {
-    #[cfg_attr(not(test), allow(dead_code))]
     class: TxClass,
     txid: String,
     wtxid: String,
@@ -1000,48 +1110,60 @@ fn synthesize(
     }
 }
 
-fn seed_events(cli: &Cli, now_ms: u64) -> anyhow::Result<Vec<NormalizedEvent>> {
-    let source = SourceId::new(cli.source.clone())?;
+fn single_source_events(args: &SingleArgs, now_ms: u64) -> anyhow::Result<SourceEvents> {
+    validate_single_args(args)?;
+    let source = SourceId::new(args.source.clone())?;
     // Facts embed run-time ages, so a re-run must be a new session: replaying
     // the previous session's event identities with fresh facts would be a
     // conflicting-event rejection, not a refresh.
-    let session = SourceSessionId::new(format!("seed-{}-{now_ms}", cli.seed))?;
-    let mut rng = Rng::new(cli.seed);
-    let mut sequence = 0;
-    let mut next_event = |evidence| -> anyhow::Result<NormalizedEvent> {
-        sequence += 1;
-        Ok(NormalizedEvent::new(
-            source.clone(),
-            session.clone(),
-            sequence,
-            now_ms,
-            now_ms,
-            evidence,
-        )?)
-    };
+    let mut source = SourceEvents::new(source, format!("seed-{}-{now_ms}", args.seed), now_ms)?;
+    let mut rng = Rng::new(args.seed);
 
-    let mut events = Vec::new();
-    if cli.capture_gap {
-        events.push(next_event(Evidence::CaptureGap {
+    if args.capture_gap {
+        source.push(Evidence::CaptureGap {
             input: "atlas_seed".to_owned(),
             reason: "synthetic_gap".to_owned(),
             certainty: CaptureGapCertainty::PossibleLoss,
-        })?);
+        })?;
     }
-    for index in 0..cli.count {
+    let mut rejection_ordinal = 0_usize;
+    for index in 0..args.count {
         let transaction = synthesize(
             &mut rng,
-            cli.awaiting_fraction,
+            args.awaiting_fraction,
             now_ms,
             special_for_index(index),
         );
-        events.push(next_event(Evidence::P2pTransaction {
+        if is_rejection_index(index) {
+            // A policy refusal never enters membership. Half of the rejected
+            // transactions emit their P2P sighting first, so their bytes
+            // classify and exercise attribution; the other half are refused
+            // before any bytes are seen and stay unclassified.
+            let reason = REJECTION_REASONS[rejection_ordinal % REJECTION_REASONS.len()];
+            let seen_first = rejection_ordinal.is_multiple_of(2);
+            rejection_ordinal += 1;
+            if seen_first {
+                source.push(Evidence::P2pTransaction {
+                    txid: transaction.txid.clone(),
+                    wtxid: transaction.wtxid,
+                    raw_transaction_hex: Some(transaction.raw_transaction_hex),
+                    peer_id: Some(transaction.peer_id),
+                    inbound: Some(true),
+                })?;
+            }
+            source.push(Evidence::MempoolRejected {
+                txid: transaction.txid,
+                reason: reason.to_owned(),
+            })?;
+            continue;
+        }
+        source.push(Evidence::P2pTransaction {
             txid: transaction.txid.clone(),
             wtxid: transaction.wtxid,
             raw_transaction_hex: Some(transaction.raw_transaction_hex),
             peer_id: Some(transaction.peer_id),
             inbound: Some(true),
-        })?);
+        })?;
         let evidence = if transaction.awaiting_rpc {
             Evidence::MempoolAdded {
                 txid: transaction.txid,
@@ -1054,31 +1176,319 @@ fn seed_events(cli: &Cli, now_ms: u64) -> anyhow::Result<Vec<NormalizedEvent>> {
                 },
             }
         };
-        events.push(next_event(evidence)?);
+        source.push(evidence)?;
     }
-    Ok(events)
+    Ok(source)
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    if !(0.0..=1.0).contains(&cli.awaiting_fraction) {
-        bail!("--awaiting-fraction must be between 0 and 1");
+#[cfg(test)]
+fn seed_events(args: &SingleArgs, now_ms: u64) -> anyhow::Result<Vec<NormalizedEvent>> {
+    Ok(single_source_events(args, now_ms)?.events)
+}
+
+/// Forks-mode default base-population size. Smaller than the single-source
+/// default because three source memberships derive from one base population.
+const FORKS_DEFAULT_COUNT: u64 = 5_000;
+
+/// Core drops one in this many data-class transactions (modeling its stricter
+/// datacarrier policy), on top of every oversized-OP_RETURN construction.
+const CORE_DATA_DROP_INTERVAL: u64 = 7;
+
+/// Knots emits a `mempool_rejected` event for one in this many of the
+/// transactions it filters out of Core's set, so the rejection panel shows
+/// Knots refusing what Core relays. The remainder it drops silently.
+const KNOTS_REJECT_INTERVAL: usize = 3;
+
+/// A handful of transactions only Knots saw, so the reverse anomaly region
+/// (present in the stricter source, absent from the more permissive one) is
+/// non-empty and visibly exercised.
+const FORKS_ANOMALY_COUNT: u64 = 8;
+
+/// Whether a dedicated special construction is definitively BIP-110
+/// nonconforming. An ambiguous annex classifies `indeterminate`, not
+/// nonconforming, so Knots does not filter it on that basis.
+fn is_bip110_nonconforming(special: Option<SpecialKind>) -> bool {
+    match special {
+        Some(SpecialKind::Bip110(kind)) => kind != Bip110Kind::AmbiguousAnnex,
+        Some(SpecialKind::Protocol(kind)) => kind == ProtocolKind::Stamps,
+        None => false,
     }
-    let now_ms = u64::try_from(
+}
+
+/// Whether Core relays a base transaction. Core drops the most-aggressive data
+/// carriers its stricter datacarrier policy would refuse: every
+/// oversized-OP_RETURN construction and a fraction of the data class.
+fn core_admits(
+    index: u64,
+    transaction: &SyntheticTransaction,
+    special: Option<SpecialKind>,
+) -> bool {
+    let core_drops = matches!(
+        special,
+        Some(SpecialKind::Bip110(Bip110Kind::OversizedOpReturn))
+    ) || (transaction.class == TxClass::Data
+        && index.is_multiple_of(CORE_DATA_DROP_INTERVAL));
+    !core_drops
+}
+
+/// Whether Knots filters a transaction out of Core's set: it refuses data
+/// carriers (inscriptions, oversized data) and BIP-110-nonconforming outputs.
+fn knots_filters(transaction: &SyntheticTransaction, special: Option<SpecialKind>) -> bool {
+    transaction.class == TxClass::Data || is_bip110_nonconforming(special)
+}
+
+/// Accumulates one source's ordered event stream under a single fresh session.
+struct SourceEvents {
+    source: SourceId,
+    session: SourceSessionId,
+    now_ms: u64,
+    sequence: u64,
+    events: Vec<NormalizedEvent>,
+}
+
+impl SourceEvents {
+    fn new(source: SourceId, session: String, now_ms: u64) -> anyhow::Result<Self> {
+        Ok(Self {
+            source,
+            session: SourceSessionId::new(session)?,
+            now_ms,
+            sequence: 0,
+            events: Vec::new(),
+        })
+    }
+
+    fn push(&mut self, evidence: Evidence) -> anyhow::Result<()> {
+        self.sequence += 1;
+        self.events.push(NormalizedEvent::new(
+            self.source.clone(),
+            self.session.clone(),
+            self.sequence,
+            self.now_ms,
+            self.now_ms,
+            evidence,
+        )?);
+        Ok(())
+    }
+
+    /// Emits the transaction's P2P sighting so server-side enrichment derives
+    /// its shape facts and classifier verdicts once, globally by txid.
+    fn observe(&mut self, transaction: &SyntheticTransaction) -> anyhow::Result<()> {
+        self.push(Evidence::P2pTransaction {
+            txid: transaction.txid.clone(),
+            wtxid: transaction.wtxid.clone(),
+            raw_transaction_hex: Some(transaction.raw_transaction_hex.clone()),
+            peer_id: Some(transaction.peer_id),
+            inbound: Some(true),
+        })
+    }
+
+    /// Emits membership evidence: a reconciled present fact triple, or
+    /// `mempool_added` for the awaiting-RPC fraction.
+    fn admit(&mut self, transaction: &SyntheticTransaction) -> anyhow::Result<()> {
+        let evidence = if transaction.awaiting_rpc {
+            Evidence::MempoolAdded {
+                txid: transaction.txid.clone(),
+            }
+        } else {
+            Evidence::MempoolReconciled {
+                txid: transaction.txid.clone(),
+                membership: ReconciledMembership::Present {
+                    facts: transaction.facts.clone(),
+                },
+            }
+        };
+        self.push(evidence)
+    }
+
+    fn reject(&mut self, transaction: &SyntheticTransaction, reason: &str) -> anyhow::Result<()> {
+        self.push(Evidence::MempoolRejected {
+            txid: transaction.txid.clone(),
+            reason: reason.to_owned(),
+        })
+    }
+}
+
+fn apply_membership_events(membership: &mut BTreeSet<String>, events: &[NormalizedEvent]) {
+    for event in events {
+        for mutation in event.membership_mutations() {
+            match mutation {
+                MembershipMutation::Present { txid, .. } => {
+                    membership.insert(txid);
+                }
+                MembershipMutation::Absent { txid } => {
+                    membership.remove(&txid);
+                }
+            }
+        }
+    }
+}
+
+fn planned_membership(source: &SourceEvents) -> BTreeSet<String> {
+    let mut membership = BTreeSet::new();
+    apply_membership_events(&mut membership, &source.events);
+    membership
+}
+
+/// Appends deterministic reconciled-absent events for every current member
+/// outside the new authored plan. The removals follow the plan's positive
+/// evidence so the completed source stream reduces exactly to the plan.
+fn append_stale_removals(
+    source: &mut SourceEvents,
+    current_membership: &BTreeSet<String>,
+) -> anyhow::Result<usize> {
+    let desired = planned_membership(source);
+    let stale: Vec<String> = current_membership.difference(&desired).cloned().collect();
+    for txid in &stale {
+        source.push(Evidence::MempoolReconciled {
+            txid: txid.clone(),
+            membership: ReconciledMembership::Absent,
+        })?;
+    }
+    Ok(stale.len())
+}
+
+/// Builds the three per-source event streams for a staged fork seed. Every base
+/// transaction is admitted by `libre-relay`; `core` omits the most-aggressive
+/// data carriers; `knots` omits the data and BIP-110-nonconforming set and
+/// additionally rejects a portion of what it omits. A handful of Knots-only
+/// anomaly transactions keep the reverse anomaly region non-empty. Bytes are
+/// observed once, via the most permissive source that carries each txid, so
+/// classification derives for every txid regardless of the source a region
+/// reads.
+fn fork_events(args: &ForksArgs, now_ms: u64) -> anyhow::Result<Vec<SourceEvents>> {
+    let [knots_source, core_source, libre_source] = validate_fork_args(args)?;
+    let mut knots = SourceEvents::new(
+        knots_source,
+        format!("fork-knots-{}-{now_ms}", args.seed),
+        now_ms,
+    )?;
+    let mut core = SourceEvents::new(
+        core_source,
+        format!("fork-core-{}-{now_ms}", args.seed),
+        now_ms,
+    )?;
+    let mut libre = SourceEvents::new(
+        libre_source,
+        format!("fork-libre-{}-{now_ms}", args.seed),
+        now_ms,
+    )?;
+
+    if args.capture_gap {
+        for source in [&mut knots, &mut core, &mut libre] {
+            source.push(Evidence::CaptureGap {
+                input: "atlas_seed".to_owned(),
+                reason: "synthetic_gap".to_owned(),
+                certainty: CaptureGapCertainty::PossibleLoss,
+            })?;
+        }
+    }
+
+    let mut rng = Rng::new(args.seed);
+    let mut knots_reject_ordinal = 0_usize;
+    for index in 0..args.count {
+        let special = special_for_index(index);
+        let transaction = synthesize(&mut rng, args.awaiting_fraction, now_ms, special);
+        // libre-relay carries the full base population and observes every txid's
+        // bytes, so classification derives globally.
+        libre.observe(&transaction)?;
+        libre.admit(&transaction)?;
+        if !core_admits(index, &transaction, special) {
+            // Dropped by Core (and therefore Knots): a libre-only carrier that
+            // surfaces as `added` at the core -> libre stage.
+            continue;
+        }
+        core.admit(&transaction)?;
+        if knots_filters(&transaction, special) {
+            // In Core, filtered by Knots: `added` at the knots -> core stage.
+            // Knots rejects a portion of what it filters, cycling reasons; the
+            // remainder it drops silently.
+            if knots_reject_ordinal.is_multiple_of(KNOTS_REJECT_INTERVAL) {
+                let reason = REJECTION_REASONS
+                    [(knots_reject_ordinal / KNOTS_REJECT_INTERVAL) % REJECTION_REASONS.len()];
+                knots.reject(&transaction, reason)?;
+            }
+            knots_reject_ordinal += 1;
+        } else {
+            knots.admit(&transaction)?;
+        }
+    }
+
+    // Knots-only anomalies: present transactions the more-permissive sources
+    // never saw, so the knots -> core stage's reverse anomaly is non-empty.
+    for _ in 0..FORKS_ANOMALY_COUNT {
+        let transaction = synthesize(&mut rng, 0.0, now_ms, None);
+        knots.observe(&transaction)?;
+        knots.admit(&transaction)?;
+    }
+
+    Ok(vec![knots, core, libre])
+}
+
+fn current_now_ms() -> anyhow::Result<u64> {
+    u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock before unix epoch")?
             .as_millis(),
     )
-    .context("system clock beyond representable milliseconds")?;
+    .context("system clock beyond representable milliseconds")
+}
 
-    let events = seed_events(&cli, now_ms)?;
-    let client = reqwest::blocking::Client::new();
-    let batch_url = format!("{}/api/v1/events/batch", cli.server.trim_end_matches('/'));
+fn require_success(
+    response: reqwest::blocking::Response,
+    operation: &str,
+) -> anyhow::Result<reqwest::blocking::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    bail!("{operation} returned {status}: {body}")
+}
+
+/// Reads one target source's complete current membership before replacement.
+/// An unknown source has no current members and is valid for a first seed run.
+fn fetch_current_membership(
+    client: &reqwest::blocking::Client,
+    server: &str,
+    source: &SourceId,
+) -> anyhow::Result<BTreeSet<String>> {
+    let url = format!("{server}/api/v1/sources/{source}/mempool");
+    let response = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("fetching current membership from {url}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(BTreeSet::new());
+    }
+    let response = require_success(response, &format!("current membership read for {source}"))?;
+    let snapshot: MempoolSnapshot = response
+        .json()
+        .with_context(|| format!("parsing current membership for {source}"))?;
+    if snapshot.source_id != *source {
+        bail!(
+            "current membership read for {source} returned source {}",
+            snapshot.source_id
+        );
+    }
+    Ok(snapshot
+        .memberships
+        .into_iter()
+        .map(|membership| membership.txid)
+        .collect())
+}
+
+/// Delivers one source's events through the real batch-ingest path, chunked to
+/// the wire batch limit, tallying applied and duplicate acknowledgements.
+fn deliver(
+    client: &reqwest::blocking::Client,
+    batch_url: &str,
+    events: &[NormalizedEvent],
+) -> anyhow::Result<(u64, u64)> {
     let (mut applied, mut duplicate) = (0_u64, 0_u64);
     for chunk in events.chunks(MAX_INGEST_BATCH_EVENTS) {
         let response = client
-            .post(&batch_url)
+            .post(batch_url)
             .json(&IngestBatchRequest {
                 events: chunk.to_vec(),
             })
@@ -1103,20 +1513,32 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+    Ok((applied, duplicate))
+}
+
+fn run_single(server: &str, args: &SingleArgs, now_ms: u64) -> anyhow::Result<()> {
+    let mut source = single_source_events(args, now_ms)?;
+    let client = reqwest::blocking::Client::new();
+    let server = server.trim_end_matches('/');
+    let current_membership = fetch_current_membership(&client, server, &source.source)?;
+    let stale = append_stale_removals(&mut source, &current_membership)?;
+    if stale > 0 {
+        println!("source {}: scheduled {stale} stale removals", source.source);
+    }
+
+    let batch_url = format!("{server}/api/v1/events/batch");
+    let (applied, duplicate) = deliver(&client, &batch_url, &source.events)?;
     println!(
         "seeded source {}: {applied} applied, {duplicate} duplicate",
-        cli.source
+        args.source
     );
 
-    let summary_url = format!(
-        "{}/api/v1/sources/{}/mempool/summary",
-        cli.server.trim_end_matches('/'),
-        cli.source
-    );
-    let summary: serde_json::Value = client
+    let summary_url = format!("{server}/api/v1/sources/{}/mempool/summary", args.source);
+    let response = client
         .get(&summary_url)
         .send()
-        .with_context(|| format!("fetching {summary_url}"))?
+        .with_context(|| format!("fetching {summary_url}"))?;
+    let summary: serde_json::Value = require_success(response, "summary smoke read")?
         .json()
         .context("parsing summary")?;
     println!(
@@ -1126,9 +1548,75 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_forks(server: &str, args: &ForksArgs, now_ms: u64) -> anyhow::Result<()> {
+    let mut sources = fork_events(args, now_ms)?;
+    let client = reqwest::blocking::Client::new();
+    let server = server.trim_end_matches('/');
+    // Read every target before the first write so a later read failure cannot
+    // leave an avoidable partial replacement.
+    let current_memberships = sources
+        .iter()
+        .map(|source| fetch_current_membership(&client, server, &source.source))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for (source, current) in sources.iter_mut().zip(&current_memberships) {
+        let stale = append_stale_removals(source, current)?;
+        if stale > 0 {
+            println!("source {}: scheduled {stale} stale removals", source.source);
+        }
+    }
+
+    let batch_url = format!("{server}/api/v1/events/batch");
+    for source in &sources {
+        let (applied, duplicate) = deliver(&client, &batch_url, &source.events)?;
+        println!(
+            "seeded source {}: {applied} applied, {duplicate} duplicate",
+            source.source
+        );
+    }
+
+    // Fetch the derived comparison so the staged divergence is visible. The
+    // order is least to most permissive, matching the fork presets.
+    let compare_url = format!(
+        "{server}/api/v1/sources/compare?sources={},{},{}",
+        args.knots_source, args.core_source, args.libre_source
+    );
+    let response = client
+        .get(&compare_url)
+        .send()
+        .with_context(|| format!("fetching {compare_url}"))?;
+    let comparison: serde_json::Value = require_success(response, "comparison smoke read")?
+        .json()
+        .context("parsing comparison")?;
+    println!(
+        "comparison shared present {}, awaiting {}",
+        comparison["shared"]["present"]["count"], comparison["shared"]["awaiting_rpc"]["count"],
+    );
+    if let Some(stages) = comparison["stages"].as_array() {
+        for stage in stages {
+            println!(
+                "  {} -> {}: added present {}, anomaly present {}",
+                stage["from"],
+                stage["to"],
+                stage["added"]["present"]["count"],
+                stage["anomaly"]["present"]["count"],
+            );
+        }
+    }
+    Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let now_ms = current_now_ms()?;
+    match &cli.command {
+        Command::Single(args) => run_single(&cli.server, args, now_ms),
+        Command::Forks(args) => run_forks(&cli.server, args, now_ms),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use bitcoin::consensus::encode::deserialize_hex;
 
@@ -1136,15 +1624,99 @@ mod tests {
 
     const NOW_MS: u64 = 1_752_710_400_000;
 
-    fn cli(count: u64, capture_gap: bool) -> Cli {
-        Cli {
-            server: "http://127.0.0.1:3101".to_owned(),
+    fn single_args(count: u64, capture_gap: bool) -> SingleArgs {
+        SingleArgs {
             source: "seed-node".to_owned(),
             count,
             awaiting_fraction: 0.03,
             seed: 7,
             capture_gap,
         }
+    }
+
+    fn fork_args(count: u64) -> ForksArgs {
+        ForksArgs {
+            knots_source: "knots".to_owned(),
+            core_source: "core".to_owned(),
+            libre_source: "libre-relay".to_owned(),
+            count,
+            awaiting_fraction: 0.03,
+            seed: 7,
+            capture_gap: false,
+        }
+    }
+
+    #[test]
+    fn seed_arguments_require_positive_counts_and_distinct_fork_sources() {
+        let mut single = single_args(0, false);
+        assert_eq!(
+            validate_single_args(&single)
+                .expect_err("zero single count")
+                .to_string(),
+            "--count must be greater than zero"
+        );
+        single.count = 1;
+        validate_single_args(&single).expect("positive single count");
+
+        let mut forks = fork_args(0);
+        assert_eq!(
+            validate_fork_args(&forks)
+                .expect_err("zero fork count")
+                .to_string(),
+            "--count must be greater than zero"
+        );
+        forks.count = 1;
+        forks.core_source = forks.knots_source.clone();
+        assert_eq!(
+            validate_fork_args(&forks)
+                .expect_err("duplicate fork source")
+                .to_string(),
+            "fork source IDs must be distinct"
+        );
+    }
+
+    fn membership_txids(source: &SourceEvents) -> HashSet<String> {
+        source
+            .events
+            .iter()
+            .filter_map(|event| match &event.evidence {
+                Evidence::MempoolAdded { txid }
+                | Evidence::MempoolReconciled {
+                    txid,
+                    membership: ReconciledMembership::Present { .. },
+                } => Some(txid.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rejected_txids(source: &SourceEvents) -> HashSet<String> {
+        source
+            .events
+            .iter()
+            .filter_map(|event| match &event.evidence {
+                Evidence::MempoolRejected { txid, .. } => Some(txid.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn observed_transactions(source: &SourceEvents) -> HashMap<String, Transaction> {
+        source
+            .events
+            .iter()
+            .filter_map(|event| match &event.evidence {
+                Evidence::P2pTransaction {
+                    txid,
+                    raw_transaction_hex: Some(hex),
+                    ..
+                } => Some((
+                    txid.clone(),
+                    deserialize_hex(hex).expect("raw hex round-trips"),
+                )),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Local mirror of the server-side first-match-wins heuristic rules.
@@ -1197,10 +1769,24 @@ mod tests {
 
     #[test]
     fn generation_is_deterministic_and_valid() {
-        let first = seed_events(&cli(300, true), NOW_MS).expect("events");
-        let second = seed_events(&cli(300, true), NOW_MS).expect("events");
+        let first = seed_events(&single_args(300, true), NOW_MS).expect("events");
+        let second = seed_events(&single_args(300, true), NOW_MS).expect("events");
         assert_eq!(first, second);
-        assert_eq!(first.len(), 601, "capture gap plus two events per tx");
+
+        // One capture gap, two events per admitted transaction, and one or two
+        // per rejected transaction (the P2P sighting is present for half).
+        let mut expected = 1;
+        let mut rejection_ordinal = 0;
+        for index in 0..300 {
+            if is_rejection_index(index) {
+                expected += if rejection_ordinal % 2 == 0 { 2 } else { 1 };
+                rejection_ordinal += 1;
+            } else {
+                expected += 2;
+            }
+        }
+        assert_eq!(first.len(), expected);
+
         for event in &first {
             event.validate().expect("seed events must be valid");
         }
@@ -1210,67 +1796,165 @@ mod tests {
             .filter(|event| matches!(event.evidence, Evidence::MempoolAdded { .. }))
             .count();
         assert!(awaiting > 0, "some entries should await RPC facts");
+        let rejected = first
+            .iter()
+            .filter(|event| matches!(event.evidence, Evidence::MempoolRejected { .. }))
+            .count();
+        assert_eq!(
+            rejected, rejection_ordinal,
+            "one rejection event per rejection index",
+        );
+        assert!(rejected > 0, "some transactions should be rejected");
     }
 
     #[test]
-    fn p2p_evidence_precedes_membership_evidence_for_each_transaction() {
-        let events = seed_events(&cli(200, false), NOW_MS).expect("events");
-        assert_eq!(events.len(), 400);
-        for pair in events.chunks(2) {
-            let Evidence::P2pTransaction {
-                txid: p2p_txid,
-                wtxid,
-                raw_transaction_hex,
-                peer_id,
-                inbound,
-            } = &pair[0].evidence
-            else {
-                panic!("expected p2p_transaction first, got {:?}", pair[0].evidence);
-            };
-            assert_ne!(p2p_txid, wtxid, "witnesses must distinguish the wtxid");
-            assert!(raw_transaction_hex.is_some());
-            assert!(peer_id.is_some());
-            assert_eq!(*inbound, Some(true));
-            match &pair[1].evidence {
-                Evidence::MempoolAdded { txid } | Evidence::MempoolReconciled { txid, .. } => {
-                    assert_eq!(txid, p2p_txid);
+    fn successive_single_plans_remove_every_stale_member_in_the_new_session() {
+        let first = single_source_events(&single_args(300, false), NOW_MS)
+            .expect("first single-source plan");
+        let current = planned_membership(&first);
+
+        let mut next_args = single_args(75, false);
+        next_args.seed = 11;
+        let mut second =
+            single_source_events(&next_args, NOW_MS + 1).expect("second single-source plan");
+        let desired = planned_membership(&second);
+        let stale_expected: BTreeSet<String> = current.difference(&desired).cloned().collect();
+        assert!(
+            !stale_expected.is_empty(),
+            "the new plan must replace old rows"
+        );
+
+        assert_eq!(
+            append_stale_removals(&mut second, &current).expect("append stale removals"),
+            stale_expected.len()
+        );
+        let removed: BTreeSet<String> = second
+            .events
+            .iter()
+            .filter_map(|event| match &event.evidence {
+                Evidence::MempoolReconciled {
+                    txid,
+                    membership: ReconciledMembership::Absent,
+                } => {
+                    assert_eq!(event.source_session_id, second.session);
+                    Some(txid.clone())
                 }
-                other => panic!("expected membership evidence second, got {other:?}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed, stale_expected);
+
+        let mut final_membership = current;
+        apply_membership_events(&mut final_membership, &second.events);
+        assert_eq!(final_membership, desired);
+    }
+
+    #[test]
+    fn p2p_evidence_precedes_membership_or_rejection_for_each_transaction() {
+        let events = seed_events(&single_args(200, false), NOW_MS).expect("events");
+        let mut cursor = 0;
+        let mut rejection_ordinal = 0;
+        for index in 0..200 {
+            if is_rejection_index(index) {
+                let seen_first = rejection_ordinal % 2 == 0;
+                rejection_ordinal += 1;
+                let mut sighted_txid = None;
+                if seen_first {
+                    let Evidence::P2pTransaction {
+                        txid,
+                        wtxid,
+                        raw_transaction_hex,
+                        ..
+                    } = &events[cursor].evidence
+                    else {
+                        panic!("expected p2p_transaction before rejection at index {index}");
+                    };
+                    assert_ne!(txid, wtxid, "witnesses must distinguish the wtxid");
+                    assert!(raw_transaction_hex.is_some());
+                    sighted_txid = Some(txid.clone());
+                    cursor += 1;
+                }
+                let Evidence::MempoolRejected { txid, reason } = &events[cursor].evidence else {
+                    panic!("expected mempool_rejected at index {index}");
+                };
+                assert!(!reason.is_empty());
+                if let Some(sighted) = sighted_txid {
+                    assert_eq!(&sighted, txid, "the rejected txid matches its P2P sighting");
+                }
+                cursor += 1;
+            } else {
+                let Evidence::P2pTransaction { txid: p2p_txid, .. } = &events[cursor].evidence
+                else {
+                    panic!("expected p2p_transaction first at index {index}");
+                };
+                let p2p_txid = p2p_txid.clone();
+                cursor += 1;
+                match &events[cursor].evidence {
+                    Evidence::MempoolAdded { txid } | Evidence::MempoolReconciled { txid, .. } => {
+                        assert_eq!(txid, &p2p_txid);
+                    }
+                    other => panic!("expected membership evidence second, got {other:?}"),
+                }
+                cursor += 1;
             }
         }
+        assert_eq!(cursor, events.len(), "every event is accounted for");
     }
 
     #[test]
     fn raw_transactions_round_trip_with_matching_identifiers_and_vsize() {
-        let events = seed_events(&cli(150, false), NOW_MS).expect("events");
-        for pair in events.chunks(2) {
-            let Evidence::P2pTransaction {
-                txid,
-                wtxid,
-                raw_transaction_hex,
-                ..
-            } = &pair[0].evidence
-            else {
-                panic!("expected p2p_transaction first");
+        let events = seed_events(&single_args(150, false), NOW_MS).expect("events");
+        let mut cursor = 0;
+        let mut rejection_ordinal = 0;
+        for index in 0..150 {
+            let has_bytes = if is_rejection_index(index) {
+                let seen_first = rejection_ordinal % 2 == 0;
+                rejection_ordinal += 1;
+                seen_first
+            } else {
+                true
             };
-            let hex = raw_transaction_hex.as_deref().expect("raw hex present");
-            let transaction: Transaction = deserialize_hex(hex).expect("raw hex round-trips");
-            assert_eq!(&transaction.compute_txid().to_string(), txid);
-            assert_eq!(&transaction.compute_wtxid().to_string(), wtxid);
-            if let Evidence::MempoolReconciled {
-                membership: ReconciledMembership::Present { facts },
-                ..
-            } = &pair[1].evidence
-            {
-                assert_eq!(
-                    facts.vsize,
-                    u64::try_from(transaction.vsize()).expect("vsize fits in u64"),
-                    "reconciled vsize must be the constructed transaction's real vsize"
-                );
-                assert!(facts.fee_sats >= 1);
-                assert!(facts.entered_at_ms <= NOW_MS);
+            if has_bytes {
+                let Evidence::P2pTransaction {
+                    txid,
+                    wtxid,
+                    raw_transaction_hex,
+                    ..
+                } = &events[cursor].evidence
+                else {
+                    panic!("expected p2p_transaction at index {index}");
+                };
+                let hex = raw_transaction_hex.as_deref().expect("raw hex present");
+                let transaction: Transaction = deserialize_hex(hex).expect("raw hex round-trips");
+                assert_eq!(&transaction.compute_txid().to_string(), txid);
+                assert_eq!(&transaction.compute_wtxid().to_string(), wtxid);
+                let expected_vsize = u64::try_from(transaction.vsize()).expect("vsize fits in u64");
+                cursor += 1;
+                match &events[cursor].evidence {
+                    Evidence::MempoolReconciled {
+                        membership: ReconciledMembership::Present { facts },
+                        ..
+                    } => {
+                        assert_eq!(
+                            facts.vsize, expected_vsize,
+                            "reconciled vsize must be the constructed transaction's real vsize",
+                        );
+                        assert!(facts.fee_sats >= 1);
+                        assert!(facts.entered_at_ms <= NOW_MS);
+                    }
+                    Evidence::MempoolAdded { .. } | Evidence::MempoolRejected { .. } => {}
+                    other => panic!("unexpected terminal evidence {other:?}"),
+                }
+                cursor += 1;
+            } else {
+                assert!(matches!(
+                    &events[cursor].evidence,
+                    Evidence::MempoolRejected { .. }
+                ));
+                cursor += 1;
             }
         }
+        assert_eq!(cursor, events.len(), "every event is accounted for");
     }
 
     #[test]
@@ -1344,6 +2028,59 @@ mod tests {
                 "index {index} claimed by both special cycles",
             );
         }
+    }
+
+    #[test]
+    fn rejection_cycle_is_disjoint_from_the_special_cycles() {
+        // Every rejection offset is 13 (mod 50), which is neither 0 (bip110)
+        // nor 25 (data-protocol), so the cycle can never claim a special index.
+        for offset in REJECTION_SPECIAL_OFFSETS {
+            assert_eq!(offset % 50, 13, "offset {offset} must sit at 13 mod 50");
+        }
+        assert!(is_rejection_index(13));
+        assert!(is_rejection_index(63));
+        assert!(is_rejection_index(113));
+        assert!(!is_rejection_index(0), "a bip110 slot");
+        assert!(!is_rejection_index(25), "a protocol slot");
+        assert!(!is_rejection_index(50), "a bip110 slot");
+        assert!(is_rejection_index(213), "the cycle wraps every 200");
+
+        for index in 0..20_000 {
+            assert!(
+                !(is_rejection_index(index) && special_for_index(index).is_some()),
+                "index {index} claimed by both a rejection and a special cycle",
+            );
+        }
+        // Three of every two hundred transactions are rejected: 1.5%.
+        let rejected = (0..20_000)
+            .filter(|index| is_rejection_index(*index))
+            .count();
+        assert_eq!(rejected, 300);
+    }
+
+    #[test]
+    fn rejected_transactions_split_between_seen_and_unseen_bytes() {
+        let events = seed_events(&single_args(500, false), NOW_MS).expect("events");
+        let (mut seen, mut unseen) = (0, 0);
+        for window in events.windows(2) {
+            let Evidence::MempoolRejected { txid, .. } = &window[1].evidence else {
+                continue;
+            };
+            match &window[0].evidence {
+                Evidence::P2pTransaction {
+                    txid: sighted_txid, ..
+                } if sighted_txid == txid => seen += 1,
+                _ => unseen += 1,
+            }
+        }
+        assert!(
+            seen > 0,
+            "some rejections follow a P2P sighting (classified)"
+        );
+        assert!(
+            unseen > 0,
+            "some rejections have no prior bytes (unclassified)"
+        );
     }
 
     /// Every dedicated BIP-110 construction must land in its intended
@@ -1487,5 +2224,156 @@ mod tests {
                 preset.class
             );
         }
+    }
+
+    #[test]
+    fn fork_generation_is_deterministic_valid_and_ordered() {
+        let first = fork_events(&fork_args(500), NOW_MS).expect("fork events");
+        let second = fork_events(&fork_args(500), NOW_MS).expect("fork events");
+        assert_eq!(first.len(), 3);
+        for (left, right) in first.iter().zip(&second) {
+            assert_eq!(left.events, right.events);
+            for event in &left.events {
+                event.validate().expect("fork seed events must be valid");
+            }
+        }
+        // Ordered least to most permissive.
+        assert_eq!(first[0].source.as_str(), "knots");
+        assert_eq!(first[1].source.as_str(), "core");
+        assert_eq!(first[2].source.as_str(), "libre-relay");
+        // Each source is its own fresh session.
+        for source in &first {
+            for event in &source.events {
+                assert_eq!(event.source_id, source.source);
+                assert_eq!(event.source_session_id, source.session);
+            }
+        }
+    }
+
+    #[test]
+    fn successive_fork_plans_remove_every_stale_member() {
+        let first = fork_events(&fork_args(500), NOW_MS).expect("first fork plan");
+        let current: Vec<BTreeSet<String>> = first.iter().map(planned_membership).collect();
+
+        let mut second = fork_events(&fork_args(75), NOW_MS + 1).expect("second fork plan");
+        let desired: Vec<BTreeSet<String>> = second.iter().map(planned_membership).collect();
+        assert!(
+            current
+                .iter()
+                .zip(&desired)
+                .all(|(old, new)| old.difference(new).next().is_some()),
+            "the smaller second plan must leave stale rows in every source"
+        );
+
+        let old_knots_only: BTreeSet<String> =
+            current[0].difference(&current[1]).cloned().collect();
+        let stale_old_anomalies: BTreeSet<String> =
+            old_knots_only.difference(&desired[0]).cloned().collect();
+        assert!(
+            !stale_old_anomalies.is_empty(),
+            "the new plan must replace old authored anomaly rows"
+        );
+
+        for ((source, old), expected) in second.iter_mut().zip(&current).zip(&desired) {
+            let stale_expected: BTreeSet<String> = old.difference(expected).cloned().collect();
+            assert_eq!(
+                append_stale_removals(source, old).expect("append stale removals"),
+                stale_expected.len()
+            );
+            let removed: BTreeSet<String> = source
+                .events
+                .iter()
+                .filter_map(|event| match &event.evidence {
+                    Evidence::MempoolReconciled {
+                        txid,
+                        membership: ReconciledMembership::Absent,
+                    } => Some(txid.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(removed, stale_expected);
+
+            let mut final_membership = old.clone();
+            apply_membership_events(&mut final_membership, &source.events);
+            assert_eq!(&final_membership, expected);
+        }
+    }
+
+    #[test]
+    fn fork_memberships_nest_modulo_the_knots_anomalies() {
+        let sources = fork_events(&fork_args(2_000), NOW_MS).expect("fork events");
+        let knots = membership_txids(&sources[0]);
+        let core = membership_txids(&sources[1]);
+        let libre = membership_txids(&sources[2]);
+
+        // core is a clean subset of libre (the full base population).
+        assert!(core.is_subset(&libre));
+        // knots is a subset of core except for the injected knots-only
+        // anomalies, which are absent from both core and libre.
+        let knots_only: HashSet<String> = knots.difference(&core).cloned().collect();
+        assert_eq!(knots_only.len() as u64, FORKS_ANOMALY_COUNT);
+        assert!(knots_only.iter().all(|txid| !libre.contains(txid)));
+        // The stages are genuinely populated: core adds over knots's shared
+        // subset, and libre adds over core.
+        assert!(knots.len() - knots_only.len() < core.len());
+        assert!(core.len() < libre.len());
+    }
+
+    #[test]
+    fn core_minus_knots_is_dominated_by_data_carrying_transactions() {
+        let sources = fork_events(&fork_args(3_000), NOW_MS).expect("fork events");
+        let knots = membership_txids(&sources[0]);
+        let core = membership_txids(&sources[1]);
+        // libre observed every base txid's bytes, so its P2P sightings recover
+        // the raw transactions for classification.
+        let observed = observed_transactions(&sources[2]);
+
+        let added: Vec<&String> = core.difference(&knots).collect();
+        assert!(
+            !added.is_empty(),
+            "core must relay transactions knots filters"
+        );
+        let data_carrying = added
+            .iter()
+            .filter(|txid| {
+                observed
+                    .get(**txid)
+                    .is_some_and(|transaction| heuristic_class(transaction) == TxClass::Data)
+            })
+            .count();
+        assert!(
+            data_carrying * 2 > added.len(),
+            "data-carrying transactions ({data_carrying}) must dominate core \\ knots ({})",
+            added.len(),
+        );
+    }
+
+    #[test]
+    fn knots_rejects_a_portion_of_what_it_filters_from_core() {
+        let sources = fork_events(&fork_args(2_000), NOW_MS).expect("fork events");
+        let rejected = rejected_txids(&sources[0]);
+        assert!(
+            !rejected.is_empty(),
+            "knots must reject some of the transactions it filters",
+        );
+        // Rejections are point-in-time refusals that never enter knots's
+        // membership, yet core relays exactly those transactions.
+        let knots_members = membership_txids(&sources[0]);
+        let core_members = membership_txids(&sources[1]);
+        assert!(rejected.iter().all(|txid| !knots_members.contains(txid)));
+        assert!(
+            rejected.iter().all(|txid| core_members.contains(txid)),
+            "knots rejects transactions core relays",
+        );
+        // Reasons cycle so the by-reason breakdown renders more than one bucket.
+        let reasons: HashSet<&str> = sources[0]
+            .events
+            .iter()
+            .filter_map(|event| match &event.evidence {
+                Evidence::MempoolRejected { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(reasons.len() > 1, "rejection reasons must cycle");
     }
 }

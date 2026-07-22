@@ -10,8 +10,17 @@ import type {
   MempoolSummary,
   ScriptTypeKey,
   ShapeDimension,
+  SummaryHistograms,
   TaxonomyDescriptor,
 } from "./types";
+
+/** The aggregate shape shared by a full summary and any comparison region: a
+ * bin catalog plus its aligned histograms. Composition and treemap helpers are
+ * generic over it so the same code renders summaries and comparison regions. */
+export interface HistogramView {
+  bins: BinCatalog;
+  histograms: SummaryHistograms;
+}
 
 /** Named colours for the "behavior" taxonomy's seven baseline verdicts.
  * Any other taxonomy, or a verdict later added to "behavior" that isn't in
@@ -305,8 +314,8 @@ const SHAPE_DIMENSION_ORDER: readonly ShapeDimension[] = [
   "feerate",
 ];
 
-const findTaxonomyHistogram = (summary: MempoolSummary, key: string) =>
-  summary.histograms.taxonomies.find((entry) => entry.key === key);
+const findTaxonomyHistogram = (view: HistogramView, key: string) =>
+  view.histograms.taxonomies.find((entry) => entry.key === key);
 
 const buildCompositionRow = (
   key: string,
@@ -347,13 +356,15 @@ const buildCompositionRow = (
 };
 
 /** One row per taxonomy (label from the wire catalog, verdict order and
- * colours from `verdictMeta`) followed by the six fixed shape dimensions. */
+ * colours from `verdictMeta`) followed by the six fixed shape dimensions.
+ * Generic over any `{bins, histograms}` view so it renders both a full summary
+ * and a comparison region. */
 export const compositionRows = (
-  summary: MempoolSummary,
+  view: HistogramView,
   metric: "count" | "vsize",
 ): CompositionRow[] => {
-  const taxonomyRows = summary.bins.taxonomies.map((taxonomy) => {
-    const histogram = findTaxonomyHistogram(summary, taxonomy.key);
+  const taxonomyRows = view.bins.taxonomies.map((taxonomy) => {
+    const histogram = findTaxonomyHistogram(view, taxonomy.key);
     if (histogram === undefined) {
       throw new Error(`Missing histogram for taxonomy "${taxonomy.key}"`);
     }
@@ -369,8 +380,8 @@ export const compositionRows = (
     buildCompositionRow(
       dimension,
       SHAPE_DIMENSION_LABELS[dimension],
-      summary.histograms[dimension],
-      dimensionBinMeta(dimension, summary.bins),
+      view.histograms[dimension],
+      dimensionBinMeta(dimension, view.bins),
       metric,
     ),
   );

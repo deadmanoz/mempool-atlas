@@ -315,9 +315,7 @@
       >
         <span class="status partitioned">one source · primary view</span>
         <span class="status built">solid border · source path built</span>
-        <span class="status next"
-          >dashed border · planned consumers</span
-        >
+        <span class="status next">optional derived view · built</span>
       </div>
 
       <div class="mermaid-wrap">
@@ -375,46 +373,62 @@ flowchart TB
     MEMBERS[("SQLite current_membership<br/>current rows only<br/>awaiting RPC or facts available")]
     CAPTURE[("SQLite source_capture_state<br/>historical evidence integrity")]
     VARIANTS[("SQLite transaction_variant<br/>shared intrinsic transaction facts")]
-    READ["GET /api/v1/sources/{source_id}/mempool<br/>one source · explicit fact status"]
+    SHAPE[("SQLite transaction_shape<br/>intrinsic derived shape facts")]
+    CLASSIFY[("SQLite transaction_classification<br/>one txid + taxonomy verdict")]
+    DERIVE["validate raw bytes once<br/>derive shape + registered taxonomies"]
+    SNAPSHOT["GET /api/v1/sources/{source_id}/mempool<br/>on-demand membership inspector"]
+    SUMMARY["GET /api/v1/sources/{source_id}/mempool/summary<br/>aggregate primary read model"]
+    REJECTIONS["GET /api/v1/sources/{source_id}/rejections<br/>bounded evidence window"]
+    COMPAREAPI["GET /api/v1/sources/compare<br/>read-time set aggregates for 2-4 sources"]
 
     INGEST -->|"append once · ordered transaction"| EVENTS
     INGEST -->|"apply membership mutation"| MEMBERS
     INGEST -->|"project capture gaps"| CAPTURE
     INGEST -->|"preserve raw variant"| VARIANTS
-    MEMBERS --> READ
-    CAPTURE --> READ
-    VARIANTS -.-> READ
+    VARIANTS --> DERIVE
+    DERIVE --> SHAPE
+    DERIVE --> CLASSIFY
+    MEMBERS --> SNAPSHOT
+    CAPTURE --> SNAPSHOT
+    MEMBERS --> SUMMARY
+    CAPTURE --> SUMMARY
+    SHAPE --> SUMMARY
+    CLASSIFY --> SUMMARY
+    EVENTS --> REJECTIONS
+    CLASSIFY -.-> REJECTIONS
+    MEMBERS --> COMPAREAPI
+    SHAPE --> COMPAREAPI
+    CLASSIFY --> COMPAREAPI
   end
 
   PRIMARYOUT -->|"live: one event<br/>RPC: ≤512 events · ≤4 MiB<br/>complete ordered 202 ack"| INGEST
   OPTIONALOUT -->|"same source-scoped contract"| INGEST
 
-  SWIM["Single-source Canvas browser<br/>base-fee-rate × age grid<br/>glyph area = vsize · primary"]
+  WORKBENCH["Single-source aggregate workbench<br/>summary bins + taxonomy facets<br/>primary browser view"]
+  SWIM["On-demand Canvas membership inspector<br/>base-fee-rate × age grid<br/>glyph area = vsize"]
   WARNING["Capture-integrity warning<br/>possible or known historical gap"]
-  COMPARE["Optional comparison workspace<br/>consume independent snapshots<br/>derive intersection and differences · planned"]
-  CLASSIFIERS["Classifier rule packs<br/>required MVP interpretation · planned"]
+  REJECTIONSPANEL["Per-source rejection panel<br/>point-in-time evidence only"]
+  COMPARE["Optional comparison workspace<br/>server-derived membership-set aggregates<br/>built read-time view"]
 
-  READ -->|"selected source"| SWIM
-  READ --> WARNING
-  READ -.->|"fetch each selected source"| COMPARE
-  EVENTS -.->|"evidence inputs"| CLASSIFIERS
+  SUMMARY -->|"selected source"| WORKBENCH
+  SNAPSHOT --> SWIM
+  SUMMARY --> WARNING
+  REJECTIONS --> REJECTIONSPANEL
+  COMPAREAPI --> COMPARE
 
   class PRIMARY,OPTIONAL bitcoinNode
   class PRIMARYOBS,OPTIONALOBS evidenceBuilt
   class PRIMARYAGENT,OPTIONALAGENT serviceBuilt
   class PRIMARYOUT,OPTIONALOUT dataBuilt
-  class INGEST,READ serviceBuilt
-  class EVENTS,MEMBERS,CAPTURE,VARIANTS dataBuilt
-  class SWIM,WARNING uiBuilt
-  class COMPARE,CLASSIFIERS uiNext
+  class INGEST,DERIVE,SNAPSHOT,SUMMARY,REJECTIONS,COMPAREAPI serviceBuilt
+  class EVENTS,MEMBERS,CAPTURE,VARIANTS,SHAPE,CLASSIFY dataBuilt
+  class WORKBENCH,SWIM,WARNING,REJECTIONSPANEL,COMPARE uiBuilt
 
   classDef bitcoinNode fill:#3d3200,stroke:#f0c040,stroke-width:2px
   classDef evidenceBuilt fill:#3d2a1a,stroke:#fb923c,stroke-width:2px
   classDef serviceBuilt fill:#1a3a5c,stroke:#4a9eff,stroke-width:2px
   classDef dataBuilt fill:#1a3d2a,stroke:#34d399,stroke-width:2px
-  classDef extensionNext fill:#2d1a3d,stroke:#b388ff,stroke-width:2px,stroke-dasharray:6 4
   classDef uiBuilt fill:#2d1a3d,stroke:#b388ff,stroke-width:2px
-  classDef uiNext fill:#2d1a3d,stroke:#b388ff,stroke-width:2px,stroke-dasharray:6 4
 
   style CENTRAL fill:#0f1720,stroke:#34d399,stroke-width:1px
         </pre>
@@ -459,9 +473,13 @@ flowchart TB
         <article class="legend-card extension">
           <h2>Extensible interpretation</h2>
           <p>
-            Comparison remains an optional consumer; classifiers are required
-            for the MVP. Fork policy, data carriage, and future heuristics can
-            evolve without changing a source snapshot or the underlying
+            Registered classifier packs derive intrinsic shape and taxonomy
+            facts from observed raw bytes at ingest. The optional comparison
+            workspace derives membership-set aggregates server-side from
+            independent source projections. A transaction present in one source
+            and absent from another is not proof of filtering, rejection, or
+            relay causality. Fork policy, data carriage, and future heuristics
+            can evolve without changing a source snapshot or the underlying
             observation model.
           </p>
         </article>
@@ -482,7 +500,7 @@ flowchart TB
       </div>
 
       <footer>
-        Architecture and implementation status as of 16 July 2026. One source is
+        Architecture and implementation status as of 22 July 2026. One source is
         the primary view; comparison is an optional derived consumer. No ZMQ
         dependency is required.
       </footer>

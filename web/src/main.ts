@@ -1,4 +1,5 @@
 import { fetchMempool } from "./api";
+import { initComparison } from "./comparison";
 import { formatMembershipAge, membershipPage } from "./membership-table";
 import { renderSwimView } from "./swim-view";
 import { initWorkbench } from "./workbench";
@@ -30,6 +31,58 @@ const membershipHeading = requiredElement<HTMLElement>("membership-heading");
 const membershipPanel = requiredElement<HTMLDetailsElement>("membership-panel");
 
 const workbench = initWorkbench();
+const comparison = initComparison();
+
+// Top-level mode switch: the single-source workbench (default) and the
+// multi-source comparison are siblings. Only the active mode's section is
+// visible, and the comparison only polls while it is the active mode.
+const modeWorkbench = requiredElement<HTMLButtonElement>("mode-workbench");
+const modeCompare = requiredElement<HTMLButtonElement>("mode-compare");
+const workbenchMode = requiredElement<HTMLElement>("workbench-mode");
+const comparisonMode = requiredElement<HTMLElement>("comparison");
+
+const setMode = (mode: "workbench" | "compare"): void => {
+  const compare = mode === "compare";
+  workbenchMode.hidden = compare;
+  comparisonMode.hidden = !compare;
+  modeWorkbench.dataset.active = String(!compare);
+  modeWorkbench.setAttribute("aria-selected", String(!compare));
+  modeWorkbench.tabIndex = compare ? -1 : 0;
+  modeCompare.dataset.active = String(compare);
+  modeCompare.setAttribute("aria-selected", String(compare));
+  modeCompare.tabIndex = compare ? 0 : -1;
+  comparison.setActive(compare);
+};
+
+modeWorkbench.addEventListener("click", () => {
+  setMode("workbench");
+});
+modeCompare.addEventListener("click", () => {
+  setMode("compare");
+});
+
+const modeButtons = [modeWorkbench, modeCompare] as const;
+for (const [index, button] of modeButtons.entries()) {
+  button.addEventListener("keydown", (event) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (index + 1) % modeButtons.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (index - 1 + modeButtons.length) % modeButtons.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = modeButtons.length - 1;
+    }
+    if (nextIndex === null) {
+      return;
+    }
+    event.preventDefault();
+    const next = modeButtons[nextIndex]!;
+    setMode(next === modeCompare ? "compare" : "workbench");
+    next.focus();
+  });
+}
 
 const countFormat = new Intl.NumberFormat();
 const decimalFormat = new Intl.NumberFormat(undefined, {

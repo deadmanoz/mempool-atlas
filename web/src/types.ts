@@ -149,3 +149,114 @@ export interface SourceDescriptor {
   last_seen_at_ms: number;
   membership_count: number;
 }
+
+/** The rich aggregate over one membership-set region of a comparison, shaped
+ * exactly like a summary's matching set so the same histogram code renders it.
+ * `bins` and `histograms` are the summary wire shapes. */
+export interface RegionAggregate {
+  present: AggregateBin;
+  awaiting_rpc: { count: number };
+  bins: BinCatalog;
+  histograms: SummaryHistograms;
+}
+
+/** A region reported by count and virtual size only. Used for the anomaly
+ * region of a stage, which is expected to be empty under a clean permissiveness
+ * ordering and does not warrant full histograms. */
+export interface AnomalyRegion {
+  present: AggregateBin;
+  awaiting_rpc: { count: number };
+}
+
+/** One adjacent step in the asserted source order. `added` is present in `to`
+ * but absent from `from`; `anomaly` is the reverse membership difference. A
+ * set difference alone is not evidence that either source rejected a tx. */
+export interface ComparisonStage {
+  from: string;
+  to: string;
+  added: RegionAggregate;
+  anomaly: AnomalyRegion;
+}
+
+/** One compared source's total current membership, for context alongside the
+ * derived regions. */
+export interface ComparisonSourceTotal {
+  source_id: string;
+  present: AggregateBin;
+  awaiting_rpc: { count: number };
+}
+
+/** A read-time derived comparison across 2..4 independent source snapshots.
+ * The caller supplies the source order (least to most permissive); the server
+ * reports the staged deltas along it and flags where the nesting does not
+ * hold, never mutating or combining the underlying sources. */
+export interface SourceComparison {
+  sources: string[];
+  as_of_ms: number;
+  source_totals: ComparisonSourceTotal[];
+  /** Transactions present in every compared source. */
+  shared: RegionAggregate;
+  /** One entry per adjacent source pair, in request order. */
+  stages: ComparisonStage[];
+}
+
+/** The bounded recent rejection window. `oldest_at_ms`/`newest_at_ms` are
+ * absent only when the window is empty. */
+export interface RejectionWindow {
+  count: number;
+  oldest_at_ms?: number;
+  newest_at_ms?: number;
+}
+
+/** Count of rejections carrying one node-provided reason string. Reasons are
+ * the source's own free-form text. */
+export interface RejectionReasonCount {
+  reason: string;
+  count: number;
+  /** True only for the server's synthetic long-tail reason bucket. */
+  is_rollup: boolean;
+}
+
+export interface RejectionVerdictCount {
+  verdict: string;
+  count: number;
+}
+
+/** Per-taxonomy verdict counts over the classified rejections in the window,
+ * in the taxonomy's declared verdict order. */
+export interface RejectionTaxonomyBreakdown {
+  key: string;
+  label: string;
+  verdicts: RejectionVerdictCount[];
+}
+
+/** Best-effort classification attribution over the window. Rejections without
+ * stored derived verdicts are reported honestly as `unclassified_count`, never
+ * guessed into a verdict. */
+export interface RejectionAttribution {
+  classified_count: number;
+  unclassified_count: number;
+  taxonomies: RejectionTaxonomyBreakdown[];
+}
+
+/** One rejection in the recent list. `verdicts` carries stored derived
+ * `[taxonomy, verdict]` pairs when available and is empty otherwise. */
+export interface RejectionRecord {
+  txid: string;
+  reason: string;
+  observed_at_ms: number;
+  evidence_event_id: string;
+  verdicts: [string, string][];
+}
+
+/** The source-scoped rejection read model: what a single source refused,
+ * distinct from any set difference in a comparison. */
+export interface SourceRejections {
+  source_id: string;
+  as_of_ms: number;
+  window: RejectionWindow;
+  by_reason: RejectionReasonCount[];
+  attribution: RejectionAttribution;
+  recent: RejectionRecord[];
+  next_cursor?: string;
+}

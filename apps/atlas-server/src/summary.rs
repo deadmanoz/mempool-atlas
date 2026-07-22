@@ -13,14 +13,14 @@
 //! bin, so taxonomy histograms keep `underived` at zero.
 
 use atlas_model::{
-    AGE_BIN_COUNT, AggregateBin, AwaitingRpcTotal, BinCatalog, DimensionHistogram,
+    AGE_BIN_COUNT, AggregateBin, AnomalyRegion, AwaitingRpcTotal, BinCatalog, DimensionHistogram,
     ECDF_FEE_BIN_COUNT, ECDF_FEE_MAX_SAT_PER_VB, ECDF_FEE_MIN_SAT_PER_VB, EcdfSeries,
     FEERATE_BIN_COUNT, FeeRateEcdf, INPUT_BIN_COUNT, INPUT_COUNT_UPPERS, JOINT_FEE_BIN_COUNT,
     JOINT_FEE_MAX_SAT_PER_VB, JOINT_FEE_MIN_SAT_PER_VB, JOINT_SIZE_BIN_COUNT, JOINT_SIZE_MAX_VB,
     JOINT_SIZE_MIN_VB, JointFeeSize, MempoolSummary, OUTPUT_BIN_COUNT, OUTPUT_COUNT_UPPERS,
-    ScriptType, SourceHealth, SourceId, SummaryDetail, SummaryFilter, SummaryHistograms,
-    SummaryTotals, TaxonomyDescriptor, TaxonomyHistogram, UnavailableReason, VALUE_BIN_COUNT,
-    age_bin, count_band_bin, feerate_bin, log_bin, log_spaced_edges, value_bin,
+    RegionAggregate, ScriptType, SourceHealth, SourceId, SummaryDetail, SummaryFilter,
+    SummaryHistograms, SummaryTotals, TaxonomyDescriptor, TaxonomyHistogram, UnavailableReason,
+    VALUE_BIN_COUNT, age_bin, count_band_bin, feerate_bin, log_bin, log_spaced_edges, value_bin,
 };
 
 /// The effective verdict of a row for a taxonomy without a stored verdict.
@@ -150,6 +150,27 @@ fn matches(filter: &SummaryFilter, row: &FactsRow, feerate: f64) -> bool {
     true
 }
 
+/// The region facts a comparison region is aggregated over: the fact-bearing
+/// rows of the region's designated facts source plus the count of region
+/// members still awaiting RPC facts. Unlike [`SourceMembershipFacts`] a region
+/// carries no source health, because a region is a derived membership set, not
+/// a source.
+#[derive(Clone, Debug, Default)]
+pub struct RegionFacts {
+    pub available: Vec<FactsRow>,
+    pub awaiting_rpc_count: u64,
+}
+
+/// The histogram-bearing totals and bins produced by one aggregation pass,
+/// shared by the summary and region entry points.
+struct Aggregation {
+    totals: SummaryTotals,
+    bins: BinCatalog,
+    histograms: SummaryHistograms,
+    ecdf: Option<FeeRateEcdf>,
+    joint_fee_size: Option<JointFeeSize>,
+}
+
 #[must_use]
 pub fn compute_summary(
     source_id: SourceId,
@@ -159,6 +180,91 @@ pub fn compute_summary(
     as_of_ms: u64,
     taxonomies: &[TaxonomyDescriptor],
 ) -> MempoolSummary {
+    let Aggregation {
+        totals,
+        bins,
+        histograms,
+        ecdf,
+        joint_fee_size,
+    } = aggregate(
+        &facts.available,
+        facts.awaiting_rpc_count,
+        filter,
+        detail,
+        as_of_ms,
+        taxonomies,
+    );
+    MempoolSummary {
+        source_id,
+        as_of_ms,
+        filter_echo: filter.clone(),
+        totals,
+        bins,
+        histograms,
+        ecdf,
+        joint_fee_size,
+        health: facts.health.clone(),
+    }
+}
+
+/// The rich aggregate over one comparison region, shaped like a summary's
+/// matching set. The region is aggregated with an empty filter and no detail
+/// blocks, so `present` is the histogram-bearing total (every fact-bearing
+/// member) and awaiting-RPC members are counted separately, never folded into
+/// a histogram, following the same honesty rule the summary applies.
+#[must_use]
+pub fn region_aggregate(
+    facts: &RegionFacts,
+    as_of_ms: u64,
+    taxonomies: &[TaxonomyDescriptor],
+) -> RegionAggregate {
+    let Aggregation {
+        totals,
+        bins,
+        histograms,
+        ..
+    } = aggregate(
+        &facts.available,
+        facts.awaiting_rpc_count,
+        &SummaryFilter::default(),
+        SummaryDetail::default(),
+        as_of_ms,
+        taxonomies,
+    );
+    RegionAggregate {
+        present: totals.matching,
+        awaiting_rpc: totals.awaiting_rpc,
+        bins,
+        histograms,
+    }
+}
+
+/// The lightweight aggregate over one comparison region: fact-bearing count and
+/// summed virtual size plus the awaiting-RPC count, with no histograms. Used
+/// for the reverse difference region. Awaiting-RPC members carry no vsize, so
+/// they are counted only.
+#[must_use]
+pub fn anomaly_region(facts: &RegionFacts) -> AnomalyRegion {
+    let mut present = AggregateBin::default();
+    for row in &facts.available {
+        present.add(row.vsize);
+    }
+    AnomalyRegion {
+        present,
+        awaiting_rpc: AwaitingRpcTotal {
+            count: facts.awaiting_rpc_count,
+        },
+    }
+}
+
+fn aggregate(
+    available: &[FactsRow],
+    awaiting_rpc_count: u64,
+    filter: &SummaryFilter,
+    detail: SummaryDetail,
+    as_of_ms: u64,
+    taxonomies: &[TaxonomyDescriptor],
+) -> Aggregation {
     let mut all = AggregateBin::default();
     let mut matching = AggregateBin::default();
     let mut feerate_bins = HistogramAccumulator::new(FEERATE_BIN_COUNT);
@@ -183,7 +289,7 @@ pub fn compute_summary(
         .joint_fee_size
         .then(|| vec![vec![0_u64; JOINT_FEE_BIN_COUNT]; JOINT_SIZE_BIN_COUNT]);
 
-    for row in &facts.available {
+    for row in available {
         all.add(row.vsize);
         let feerate = row.fee_sats as f64 / row.vsize as f64;
         if !matches(filter, row, feerate) {
@@ -239,15 +345,12 @@ pub fn compute_summary(
         }
     }
 
-    MempoolSummary {
-        source_id,
-        as_of_ms,
-        filter_echo: filter.clone(),
+    Aggregation {
         totals: SummaryTotals {
             all,
             matching,
             awaiting_rpc: AwaitingRpcTotal {
-                count: facts.awaiting_rpc_count,
+                count: awaiting_rpc_count,
             },
         },
         bins: BinCatalog::for_taxonomies(taxonomies.to_vec()),
@@ -281,7 +384,6 @@ pub fn compute_summary(
             ),
             grid,
         }),
-        health: facts.health.clone(),
     }
 }
 
@@ -417,6 +519,52 @@ mod tests {
             available,
             awaiting_rpc_count,
         }
+    }
+
+    fn region_facts(available: Vec<FactsRow>, awaiting_rpc_count: u64) -> RegionFacts {
+        RegionFacts {
+            available,
+            awaiting_rpc_count,
+        }
+    }
+
+    #[test]
+    fn region_aggregate_mirrors_the_unfiltered_summary_of_the_same_rows() {
+        let rows = vec![payment_row(200, 1_700, 0), row(400, 800, 0)];
+        let summary = compute_summary(
+            source(),
+            &facts(rows.clone(), 2),
+            &SummaryFilter::default(),
+            SummaryDetail::default(),
+            AS_OF_MS,
+            &taxonomies(),
+        );
+        let aggregate = region_aggregate(&region_facts(rows, 2), AS_OF_MS, &taxonomies());
+
+        // A region is the summary's matching set under an empty filter: present
+        // is the histogram-bearing total, and the catalog and histograms match
+        // byte for byte so a client renders both with the same code.
+        assert_eq!(aggregate.present, summary.totals.all);
+        assert_eq!(aggregate.present, summary.totals.matching);
+        assert_eq!(aggregate.awaiting_rpc, summary.totals.awaiting_rpc);
+        assert_eq!(aggregate.bins, summary.bins);
+        assert_eq!(aggregate.histograms, summary.histograms);
+    }
+
+    #[test]
+    fn anomaly_region_sums_present_vsize_and_counts_awaiting_only() {
+        let anomaly = anomaly_region(&region_facts(
+            vec![row(200, 400, 0), payment_row(300, 900, 0)],
+            4,
+        ));
+        assert_eq!(
+            anomaly.present,
+            AggregateBin {
+                count: 2,
+                vsize: 500
+            }
+        );
+        assert_eq!(anomaly.awaiting_rpc.count, 4);
     }
 
     fn parts(histogram: &DimensionHistogram) -> (&[AggregateBin], AggregateBin) {

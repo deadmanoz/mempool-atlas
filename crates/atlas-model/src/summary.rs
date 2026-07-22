@@ -451,6 +451,160 @@ pub struct SourcesResponse {
     pub sources: Vec<SourceDescriptor>,
 }
 
+/// Rejection evidence is point-in-time, not current state: a
+/// `mempool_rejected` observation records that the source's policy refused a
+/// transaction at one instant. It is never conflated with
+/// `mempool_removed` (expiry, replacement, mining, or eviction), and absence
+/// of a rejection is never read as acceptance. The read surface therefore
+/// reports a bounded recent window rather than an unbounded all-time total.
+///
+/// The window bounds the aggregate to the most recent rejections so payload
+/// size and query cost stay bounded regardless of how long a source has run.
+/// `oldest_at_ms` and `newest_at_ms` are absent only when the window is empty.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RejectionWindow {
+    pub count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_at_ms: Option<u64>,
+}
+
+/// Count of rejections carrying one node-provided reason string within the
+/// window. Reasons are the source's own free-form text, ordered most frequent
+/// first, with a bounded distinct set rolled into a trailing `other` bucket.
+/// `is_rollup` distinguishes that synthetic bucket from a literal node reason
+/// whose text is also `other`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RejectionReasonCount {
+    pub reason: String,
+    pub count: u64,
+    pub is_rollup: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RejectionVerdictCount {
+    pub verdict: String,
+    pub count: u64,
+}
+
+/// Per-taxonomy verdict counts over the classified rejections in the window,
+/// in registry order. Verdict order matches the taxonomy's declared
+/// vocabulary so a client can align it against the bin catalog.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RejectionTaxonomyBreakdown {
+    pub key: String,
+    pub label: String,
+    pub verdicts: Vec<RejectionVerdictCount>,
+}
+
+/// Best-effort classification attribution over the window. Classifications are
+/// joined at read time from global txid-intrinsic derivations, whose raw bytes
+/// may have been observed by any source before or after the rejection. Rows
+/// without a derivation are reported as `unclassified_count`, never guessed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RejectionAttribution {
+    pub classified_count: u64,
+    pub unclassified_count: u64,
+    pub taxonomies: Vec<RejectionTaxonomyBreakdown>,
+}
+
+/// One rejection in the recent list. `verdicts` carries stored derived
+/// (taxonomy, verdict) pairs when available and is empty otherwise.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RejectionRecord {
+    pub txid: String,
+    pub reason: String,
+    pub observed_at_ms: u64,
+    pub evidence_event_id: String,
+    pub verdicts: Vec<(String, String)>,
+}
+
+/// The source-scoped rejection read model. The aggregate covers the bounded
+/// recent window; `recent` is a separately paginated slice of the same
+/// rejection stream, newest first, with `next_cursor` set when older
+/// rejections remain.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceRejections {
+    pub source_id: SourceId,
+    pub as_of_ms: u64,
+    pub window: RejectionWindow,
+    pub by_reason: Vec<RejectionReasonCount>,
+    pub attribution: RejectionAttribution,
+    pub recent: Vec<RejectionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// The rich aggregate over one membership set region, shaped like a summary's
+/// matching set so a client renders it with the same histogram code.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RegionAggregate {
+    /// Fact-bearing members of the region.
+    pub present: AggregateBin,
+    /// Region members still awaiting RPC facts; counted, never given a vsize
+    /// or folded into a histogram.
+    pub awaiting_rpc: AwaitingRpcTotal,
+    pub bins: BinCatalog,
+    pub histograms: SummaryHistograms,
+}
+
+/// A region reported by count and virtual size only. Used for the reverse
+/// difference of a stage, which does not warrant full histograms.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AnomalyRegion {
+    pub present: AggregateBin,
+    pub awaiting_rpc: AwaitingRpcTotal,
+}
+
+/// One adjacent step in the caller-defined source order. `added` is the
+/// membership difference `to \\ from`; `anomaly` is the reverse difference
+/// `from \\ to`. The names are presentation labels and do not infer why a
+/// transaction is absent from either source.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ComparisonStage {
+    pub from: SourceId,
+    pub to: SourceId,
+    pub added: RegionAggregate,
+    pub anomaly: AnomalyRegion,
+}
+
+/// One compared source's total current membership, for context alongside the
+/// derived regions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComparisonSourceTotal {
+    pub source_id: SourceId,
+    pub present: AggregateBin,
+    pub awaiting_rpc: AwaitingRpcTotal,
+}
+
+/// A read-time derived comparison across two or more independent source
+/// snapshots. Atlas never stores a combined mempool: the server computes the
+/// membership set regions on demand from the source-partitioned projections
+/// and ships only aggregates, so the browser never receives per-transaction
+/// rows and no source is mutated or owned.
+///
+/// The caller supplies the source order. The server does not infer a policy
+/// relationship between sources; it reports the adjacent set differences in
+/// that order.
+///
+/// Shape and classification are intrinsic to a transaction, so every region's
+/// taxonomy, script, and value histograms are well defined by txid regardless
+/// of source. Fee-rate and age depend on per-source facts, so each region takes
+/// them from one designated source: an `added` region from its `to` source,
+/// and `shared` from the last source in the order.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SourceComparison {
+    /// The requested source order, echoed back.
+    pub sources: Vec<SourceId>,
+    pub as_of_ms: u64,
+    pub source_totals: Vec<ComparisonSourceTotal>,
+    /// Transactions present in every compared source.
+    pub shared: RegionAggregate,
+    /// One entry per adjacent source pair, in request order.
+    pub stages: Vec<ComparisonStage>,
+}
+
 /// Index of the half-open canonical fee-rate bin containing `feerate_sat_per_vb`.
 #[must_use]
 pub fn feerate_bin(feerate_sat_per_vb: f64) -> usize {
@@ -851,6 +1005,63 @@ mod tests {
                     { "key": "behavior", "verdicts": ["payment", "unknown"] },
                 ],
                 "feerate_min": 4.0,
+            })
+        );
+    }
+
+    #[test]
+    fn empty_rejection_window_omits_its_timestamps_and_cursor() {
+        let rejections = SourceRejections {
+            source_id: SourceId::new("source-a").expect("source"),
+            as_of_ms: 1_752_710_400_000,
+            window: RejectionWindow {
+                count: 0,
+                oldest_at_ms: None,
+                newest_at_ms: None,
+            },
+            by_reason: Vec::new(),
+            attribution: RejectionAttribution {
+                classified_count: 0,
+                unclassified_count: 0,
+                taxonomies: Vec::new(),
+            },
+            recent: Vec::new(),
+            next_cursor: None,
+        };
+        assert_eq!(
+            serde_json::to_value(rejections).expect("rejections"),
+            serde_json::json!({
+                "source_id": "source-a",
+                "as_of_ms": 1_752_710_400_000_u64,
+                "window": { "count": 0 },
+                "by_reason": [],
+                "attribution": {
+                    "classified_count": 0,
+                    "unclassified_count": 0,
+                    "taxonomies": [],
+                },
+                "recent": [],
+            })
+        );
+    }
+
+    #[test]
+    fn rejection_records_carry_taxonomy_verdict_pairs() {
+        let record = RejectionRecord {
+            txid: "a".repeat(64),
+            reason: "min relay fee not met".to_owned(),
+            observed_at_ms: 1_752_710_000_000,
+            evidence_event_id: "source-a/session-a/9".to_owned(),
+            verdicts: vec![("behavior".to_owned(), "data".to_owned())],
+        };
+        assert_eq!(
+            serde_json::to_value(record).expect("record"),
+            serde_json::json!({
+                "txid": "a".repeat(64),
+                "reason": "min relay fee not met",
+                "observed_at_ms": 1_752_710_000_000_u64,
+                "evidence_event_id": "source-a/session-a/9",
+                "verdicts": [["behavior", "data"]],
             })
         );
     }

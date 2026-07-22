@@ -19,6 +19,13 @@ CREATE TABLE event (
 CREATE INDEX event_source_observed_idx
     ON event (source_id, observed_at_ms DESC);
 
+-- Bounds recent-rejection lookups to the window rather than a full event
+-- scan. The rejection read surface always filters on this exact
+-- event_kind literal so the partial index applies.
+CREATE INDEX event_rejection_idx
+    ON event (source_id, observed_at_ms DESC, event_id)
+    WHERE event_kind = 'mempool_rejected';
+
 CREATE TABLE current_membership (
     source_id TEXT NOT NULL REFERENCES source(source_id),
     txid TEXT NOT NULL,

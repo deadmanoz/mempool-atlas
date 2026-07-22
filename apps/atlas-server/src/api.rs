@@ -4,8 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use atlas_classifiers::registered_packs;
 use atlas_model::{
     IngestBatchRequest, IngestBatchResponse, IngestResponse, MAX_INGEST_BATCH_BODY_BYTES,
-    MempoolSnapshot, MempoolSummary, ModelError, NormalizedEvent, ScriptType, SourceId,
-    SourcesResponse, SummaryDetail, SummaryFilter, TaxonomyDescriptor, TaxonomyFilter,
+    MempoolSnapshot, MempoolSummary, ModelError, NormalizedEvent, ScriptType, SourceComparison,
+    SourceId, SourceRejections, SourcesResponse, SummaryDetail, SummaryFilter, TaxonomyDescriptor,
+    TaxonomyFilter,
 };
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::StatusCode;
@@ -14,6 +15,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 
+use crate::comparison::{ComparisonOutcome, compute_comparison};
+use crate::rejections::{
+    REJECTION_PAGE_DEFAULT, REJECTION_PAGE_MAX, RejectionCursor, compute_rejections,
+};
 use crate::store::{Store, StoreError};
 use crate::summary::compute_summary;
 
@@ -35,11 +40,13 @@ pub fn router_with_clock(store: Store, now_ms: fn() -> u64) -> Router {
             post(ingest_batch).layer(DefaultBodyLimit::max(MAX_INGEST_BATCH_BODY_BYTES)),
         )
         .route("/api/v1/sources", get(sources))
+        .route("/api/v1/sources/compare", get(compare))
         .route("/api/v1/sources/{source_id}/mempool", get(mempool))
         .route(
             "/api/v1/sources/{source_id}/mempool/summary",
             get(mempool_summary),
         )
+        .route("/api/v1/sources/{source_id}/rejections", get(rejections))
         .with_state(AppState {
             store: Arc::new(store),
             now_ms,
@@ -128,6 +135,82 @@ async fn sources(State(state): State<AppState>) -> Result<Json<SourcesResponse>,
         .await
         .map_err(ApiError::Task)??;
     Ok(Json(SourcesResponse { sources }))
+}
+
+/// The inclusive bounds on the number of sources a comparison accepts. Two is
+/// the minimum for a delta; four keeps the derived-region fan-out bounded.
+const COMPARE_MIN_SOURCES: usize = 2;
+const COMPARE_MAX_SOURCES: usize = 4;
+
+/// Parses the comparison query grammar. The only accepted parameter is
+/// `sources`: an ordered, comma-separated list of two to four distinct valid
+/// source IDs. Unknown or repeated parameters, a missing list, an out-of-range
+/// count, a duplicate, or an invalid source ID are all rejected so a typo never
+/// silently changes the comparison. Existence of each source is checked later
+/// against the store.
+fn parse_compare_query(query: Option<&str>) -> Result<Vec<SourceId>, ApiError> {
+    let parameters: Vec<(String, String)> = serde_urlencoded::from_str(query.unwrap_or(""))
+        .map_err(|error| ApiError::InvalidQuery(error.to_string()))?;
+
+    let mut sources_value = None;
+    for (parameter, value) in parameters {
+        match parameter.as_str() {
+            "sources" => {
+                reject_duplicate("sources", sources_value.is_some())?;
+                sources_value = Some(value);
+            }
+            other => {
+                return Err(ApiError::InvalidQuery(format!("unknown parameter {other}")));
+            }
+        }
+    }
+    let Some(raw) = sources_value else {
+        return Err(ApiError::InvalidQuery(
+            "missing required parameter sources".to_owned(),
+        ));
+    };
+
+    let mut sources = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in raw.split(',') {
+        let source = SourceId::new(token.to_owned())?;
+        if !seen.insert(source.as_str().to_owned()) {
+            return Err(ApiError::InvalidQuery(format!("duplicate source {source}")));
+        }
+        sources.push(source);
+    }
+    if !(COMPARE_MIN_SOURCES..=COMPARE_MAX_SOURCES).contains(&sources.len()) {
+        return Err(ApiError::InvalidQuery(format!(
+            "compare requires between {COMPARE_MIN_SOURCES} and {COMPARE_MAX_SOURCES} sources, got {}",
+            sources.len()
+        )));
+    }
+    Ok(sources)
+}
+
+async fn compare(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<SourceComparison>, ApiError> {
+    let sources = parse_compare_query(query.as_deref())?;
+    let taxonomies: Vec<TaxonomyDescriptor> = registered_packs()
+        .iter()
+        .map(|pack| pack.taxonomy())
+        .collect();
+    let store = Arc::clone(&state.store);
+    let as_of_ms = (state.now_ms)();
+    let comparison = tokio::task::spawn_blocking(move || -> Result<_, StoreError> {
+        Ok(match store.source_comparison(&sources)? {
+            ComparisonOutcome::Computed(inputs) => {
+                Ok(compute_comparison(sources, &inputs, as_of_ms, &taxonomies))
+            }
+            ComparisonOutcome::UnknownSource(source_id) => Err(source_id),
+        })
+    })
+    .await
+    .map_err(ApiError::Task)??
+    .map_err(ApiError::SourceNotFound)?;
+    Ok(Json(comparison))
 }
 
 /// The prefix that scopes a query parameter to one taxonomy's verdict filter,
@@ -309,10 +392,93 @@ async fn mempool_summary(
     Ok(Json(summary))
 }
 
+/// Parses the rejection query grammar. The only accepted parameters are
+/// `limit` and `before`; unknown or repeated parameters are rejected so a typo
+/// never silently changes the page. `limit` defaults to
+/// [`REJECTION_PAGE_DEFAULT`], is clamped up to [`REJECTION_PAGE_MAX`], and a
+/// zero or non-numeric value is an error. A malformed cursor is an error.
+fn parse_rejections_query(
+    query: Option<&str>,
+) -> Result<(usize, Option<RejectionCursor>), ApiError> {
+    let parameters: Vec<(String, String)> = serde_urlencoded::from_str(query.unwrap_or(""))
+        .map_err(|error| ApiError::InvalidQuery(error.to_string()))?;
+
+    let mut limit = None;
+    let mut before = None;
+    for (parameter, value) in parameters {
+        match parameter.as_str() {
+            "limit" => {
+                reject_duplicate("limit", limit.is_some())?;
+                limit = Some(parse_rejection_limit(&value)?);
+            }
+            "before" => {
+                reject_duplicate("before", before.is_some())?;
+                match RejectionCursor::parse(&value) {
+                    Ok(cursor) => before = Some(cursor),
+                    Err(_) => return Err(ApiError::InvalidCursor(value)),
+                }
+            }
+            other => {
+                return Err(ApiError::InvalidQuery(format!("unknown parameter {other}")));
+            }
+        }
+    }
+    Ok((limit.unwrap_or(REJECTION_PAGE_DEFAULT), before))
+}
+
+fn parse_rejection_limit(value: &str) -> Result<usize, ApiError> {
+    let parsed: usize = value
+        .parse()
+        .map_err(|_| ApiError::InvalidQuery(format!("limit is not a number: {value}")))?;
+    if parsed == 0 {
+        return Err(ApiError::InvalidQuery(
+            "limit must be greater than zero".to_owned(),
+        ));
+    }
+    Ok(parsed.min(REJECTION_PAGE_MAX))
+}
+
+async fn rejections(
+    State(state): State<AppState>,
+    Path(source_id): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<SourceRejections>, ApiError> {
+    let source_id = SourceId::new(source_id)?;
+    let (limit, before) = parse_rejections_query(query.as_deref())?;
+    if let Some(cursor) = &before
+        && cursor.source_id() != source_id.as_str()
+    {
+        return Err(ApiError::InvalidCursor(cursor.encode()));
+    }
+    let taxonomies: Vec<TaxonomyDescriptor> = registered_packs()
+        .iter()
+        .map(|pack| pack.taxonomy())
+        .collect();
+    let store = Arc::clone(&state.store);
+    let requested_source = source_id.clone();
+    let as_of_ms = (state.now_ms)();
+    let rejections = tokio::task::spawn_blocking(move || -> Result<_, StoreError> {
+        let Some(inputs) = store.rejections(&source_id, limit, before)? else {
+            return Ok(None);
+        };
+        Ok(Some(compute_rejections(
+            source_id,
+            &inputs,
+            as_of_ms,
+            &taxonomies,
+        )))
+    })
+    .await
+    .map_err(ApiError::Task)??
+    .ok_or(ApiError::SourceNotFound(requested_source))?;
+    Ok(Json(rejections))
+}
+
 #[derive(Debug)]
 enum ApiError {
     Model(atlas_model::ModelError),
     InvalidQuery(String),
+    InvalidCursor(String),
     SourceNotFound(SourceId),
     Store(StoreError),
     Task(tokio::task::JoinError),
@@ -343,6 +509,9 @@ impl IntoResponse for ApiError {
                 StatusCode::BAD_REQUEST,
                 format!("invalid query string: {message}"),
             ),
+            Self::InvalidCursor(value) => {
+                (StatusCode::BAD_REQUEST, format!("invalid cursor: {value}"))
+            }
             Self::SourceNotFound(source_id) => (
                 StatusCode::NOT_FOUND,
                 format!("source {source_id} was not found"),

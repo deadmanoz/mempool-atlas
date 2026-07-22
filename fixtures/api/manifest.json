@@ -33,6 +33,22 @@
       "status": 200
     },
     {
+      "body": "rejections",
+      "method": "GET",
+      "path": "rejections.json",
+      "request": "/api/v1/sources/source-a/rejections",
+      "scenario": "bounded rejection window with reason counts and best-effort classification attribution over one classified refusal (bytes seen over P2P) and one unclassified refusal, plus a recent list carrying a record with derived verdicts and one without",
+      "status": 200
+    },
+    {
+      "body": "comparison",
+      "method": "GET",
+      "path": "compare.json",
+      "request": "/api/v1/sources/compare?sources=knots,core,libre-relay",
+      "scenario": "ordered three-source comparison (knots, core, libre-relay): a shared intersection with a present pair and one awaiting-RPC member, a data tx added at each stage, a non-empty knots-only anomaly in the first stage, and an empty anomaly in the second",
+      "status": 200
+    },
+    {
       "body": "error",
       "method": "GET",
       "path": "error-unknown-source.json",
