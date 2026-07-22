@@ -85,6 +85,7 @@ Use `just` targets when one exists:
 - Outbox delivery is strict FIFO. Live and other non-reconciliation evidence is delivered singly. A contiguous `mempool_reconciled` prefix may contain at most 512 events and 4 MiB of encoded JSON.
 - Remove a single head or reconciliation prefix only after HTTP 202 with complete acknowledgements for the same event IDs in the same order. The server must apply a batch in one transaction so a lost response can safely retry the whole prefix.
 - Keep `PRAGMA temp_store=MEMORY` on every Atlas-owned SQLite connection. Hardened services may leave operating-system temporary directories read-only, but the configured database directory must remain writable for the database, WAL, and SHM files.
+- Delivery failure classes change retry timing only. Transient failures and operator-action failures must both retain the unchanged FIFO head; never skip a poison event silently.
 
 ## Documentation
 

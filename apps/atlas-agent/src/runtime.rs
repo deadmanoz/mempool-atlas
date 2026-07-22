@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use async_nats::{Client as NatsClient, ConnectOptions, Event as NatsEvent, Message, Subscriber};
-use atlas_model::{CaptureGapCertainty, Evidence, MempoolEntryFacts};
+use atlas_model::{CaptureGapCertainty, Evidence, MempoolEntryFacts, SourceId};
 use futures_util::StreamExt;
 use reqwest::Client as HttpClient;
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, watch};
@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, info, warn};
 
-use crate::delivery::{DeliveryOutcome, deliver_next};
+use crate::delivery::{DeliveryOutcome, DeliveryRetryPolicy, deliver_next};
 use crate::outbox::{AgentIdentity, Outbox};
 use crate::peer_observer::{MEMPOOL_SUBJECT, NETMSG_SUBJECT, observe_payload};
 use crate::rpc::RpcClient;
@@ -61,7 +61,7 @@ pub struct RpcConfig {
 pub struct RuntimeConfig {
     pub identity: AgentIdentity,
     pub atlas_ingest_endpoint: String,
-    pub delivery_retry_interval: Duration,
+    pub delivery_retry: DeliveryRetryPolicy,
     pub nats: Option<NatsConfig>,
     pub rpc: RpcConfig,
 }
@@ -130,7 +130,8 @@ pub async fn run(config: RuntimeConfig, outbox: Outbox) -> anyhow::Result<()> {
         outbox.clone(),
         http,
         config.atlas_ingest_endpoint,
-        config.delivery_retry_interval,
+        config.identity.source_id.clone(),
+        config.delivery_retry,
         shutdown_rx.clone(),
     ));
     tasks.spawn(rpc_loop(
@@ -147,7 +148,7 @@ pub async fn run(config: RuntimeConfig, outbox: Outbox) -> anyhow::Result<()> {
             outbox,
             config.identity,
             nats,
-            config.delivery_retry_interval,
+            config.delivery_retry.initial(),
             projection_fence,
             shutdown_rx,
         ));
@@ -519,7 +520,8 @@ async fn delivery_loop(
     outbox: Outbox,
     client: HttpClient,
     endpoint: String,
-    retry_interval: Duration,
+    source_id: SourceId,
+    retry_policy: DeliveryRetryPolicy,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     loop {
@@ -547,10 +549,19 @@ async fn delivery_loop(
             DeliveryOutcome::Deferred {
                 outbox_id,
                 attempts,
+                class,
                 error,
             } => {
-                warn!(outbox_id, attempts, %error, "outbox head delivery deferred");
-                retry_interval
+                let delay = retry_policy.delay(class, &source_id, outbox_id, attempts);
+                warn!(
+                    outbox_id,
+                    attempts,
+                    ?class,
+                    delay_ms = delay.as_millis(),
+                    %error,
+                    "outbox head delivery deferred"
+                );
+                delay
             }
         };
 

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
+use atlas_agent::delivery::DeliveryRetryPolicy;
 use atlas_agent::outbox::{AgentIdentity, Outbox};
 use atlas_agent::runtime::{NatsConfig, P2pPolicy, RpcConfig, RuntimeConfig};
 use atlas_model::{SourceId, SourceSessionId};
@@ -65,6 +66,12 @@ struct RunArgs {
         default_value = "1000"
     )]
     delivery_retry_milliseconds: NonZeroU64,
+    #[arg(
+        long,
+        env = "ATLAS_DELIVERY_RETRY_MAX_MILLISECONDS",
+        default_value = "60000"
+    )]
+    delivery_retry_max_milliseconds: NonZeroU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -91,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(args: RunArgs) -> anyhow::Result<()> {
+    let delivery_retry = delivery_retry_policy(&args)?;
     let source_id = SourceId::new(args.source_id).context("validating source ID")?;
     let source_session_id =
         SourceSessionId::new(Uuid::new_v4().to_string()).context("creating source session ID")?;
@@ -113,7 +121,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     let config = RuntimeConfig {
         identity,
         atlas_ingest_endpoint,
-        delivery_retry_interval: Duration::from_millis(args.delivery_retry_milliseconds.get()),
+        delivery_retry,
         nats,
         rpc: RpcConfig {
             url: http_url("Bitcoin RPC", &args.rpc_url)?.to_string(),
@@ -125,10 +133,79 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
     atlas_agent::runtime::run(config, outbox).await
 }
 
+fn delivery_retry_policy(args: &RunArgs) -> anyhow::Result<DeliveryRetryPolicy> {
+    DeliveryRetryPolicy::new(
+        Duration::from_millis(args.delivery_retry_milliseconds.get()),
+        Duration::from_millis(args.delivery_retry_max_milliseconds.get()),
+    )
+    .context("validating delivery retry intervals")
+}
+
 fn http_url(label: &str, value: &str) -> anyhow::Result<reqwest::Url> {
     let url = reqwest::Url::parse(value).with_context(|| format!("parsing {label} URL"))?;
     if matches!(url.scheme(), "http" | "https") {
         return Ok(url);
     }
     anyhow::bail!("{label} URL must use http or https")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn parse_run_args(extra: &[&str]) -> RunArgs {
+        let mut arguments = vec![
+            "atlas-agent",
+            "run",
+            "--source-id",
+            "core-a",
+            "--database",
+            "/tmp/atlas-agent-test.db",
+            "--atlas-server-url",
+            "http://127.0.0.1:8080",
+            "--rpc-username",
+            "rpc-user",
+            "--rpc-password",
+            "rpc-password",
+        ];
+        arguments.extend_from_slice(extra);
+        match Cli::try_parse_from(arguments).expect("parse CLI").command {
+            Command::Run(args) => *args,
+            Command::Migrate { .. } => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn delivery_retry_defaults_to_one_second_initial_and_sixty_second_maximum() {
+        let command = Cli::command();
+        let run = command.find_subcommand("run").expect("run subcommand");
+        let default = |argument_id: &str| {
+            run.get_arguments()
+                .find(|argument| argument.get_id() == argument_id)
+                .and_then(|argument| argument.get_default_values().first())
+                .and_then(|value| value.to_str())
+                .expect("UTF-8 default")
+        };
+
+        assert_eq!(default("delivery_retry_milliseconds"), "1000");
+        assert_eq!(default("delivery_retry_max_milliseconds"), "60000");
+    }
+
+    #[test]
+    fn delivery_retry_maximum_must_not_be_below_initial() {
+        let args = parse_run_args(&[
+            "--delivery-retry-milliseconds",
+            "1001",
+            "--delivery-retry-max-milliseconds",
+            "1000",
+        ]);
+
+        let error = delivery_retry_policy(&args).expect_err("reject inverted retry bounds");
+        assert!(error.chain().any(|cause| {
+            cause
+                .to_string()
+                .contains("maximum delivery retry interval")
+        }));
+    }
 }
