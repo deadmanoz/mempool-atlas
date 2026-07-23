@@ -15,6 +15,9 @@ build:
 build-rust:
     cargo build --workspace
 
+build-scale-fixture:
+    cargo build --release -p atlas-agent --features scale-fixture --bin atlas-rpc-fixture
+
 build-web:
     npm --prefix web run build
 

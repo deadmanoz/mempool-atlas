@@ -62,6 +62,8 @@ just proto-check
 
 `just test-baseline-scale` runs the release-mode acceptance path with a 200,000-transaction agent checkpoint, real HTTP reduction, database reopen, and active-read verification.
 
+`just build-scale-fixture` builds the test-only `atlas-rpc-fixture` binary. It serves deterministic loopback-only `getmempoolinfo` and conservative full Core/Knots-shaped verbose `getrawmempool` responses for up to 200,000 entries, requires explicit dummy HTTP Basic credentials, exposes `atlas_setvariant` to switch atomically between two constant-txid fact sets, and reports both exact precomputed result byte counts through `atlas_status`. The binary requires the `scale-fixture` feature and must never be deployed as an Atlas production role.
+
 Run the central API with `just dev`, and run Vite in a second terminal with `just web-dev`. The development target raises the persistent source-identity cap to four so `just seed-dev` and the three-source `just seed-forks` workflow can coexist. `just seed-dev` refreshes a deterministic 20,000-transaction source through the real checkpoint endpoint. `just seed-forks` refreshes deterministic `knots`, `core`, and `libre-relay` snapshots for the optional comparison workspace. Re-running either command replaces source state rather than growing a history.
 
 The read API provides:

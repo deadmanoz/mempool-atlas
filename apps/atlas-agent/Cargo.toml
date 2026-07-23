@@ -4,11 +4,17 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+# Builds the production-isolated RPC load fixture; never enable for a
+# production agent role.
+scale-fixture = ["dep:axum"]
+
 [dependencies]
 anyhow.workspace = true
 async-nats.workspace = true
 atlas-model = { path = "../../crates/atlas-model" }
 atlas-storage = { path = "../../crates/atlas-storage" }
+axum = { workspace = true, optional = true }
 bitcoin.workspace = true
 clap.workspace = true
 corepc-client.workspace = true
@@ -31,6 +37,10 @@ tempfile.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true
+
+[[bin]]
+name = "atlas-rpc-fixture"
+required-features = ["scale-fixture"]
 
 [lints]
 workspace = true

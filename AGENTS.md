@@ -24,6 +24,7 @@ Production limits are layered. Each agent accepts at most 200,000 entries, with 
 - `rusqlite` backs source-local and central state.
 - `fs4` reports total and non-privileged available filesystem capacity for SQLite write admission.
 - `bitcoin` validates identifiers and exact node facts.
+- Optional `axum` support is enabled only by the `scale-fixture` feature to serve the test-only loopback RPC fixture.
 - `async-nats` and `prost` remain for deferred peer evidence work, not the production runtime.
 
 ## Build & Test
@@ -33,6 +34,7 @@ Use `just` targets whenever one exists:
 - `just build` builds the Rust workspace and web client.
 - `just test` runs Rust and web tests.
 - `just lint` runs formatting checks, Clippy, and TypeScript checks.
+- `just build-scale-fixture` builds the feature-gated release-mode Bitcoin RPC load fixture.
 - `just test-baseline-scale` proves the 200,000-transaction agent-to-server checkpoint path in release mode.
 - `just regen-api-fixtures` rewrites deterministic golden read fixtures; review the diff.
 - `just seed-dev` and `just seed-forks` replace deterministic source snapshots through the real state endpoint.
@@ -51,6 +53,7 @@ Use `just` targets whenever one exists:
 - SourceReplica actions are immutable after freezing. Remove them only after an exact expected acknowledgement.
 - Checkpoints bind replacement cursor, target cursor, counts, chunks, and canonical digest. Replacing an abandoned staging checkpoint requires its exact checkpoint ID as a compare-and-swap token. Staging is never reader-visible.
 - Keep source IDs and fork presets configurable. Never commit credentials, hostnames, peer addresses, or deployment inventory.
+- Treat `atlas-rpc-fixture` as test infrastructure only. It must remain feature-gated, require explicit dummy Basic credentials, bind only to loopback, precompute full Core/Knots-shaped variants with exact byte reporting, and stay absent from every production role deployment.
 - Clean preproduction schemas are central generation 8 and agent generation 5. Stale databases are replaced only through backup-first reinitialization. Production migrations become append-only once real data must be retained.
 
 ## Repository Etiquette
