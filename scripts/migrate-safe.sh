@@ -51,9 +51,9 @@ if [[ "$mode" == "reinitialize" ]]; then
 fi
 
 if [[ "$component" == "agent" ]]; then
-    migration_command=(cargo run -p atlas-agent -- migrate --database "$database")
+    migration_command=(cargo run -p atlas-agent --bin atlas-agent -- migrate --database "$database")
 else
-    migration_command=(cargo run -p atlas-server -- migrate --database "$database")
+    migration_command=(cargo run -p atlas-server --bin atlas-server -- migrate --database "$database")
 fi
 if "${migration_command[@]}"; then
     integrity="$(sqlite3 "$database" 'PRAGMA integrity_check;')"
