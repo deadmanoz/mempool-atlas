@@ -113,8 +113,8 @@ process.
 The application encodes one JSON response when snapshot state changes and
 shares those immutable bytes between requests. This prevents concurrent
 browsers from multiplying large serialization work and memory allocation.
-The presentation reverse proxy must still apply request limits and response
-compression before public exposure.
+The deployed presentation reverse proxy applies request and connection limits
+plus response compression before public exposure.
 
 Bitcoin RPC authentication does not make a credential read-only. Deployment
 must apply a server-side RPC whitelist containing exactly
@@ -124,10 +124,14 @@ proxy-temp spill and use timeouts compatible with the validated collection
 window.
 
 `corepc-client` 0.8 buffers the verbose response and has a fixed 15-second
-transport timeout. Before enabling the real service, test a large mempool over
-the target WireGuard path and observe completion time plus peak service memory.
-If collection cannot reliably finish inside that timeout, replace or extend the
-RPC transport rather than weakening snapshot validation.
+transport timeout. The first deployed single-source slice accepted complete
+28,520 to 33,381 entry snapshots over WireGuard in 6.9 to 15.4 seconds
+end-to-end. Peak service memory after collection and a full browser load stayed
+below 49 MB, with no proxy temporary files, swap, pressure, or OOM events. This
+does not prove the 200,000-entry limit will fit the fixed transport timeout.
+Revalidate materially larger mempools before adding sources; if collection
+cannot finish reliably, replace or extend the RPC transport rather than
+weakening snapshot validation.
 
 The five-minute default is intentionally not live. Choose the production
 cadence from measured response bytes, transfer duration, node cost, and desired

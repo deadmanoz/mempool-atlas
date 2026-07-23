@@ -103,6 +103,12 @@ Deployment must whitelist the Atlas RPC identity to exactly
 `getmempoolinfo`, `getrawmempool`, and `getblockchaininfo`. The proxy path must
 stream the response without writing it through proxy-temp storage.
 
+The first deployed source validated this path with complete 28,520 to 33,381
+entry snapshots. End-to-end polls took 6.9 to 15.4 seconds, service memory
+peaked below 49 MB after a full browser load, and the node proxy created no
+temporary files. Repeat the measurement for materially larger mempools or
+additional sources.
+
 ## Restart and recovery
 
 An ordinary restart loses the in-memory snapshot and begins collecting again.

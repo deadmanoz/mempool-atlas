@@ -90,13 +90,15 @@ Use `just` targets whenever one exists:
 
 - `corepc-client` buffers the HTTP response before custom deserialization.
 - `corepc-client` 0.8 has a fixed 15-second transport timeout. Prove the real
-  large-snapshot path stays inside it before production, or replace the
-  transport.
+  large-snapshot path stays inside it before adding sources or relying on a
+  materially larger mempool, or replace the transport. The first deployed
+  single-source slice succeeded with 28,520 to 33,381 entries.
 - Snapshot replacement can briefly retain both the old and new snapshot while
   readers finish. The service also retains one encoded JSON representation, so
   the entry cap is not a complete memory bound.
-- Public deployment still needs reverse-proxy request limits and compression.
-  Shared response bytes prevent per-request allocation, not bandwidth abuse.
+- The public deployment applies reverse-proxy request and connection limits
+  plus JSON compression. Shared response bytes prevent per-request allocation,
+  not bandwidth abuse.
 - The node-side RPC proxy must stream verbose responses without proxy-temp
   spill. Default collection is every five minutes; choose production cadence
   from measured bytes, duration, node cost, and freshness.

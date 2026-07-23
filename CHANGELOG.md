@@ -20,3 +20,6 @@ All notable changes to Mempool Atlas will be documented in this file.
 - Separate current-state visualisation from historical archival. Attempt #3
   intentionally stores no application history and requires no database
   migration or recovery path.
+- Validate the first deployed single-source slice over the existing WireGuard
+  RPC path, including public proxy limits, complete snapshot rendering,
+  client-side filtering, proxy temp-file behavior, and target-host memory.

@@ -82,7 +82,7 @@ once on a blocking worker and publishes its immutable `Bytes` beside the
 structured snapshot. Each HTTP request clones that shared buffer rather than
 allocating and serializing another large response. The presentation reverse
 proxy remains responsible for compression, request rate limits, and concurrency
-limits before public exposure.
+limits before public exposure. The first deployment enables all three.
 
 Detailed RPC and validation errors remain in service logs. The public source
 status uses a stable, sanitised message so a transport response cannot expose
@@ -95,9 +95,12 @@ bound, not a complete memory bound; deployment acceptance must observe real peak
 memory.
 
 Version 0.8 of `corepc-client` also fixes the JSON-RPC transport timeout at 15
-seconds. A large real snapshot must be proven over the target WireGuard path
-before deployment. If it cannot finish reliably inside that window, Atlas needs
-a configurable transport rather than an incomplete snapshot.
+seconds. The first deployment accepted complete 28,520 to 33,381 entry
+snapshots over the target WireGuard path in 6.9 to 15.4 seconds end-to-end and
+peaked below 49 MB after a full browser load. This is not a 200,000-entry proof.
+Materially larger mempools and additional sources require renewed measurement;
+if they cannot finish reliably inside the transport window, Atlas needs a
+configurable transport rather than an incomplete snapshot.
 
 ## Network boundary
 
