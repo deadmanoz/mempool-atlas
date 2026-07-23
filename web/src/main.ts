@@ -1,10 +1,17 @@
-import { fetchMempool } from "./api";
-import { initComparison } from "./comparison";
+import { fetchSources, fetchSourceSnapshot } from "./api";
+import {
+  DEFAULT_FILTERS,
+  filterTransactions,
+  type MempoolFilters,
+} from "./filters";
 import { formatMembershipAge, membershipPage } from "./membership-table";
 import { renderSwimView } from "./swim-view";
-import { initWorkbench } from "./workbench";
 import "./styles.css";
-import type { CaptureStatus, MempoolEntry } from "./types";
+import type {
+  MempoolSnapshot,
+  MempoolTransaction,
+  SourceSnapshotResponse,
+} from "./types";
 
 const requiredElement = <T extends HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
@@ -14,256 +21,285 @@ const requiredElement = <T extends HTMLElement>(id: string): T => {
   return element as T;
 };
 
-const status = requiredElement<HTMLParagraphElement>("status");
-const captureStatus = requiredElement<HTMLParagraphElement>("capture-status");
-const empty = requiredElement<HTMLParagraphElement>("empty");
+const pageStatus = requiredElement<HTMLElement>("page-status");
+const statusTitle = requiredElement<HTMLElement>("status-title");
+const statusDetail = requiredElement<HTMLElement>("status-detail");
+const refreshButton = requiredElement<HTMLButtonElement>("refresh");
+const sourceLabel = requiredElement<HTMLElement>("source-label");
+const sourceId = requiredElement<HTMLElement>("source-id");
+const observedValue = requiredElement<HTMLElement>("observed-value");
+const tipValue = requiredElement<HTMLElement>("tip-value");
+const transactionCount = requiredElement<HTMLElement>("transaction-count");
+const totalVsize = requiredElement<HTMLElement>("total-vsize");
+const filtersForm = requiredElement<HTMLFormElement>("filters");
+const minimumFeeRate = requiredElement<HTMLInputElement>("minimum-fee-rate");
+const maximumAge = requiredElement<HTMLSelectElement>("maximum-age");
+const minimumVsize = requiredElement<HTMLInputElement>("minimum-vsize");
+const resetFilters = requiredElement<HTMLButtonElement>("reset-filters");
+const filterSummary = requiredElement<HTMLElement>("filter-summary");
 const visualWrap = requiredElement<HTMLElement>("visual-wrap");
 const canvas = requiredElement<HTMLCanvasElement>("mempool-canvas");
-const visualSummary = requiredElement<HTMLParagraphElement>("visual-summary");
+const empty = requiredElement<HTMLElement>("empty");
+const visualSummary = requiredElement<HTMLElement>("visual-summary");
 const inspector = requiredElement<HTMLDetailsElement>("inspector");
+const txidSearchForm = requiredElement<HTMLFormElement>("txid-search-form");
 const txidSearch = requiredElement<HTMLInputElement>("txid-search");
-const tableSummary = requiredElement<HTMLParagraphElement>("table-summary");
-const tableBody = requiredElement<HTMLTableSectionElement>("memberships");
+const tableSummary = requiredElement<HTMLElement>("table-summary");
+const tableBody = requiredElement<HTMLTableSectionElement>("transactions");
 const previousPage = requiredElement<HTMLButtonElement>("previous-page");
 const nextPage = requiredElement<HTMLButtonElement>("next-page");
-const refresh = requiredElement<HTMLButtonElement>("refresh");
-const membershipHeading = requiredElement<HTMLElement>("membership-heading");
-const membershipPanel = requiredElement<HTMLDetailsElement>("membership-panel");
-
-const workbench = initWorkbench();
-const comparison = initComparison();
-
-// Top-level mode switch: the single-source workbench (default) and the
-// multi-source comparison are siblings. Only the active mode's section is
-// visible, and the comparison only polls while it is the active mode.
-const modeWorkbench = requiredElement<HTMLButtonElement>("mode-workbench");
-const modeCompare = requiredElement<HTMLButtonElement>("mode-compare");
-const workbenchMode = requiredElement<HTMLElement>("workbench-mode");
-const comparisonMode = requiredElement<HTMLElement>("comparison");
-
-const setMode = (mode: "workbench" | "compare"): void => {
-  const compare = mode === "compare";
-  workbenchMode.hidden = compare;
-  comparisonMode.hidden = !compare;
-  modeWorkbench.dataset.active = String(!compare);
-  modeWorkbench.setAttribute("aria-selected", String(!compare));
-  modeWorkbench.tabIndex = compare ? -1 : 0;
-  modeCompare.dataset.active = String(compare);
-  modeCompare.setAttribute("aria-selected", String(compare));
-  modeCompare.tabIndex = compare ? 0 : -1;
-  comparison.setActive(compare);
-};
-
-modeWorkbench.addEventListener("click", () => {
-  setMode("workbench");
-});
-modeCompare.addEventListener("click", () => {
-  setMode("compare");
-});
-
-const modeButtons = [modeWorkbench, modeCompare] as const;
-for (const [index, button] of modeButtons.entries()) {
-  button.addEventListener("keydown", (event) => {
-    let nextIndex: number | null = null;
-    if (event.key === "ArrowRight") {
-      nextIndex = (index + 1) % modeButtons.length;
-    } else if (event.key === "ArrowLeft") {
-      nextIndex = (index - 1 + modeButtons.length) % modeButtons.length;
-    } else if (event.key === "Home") {
-      nextIndex = 0;
-    } else if (event.key === "End") {
-      nextIndex = modeButtons.length - 1;
-    }
-    if (nextIndex === null) {
-      return;
-    }
-    event.preventDefault();
-    const next = modeButtons[nextIndex]!;
-    setMode(next === modeCompare ? "compare" : "workbench");
-    next.focus();
-  });
-}
 
 const countFormat = new Intl.NumberFormat();
 const decimalFormat = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 2,
 });
 
-let currentMemberships: MempoolEntry[] = [];
+let selectedSourceId: string | null = null;
+let currentSnapshot: MempoolSnapshot | null = null;
+let filteredTransactions: MempoolTransaction[] = [];
 let tablePageIndex = 0;
-let renderedAtMs = Date.now();
 let pendingRenderFrame: number | null = null;
 
-const appendCell = (
-  row: HTMLTableRowElement,
-  value: string,
-  className?: string,
-): void => {
-  const cell = document.createElement("td");
-  cell.textContent = value;
-  if (className !== undefined) {
-    cell.className = className;
+const formatVsize = (value: number): string => {
+  if (value >= 1_000_000_000) {
+    return `${decimalFormat.format(value / 1_000_000_000)} GvB`;
   }
-  row.append(cell);
+  if (value >= 1_000_000) {
+    return `${decimalFormat.format(value / 1_000_000)} MvB`;
+  }
+  if (value >= 1_000) {
+    return `${decimalFormat.format(value / 1_000)} kvB`;
+  }
+  return `${countFormat.format(value)} vB`;
 };
 
-const renderMembership = (membership: MempoolEntry): HTMLTableRowElement => {
-  const row = document.createElement("tr");
-
-  const txidCell = document.createElement("td");
-  const txid = document.createElement("code");
-  txid.textContent = membership.txid;
-  txidCell.append(txid);
-  row.append(txidCell);
-
-  if (membership.facts.status === "awaiting_rpc") {
-    appendCell(row, "Awaiting RPC", "pending-value");
-    appendCell(row, "Awaiting RPC", "pending-value");
-    appendCell(row, "Awaiting RPC", "pending-value");
-  } else {
-    appendCell(
-      row,
-      decimalFormat.format(membership.facts.fee_sats / membership.facts.vsize),
-    );
-    appendCell(row, countFormat.format(membership.facts.vsize));
-    appendCell(
-      row,
-      formatMembershipAge(renderedAtMs - membership.facts.entered_at_ms),
-    );
+const formatPollInterval = (seconds: number): string => {
+  if (seconds % 3_600 === 0) {
+    const hours = seconds / 3_600;
+    return `${countFormat.format(hours)} hour${hours === 1 ? "" : "s"}`;
   }
+  if (seconds % 60 === 0) {
+    const minutes = seconds / 60;
+    return `${countFormat.format(minutes)} minute${minutes === 1 ? "" : "s"}`;
+  }
+  return `${countFormat.format(seconds)} second${seconds === 1 ? "" : "s"}`;
+};
 
-  return row;
+const formatSnapshotFreshness = (observedAtMs: number): string => {
+  const ageMs = Math.max(0, Date.now() - observedAtMs);
+  if (ageMs < 60_000) {
+    return "less than a minute ago";
+  }
+  return `${formatMembershipAge(ageMs)} ago`;
+};
+
+const readFilters = (): MempoolFilters => {
+  const feeRate = Number.parseFloat(minimumFeeRate.value);
+  const size = Number.parseInt(minimumVsize.value, 10);
+  const age = maximumAge.value;
+  return {
+    minimumFeeRate: Number.isFinite(feeRate) && feeRate >= 0 ? feeRate : 0,
+    maximumAgeMs: age === "all" ? null : Number.parseInt(age, 10),
+    minimumVsize: Number.isSafeInteger(size) && size >= 0 ? size : 0,
+  };
 };
 
 const renderTable = (): void => {
+  if (currentSnapshot === null) {
+    tableBody.replaceChildren();
+    tableSummary.textContent = "No snapshot loaded.";
+    previousPage.disabled = true;
+    nextPage.disabled = true;
+    return;
+  }
+  const snapshot = currentSnapshot;
+
   const page = membershipPage(
-    currentMemberships,
+    filteredTransactions,
     txidSearch.value,
     tablePageIndex,
   );
   tablePageIndex = page.pageIndex;
-  tableBody.replaceChildren(...page.entries.map(renderMembership));
+  const rows = page.entries.map((transaction) => {
+    const row = document.createElement("tr");
+    const txidCell = document.createElement("td");
+    const txid = document.createElement("code");
+    txid.textContent = transaction.txid;
+    txidCell.append(txid);
+    row.append(txidCell);
+
+    for (const value of [
+      decimalFormat.format(transaction.fee_sats / transaction.vsize),
+      countFormat.format(transaction.vsize),
+      formatMembershipAge(snapshot.observed_at_ms - transaction.entered_at_ms),
+    ]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    return row;
+  });
+  tableBody.replaceChildren(...rows);
   previousPage.disabled = page.pageIndex === 0 || page.pageCount === 0;
   nextPage.disabled =
     page.pageCount === 0 || page.pageIndex >= page.pageCount - 1;
-
   tableSummary.textContent =
     page.matchCount === 0
-      ? "No transaction IDs match this prefix."
+      ? "No transaction IDs match that prefix."
       : `Showing ${countFormat.format(page.firstMatchNumber)}–${countFormat.format(page.lastMatchNumber)} of ${countFormat.format(page.matchCount)} matching transactions. Page ${countFormat.format(page.pageIndex + 1)} of ${countFormat.format(page.pageCount)}.`;
 };
 
 const renderVisual = (): void => {
   pendingRenderFrame = null;
-  if (currentMemberships.length === 0 || visualWrap.hidden) {
+  if (
+    currentSnapshot === null ||
+    filteredTransactions.length === 0 ||
+    visualWrap.hidden
+  ) {
     return;
   }
-  const summary = renderSwimView(canvas, currentMemberships, renderedAtMs);
-  const enriched = countFormat.format(summary.availableCount);
-  const awaiting = countFormat.format(summary.awaitingCount);
-  visualSummary.textContent = `${enriched} transactions have RPC fee, size, and entry-time facts, representing ${countFormat.format(summary.totalVsize)} vB. ${awaiting} transactions are awaiting RPC facts.`;
+  const summary = renderSwimView(
+    canvas,
+    filteredTransactions,
+    currentSnapshot.observed_at_ms,
+  );
+  visualSummary.textContent = `${countFormat.format(summary.transactionCount)} transactions, representing ${formatVsize(summary.totalVsize)}. Rows are base fee rate, columns and colour are age, and square area is virtual size.`;
   canvas.setAttribute(
     "aria-label",
-    `Static mempool plot containing ${countFormat.format(currentMemberships.length)} transactions. ${enriched} have RPC facts and ${awaiting} are awaiting RPC facts. Individual base fee rate increases from bottom to top, age runs from oldest on the left to newest on the right, and glyph area represents virtual size.`,
+    `Mempool snapshot containing ${countFormat.format(summary.transactionCount)} filtered transactions. Fee rate increases from bottom to top, age runs from oldest on the left to newest on the right, and square area represents virtual size.`,
   );
 };
 
 const scheduleVisualRender = (): void => {
-  if (pendingRenderFrame !== null || currentMemberships.length === 0) {
+  if (
+    pendingRenderFrame !== null ||
+    currentSnapshot === null ||
+    filteredTransactions.length === 0
+  ) {
     return;
   }
   pendingRenderFrame = window.requestAnimationFrame(renderVisual);
 };
 
-const clearMemberships = (): void => {
-  currentMemberships = [];
+const applyFilters = (): void => {
+  if (currentSnapshot === null) {
+    filteredTransactions = [];
+    return;
+  }
+  filteredTransactions = filterTransactions(
+    currentSnapshot.transactions,
+    readFilters(),
+    currentSnapshot.observed_at_ms,
+  );
   tablePageIndex = 0;
-  tableBody.replaceChildren();
-  visualWrap.hidden = true;
-  inspector.hidden = true;
-  if (pendingRenderFrame !== null) {
-    window.cancelAnimationFrame(pendingRenderFrame);
-    pendingRenderFrame = null;
-  }
+  txidSearch.value = "";
+  filterSummary.textContent = `Showing ${countFormat.format(filteredTransactions.length)} of ${countFormat.format(currentSnapshot.transaction_count)} transactions.`;
+  visualWrap.hidden = filteredTransactions.length === 0;
+  empty.hidden = filteredTransactions.length !== 0;
+  empty.textContent =
+    currentSnapshot.transaction_count === 0
+      ? "This snapshot contains an empty mempool."
+      : "No transactions match the current filters.";
+  inspector.hidden = currentSnapshot.transaction_count === 0;
+  renderTable();
+  scheduleVisualRender();
 };
 
-const renderCaptureStatus = (
-  sourceId: string,
-  capture: CaptureStatus,
-): void => {
-  captureStatus.hidden = false;
-  if (capture.status === "not_collected") {
-    captureStatus.dataset.certainty = "none";
-    captureStatus.textContent = `Peer-observer evidence is not being collected for ${sourceId}. Current membership comes from RPC state only.`;
-    return;
-  }
-  if (capture.status === "no_reported_gaps") {
-    captureStatus.dataset.certainty = "none";
-    captureStatus.textContent = `No capture gaps have been reported for ${sourceId}. This is not proof of complete forensic coverage.`;
-    return;
-  }
+const renderResponse = (response: SourceSnapshotResponse): void => {
+  const { source, snapshot } = response;
+  sourceLabel.textContent = source.source_label;
+  sourceId.textContent = source.source_id;
+  pageStatus.dataset.state = source.availability;
 
-  const since = new Date(capture.first_gap_at_ms).toLocaleString();
-  const details = `${capture.latest_input}: ${capture.latest_reason}`;
-  captureStatus.dataset.certainty = capture.strongest_certainty;
-  captureStatus.textContent =
-    capture.strongest_certainty === "known_loss"
-      ? `${sourceId}'s peer-observer evidence history contains a known gap since ${since} (${details}). RPC may still have reconciled current membership.`
-      : `${sourceId}'s peer-observer evidence history may contain a gap since ${since} (${details}). RPC may still have reconciled current membership.`;
-};
-
-const loadMemberships = async (): Promise<void> => {
-  refresh.disabled = true;
-  status.dataset.state = "loading";
-  status.textContent = "Loading memberships…";
-
-  const selectedSource = workbench.getSelectedSource();
-  if (selectedSource === null) {
-    clearMemberships();
-    empty.hidden = true;
-    captureStatus.hidden = true;
-    status.dataset.state = "error";
-    status.textContent = "Waiting for a source to be selected.";
-    refresh.disabled = false;
-    return;
-  }
-
-  try {
-    const response = await fetchMempool(selectedSource);
-    currentMemberships = response.memberships;
-    renderedAtMs = Date.now();
-    tablePageIndex = 0;
-    membershipHeading.textContent = `Per-transaction detail · ${response.source_id}`;
-    renderCaptureStatus(response.source_id, response.health.capture);
-    empty.textContent = `No transactions are currently present in ${response.source_id}.`;
-    empty.hidden = currentMemberships.length !== 0;
-    visualWrap.hidden = currentMemberships.length === 0;
-    inspector.hidden = currentMemberships.length === 0;
-    if (currentMemberships.length === 0) {
-      clearMemberships();
+  if (snapshot === null) {
+    currentSnapshot = null;
+    filteredTransactions = [];
+    visualWrap.hidden = true;
+    inspector.hidden = true;
+    empty.hidden = false;
+    transactionCount.textContent = "Waiting";
+    totalVsize.textContent = "Waiting";
+    observedValue.textContent = "No snapshot";
+    tipValue.textContent = "Unknown";
+    filterSummary.textContent = "No snapshot loaded.";
+    if (source.availability === "error") {
+      statusTitle.textContent = "Node snapshot unavailable";
+      statusDetail.textContent = `Latest poll failed: ${source.last_error ?? "unknown error"}`;
+      empty.textContent = "Atlas has not received a valid snapshot yet.";
     } else {
-      renderTable();
-      scheduleVisualRender();
+      statusTitle.textContent = "Waiting for the first snapshot";
+      statusDetail.textContent = `Atlas polls this node every ${formatPollInterval(source.poll_interval_seconds)}.`;
+      empty.textContent =
+        "The first complete mempool snapshot is being collected.";
     }
-    status.dataset.state = "ready";
-    status.textContent = `${countFormat.format(currentMemberships.length)} transaction${currentMemberships.length === 1 ? "" : "s"} currently present. RPC state ${response.health.state_cursor.epoch_id}@${response.health.state_cursor.revision} observed ${new Date(response.health.state_observed_at_ms).toLocaleString()}.`;
+    renderTable();
+    return;
+  }
+
+  currentSnapshot = snapshot;
+  transactionCount.textContent = countFormat.format(snapshot.transaction_count);
+  totalVsize.textContent = formatVsize(snapshot.total_vsize);
+  observedValue.textContent = formatSnapshotFreshness(snapshot.observed_at_ms);
+  observedValue.title = new Date(snapshot.observed_at_ms).toLocaleString();
+  tipValue.textContent = `${countFormat.format(snapshot.chain_tip.height)} · ${snapshot.chain_tip.hash.slice(0, 10)}…`;
+  tipValue.title = snapshot.chain_tip.hash;
+
+  if (source.availability === "stale") {
+    statusTitle.textContent = "Showing the last good snapshot";
+    statusDetail.textContent = `Observed ${new Date(snapshot.observed_at_ms).toLocaleString()}. Latest poll failed: ${source.last_error ?? "unknown error"}`;
+  } else {
+    statusTitle.textContent = "Snapshot healthy";
+    statusDetail.textContent = `Observed ${new Date(snapshot.observed_at_ms).toLocaleString()}. Atlas checks the node every ${formatPollInterval(source.poll_interval_seconds)}.`;
+  }
+  applyFilters();
+};
+
+const chooseSource = async (): Promise<string> => {
+  const response = await fetchSources();
+  if (response.sources.length === 0) {
+    throw new Error("Atlas has no configured Bitcoin source");
+  }
+  const requested = new URLSearchParams(window.location.search).get("source");
+  if (
+    requested !== null &&
+    response.sources.some((source) => source.source_id === requested)
+  ) {
+    return requested;
+  }
+  return response.sources[0]?.source_id ?? "";
+};
+
+const loadSnapshot = async (): Promise<void> => {
+  refreshButton.disabled = true;
+  refreshButton.textContent = "Loading…";
+  try {
+    selectedSourceId ??= await chooseSource();
+    renderResponse(await fetchSourceSnapshot(selectedSourceId));
   } catch (error) {
-    clearMemberships();
-    empty.hidden = true;
-    captureStatus.hidden = true;
-    status.dataset.state = "error";
-    status.textContent =
-      error instanceof Error ? error.message : "Unable to load memberships";
+    pageStatus.dataset.state = "error";
+    statusTitle.textContent = "Atlas website unavailable";
+    statusDetail.textContent =
+      error instanceof Error ? error.message : "Unable to load snapshot";
   } finally {
-    refresh.disabled = false;
+    refreshButton.disabled = false;
+    refreshButton.textContent = "Refresh snapshot";
   }
 };
 
-refresh.addEventListener("click", () => {
-  void loadMemberships();
+filtersForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  applyFilters();
 });
 
-txidSearch.addEventListener("input", () => {
+resetFilters.addEventListener("click", () => {
+  minimumFeeRate.value = String(DEFAULT_FILTERS.minimumFeeRate);
+  maximumAge.value = "all";
+  minimumVsize.value = String(DEFAULT_FILTERS.minimumVsize);
+  applyFilters();
+});
+
+txidSearchForm.addEventListener("submit", (event) => {
+  event.preventDefault();
   tablePageIndex = 0;
   renderTable();
 });
@@ -278,21 +314,10 @@ nextPage.addEventListener("click", () => {
   renderTable();
 });
 
+refreshButton.addEventListener("click", () => {
+  void loadSnapshot();
+});
+
 new ResizeObserver(scheduleVisualRender).observe(canvas);
 
-// Per-transaction detail is on-demand: the workbench above is aggregate-only,
-// so the full membership snapshot is only fetched when the panel is opened.
-membershipPanel.addEventListener("toggle", () => {
-  if (membershipPanel.open && currentMemberships.length === 0) {
-    void loadMemberships();
-  }
-});
-
-workbench.onSourceChange(() => {
-  clearMemberships();
-  status.dataset.state = "ready";
-  status.textContent = "Open to load.";
-  if (membershipPanel.open) {
-    void loadMemberships();
-  }
-});
+void loadSnapshot();

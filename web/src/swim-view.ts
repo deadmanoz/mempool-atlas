@@ -1,4 +1,4 @@
-import type { MempoolEntry } from "./types";
+import type { MempoolTransaction } from "./types";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -6,9 +6,7 @@ const DAY_MS = 24 * HOUR_MS;
 
 const MIN_GLYPH_SIZE = 1.25;
 const MAX_GLYPH_SIZE = 14;
-const AWAITING_GLYPH_SIZE = 2;
 const TARGET_GLYPH_COVERAGE = 0.36;
-const AWAITING_COLOR = "#8996a6";
 
 export interface FeeRateLane {
   label: string;
@@ -83,16 +81,14 @@ export interface SwimGeometry {
   plotHeight: number;
   laneHeight: number;
   columnWidth: number;
-  awaitingTop: number;
-  awaitingHeight: number;
 }
 
 export interface SwimGlyph {
   x: number;
   y: number;
   size: number;
-  feeLaneIndex: number | null;
-  ageColumnIndex: number | null;
+  feeLaneIndex: number;
+  ageColumnIndex: number;
 }
 
 export interface SwimGlyphBatch {
@@ -101,8 +97,7 @@ export interface SwimGlyphBatch {
 }
 
 export interface SwimSummary {
-  availableCount: number;
-  awaitingCount: number;
+  transactionCount: number;
   totalVsize: number;
   feeLaneCounts: number[];
   ageColumnCounts: number[];
@@ -111,7 +106,6 @@ export interface SwimSummary {
 export interface SwimLayout {
   geometry: SwimGeometry;
   batches: SwimGlyphBatch[];
-  awaitingBatch: SwimGlyphBatch;
   summary: SwimSummary;
 }
 
@@ -153,13 +147,8 @@ const createGeometry = (width: number, height: number): SwimGeometry => {
   const plotTop = 36;
   const rightGutter = 12;
   const bottomGutter = 12;
-  const awaitingGap = 18;
-  const awaitingHeight = 34;
   const plotWidth = Math.max(1, safeWidth - plotLeft - rightGutter);
-  const plotHeight = Math.max(
-    1,
-    safeHeight - plotTop - awaitingGap - awaitingHeight - bottomGutter,
-  );
+  const plotHeight = Math.max(1, safeHeight - plotTop - bottomGutter);
 
   return {
     width: safeWidth,
@@ -170,8 +159,6 @@ const createGeometry = (width: number, height: number): SwimGeometry => {
     plotHeight,
     laneHeight: plotHeight / FEE_RATE_LANES.length,
     columnWidth: plotWidth / AGE_COLUMNS.length,
-    awaitingTop: plotTop + plotHeight + awaitingGap,
-    awaitingHeight,
   };
 };
 
@@ -188,34 +175,24 @@ const glyphPosition = (
 });
 
 export const createSwimLayout = (
-  memberships: readonly MempoolEntry[],
+  transactions: readonly MempoolTransaction[],
   width: number,
   height: number,
-  nowMs: number,
+  observedAtMs: number,
 ): SwimLayout => {
   const geometry = createGeometry(width, height);
   const batches: SwimGlyphBatch[] = AGE_COLUMNS.map((column) => ({
     color: column.color,
     glyphs: [],
   }));
-  const awaitingBatch: SwimGlyphBatch = {
-    color: AWAITING_COLOR,
-    glyphs: [],
-  };
   const feeLaneCounts = Array<number>(FEE_RATE_LANES.length).fill(0);
   const ageColumnCounts = Array<number>(AGE_COLUMNS.length).fill(0);
-  const totalVsize = memberships.reduce(
-    (total, membership) =>
-      membership.facts.status === "available"
-        ? total + membership.facts.vsize
-        : total,
+  const totalVsize = transactions.reduce(
+    (total, transaction) => total + transaction.vsize,
     0,
   );
-  const maximumVsize = memberships.reduce(
-    (maximum, membership) =>
-      membership.facts.status === "available"
-        ? Math.max(maximum, membership.facts.vsize)
-        : maximum,
+  const maximumVsize = transactions.reduce(
+    (maximum, transaction) => Math.max(maximum, transaction.vsize),
     0,
   );
   const coveragePixelsPerVbyte =
@@ -229,38 +206,12 @@ export const createSwimLayout = (
     coveragePixelsPerVbyte,
     maximumPixelsPerVbyte,
   );
-  let availableCount = 0;
-  let awaitingCount = 0;
 
-  for (const membership of memberships) {
-    if (membership.facts.status === "awaiting_rpc") {
-      const size = Math.min(
-        AWAITING_GLYPH_SIZE,
-        geometry.plotWidth,
-        geometry.awaitingHeight,
-      );
-      const position = glyphPosition(
-        membership.txid,
-        geometry.plotLeft,
-        geometry.awaitingTop,
-        geometry.plotWidth,
-        geometry.awaitingHeight,
-        size,
-      );
-      awaitingBatch.glyphs.push({
-        ...position,
-        size,
-        feeLaneIndex: null,
-        ageColumnIndex: null,
-      });
-      awaitingCount += 1;
-      continue;
-    }
-
-    const feeRate = membership.facts.fee_sats / membership.facts.vsize;
+  for (const transaction of transactions) {
+    const feeRate = transaction.fee_sats / transaction.vsize;
     const feeLane = feeRateLaneIndex(feeRate);
-    const ageColumn = ageColumnIndex(nowMs - membership.facts.entered_at_ms);
-    const calculatedSize = Math.sqrt(membership.facts.vsize * pixelsPerVbyte);
+    const ageColumn = ageColumnIndex(observedAtMs - transaction.entered_at_ms);
+    const calculatedSize = Math.sqrt(transaction.vsize * pixelsPerVbyte);
     const size = Math.min(
       MAX_GLYPH_SIZE,
       geometry.columnWidth,
@@ -268,7 +219,7 @@ export const createSwimLayout = (
       Math.max(MIN_GLYPH_SIZE, calculatedSize),
     );
     const position = glyphPosition(
-      membership.txid,
+      transaction.txid,
       geometry.plotLeft + ageColumn * geometry.columnWidth,
       geometry.plotTop + feeLane * geometry.laneHeight,
       geometry.columnWidth,
@@ -287,16 +238,13 @@ export const createSwimLayout = (
     });
     feeLaneCounts[feeLane] = (feeLaneCounts[feeLane] ?? 0) + 1;
     ageColumnCounts[ageColumn] = (ageColumnCounts[ageColumn] ?? 0) + 1;
-    availableCount += 1;
   }
 
   return {
     geometry,
     batches,
-    awaitingBatch,
     summary: {
-      availableCount,
-      awaitingCount,
+      transactionCount: transactions.length,
       totalVsize,
       feeLaneCounts,
       ageColumnCounts,
@@ -308,7 +256,7 @@ export const paintMembershipGlyphs = (
   context: GlyphPaintContext,
   layout: SwimLayout,
 ): void => {
-  for (const batch of [...layout.batches, layout.awaitingBatch]) {
+  for (const batch of layout.batches) {
     context.fillStyle = batch.color;
     for (const glyph of batch.glyphs) {
       context.fillRect(glyph.x, glyph.y, glyph.size, glyph.size);
@@ -346,21 +294,6 @@ const paintGrid = (
     }
   }
 
-  context.fillStyle = "#111c27";
-  context.fillRect(
-    geometry.plotLeft,
-    geometry.awaitingTop,
-    geometry.plotWidth,
-    geometry.awaitingHeight,
-  );
-  context.strokeStyle = "#344455";
-  context.strokeRect(
-    geometry.plotLeft,
-    geometry.awaitingTop,
-    geometry.plotWidth,
-    geometry.awaitingHeight,
-  );
-
   context.fillStyle = "#9aacbf";
   context.font =
     '11px Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
@@ -373,11 +306,6 @@ const paintGrid = (
       geometry.plotTop + (index + 0.5) * geometry.laneHeight,
     );
   }
-  context.fillText(
-    "RPC pending",
-    geometry.plotLeft - 8,
-    geometry.awaitingTop + geometry.awaitingHeight / 2,
-  );
 
   context.textAlign = "center";
   for (let index = 0; index < AGE_COLUMNS.length; index += 1) {
@@ -391,8 +319,8 @@ const paintGrid = (
 
 export const renderSwimView = (
   canvas: HTMLCanvasElement,
-  memberships: readonly MempoolEntry[],
-  nowMs: number,
+  transactions: readonly MempoolTransaction[],
+  observedAtMs: number,
 ): SwimSummary => {
   const bounds = canvas.getBoundingClientRect();
   const width = Math.max(1, Math.round(bounds.width));
@@ -410,7 +338,7 @@ export const renderSwimView = (
     throw new Error("Canvas 2D rendering is unavailable");
   }
   context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-  const layout = createSwimLayout(memberships, width, height, nowMs);
+  const layout = createSwimLayout(transactions, width, height, observedAtMs);
   paintGrid(context, layout);
   paintMembershipGlyphs(context, layout);
   return layout.summary;

@@ -1,6 +1,10 @@
 # Separate source state from bounded evidence
 
-Status: accepted; SourceReplica slice implemented
+Status: superseded by ADR 0003
+
+This decision records the lessons from attempt #2. ADR 0003 keeps its central
+separation of visualisation from archival, but replaces the SourceReplica
+implementation with periodic disposable snapshots for the experimental phase.
 
 Mempool Atlas separates RPC-authoritative source state, recent product evidence, and historical forensic evidence into independently bounded data products. State convergence must not share delivery ordering or a disk budget with forensic evidence.
 

@@ -8,32 +8,22 @@ import {
   feeRateLaneIndex,
   paintMembershipGlyphs,
 } from "./swim-view";
-import type { MempoolEntry } from "./types";
+import type { MempoolTransaction } from "./types";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
-const NOW_MS = 1_700_000_000_000;
+const OBSERVED_AT_MS = 1_700_000_000_000;
 
-const availableMembership = (
+const transaction = (
   value: number,
-  overrides: Partial<
-    Extract<MempoolEntry["facts"], { status: "available" }>
-  > = {},
-): MempoolEntry => ({
+  overrides: Partial<MempoolTransaction> = {},
+): MempoolTransaction => ({
   txid: value.toString(16).padStart(64, "0"),
-  facts: {
-    status: "available",
-    vsize: 250,
-    fee_sats: 2_000,
-    entered_at_ms: NOW_MS - HOUR_MS,
-    ...overrides,
-  },
-});
-
-const awaitingMembership = (value: number): MempoolEntry => ({
-  txid: value.toString(16).padStart(64, "0"),
-  facts: { status: "awaiting_rpc" },
+  vsize: 250,
+  fee_sats: 2_000,
+  entered_at_ms: OBSERVED_AT_MS - HOUR_MS,
+  ...overrides,
 });
 
 describe("feeRateLaneIndex", () => {
@@ -68,12 +58,12 @@ describe("ageColumnIndex", () => {
 
 describe("createSwimLayout", () => {
   it("uses deterministic positions within the matching fee and age cell", () => {
-    const membership = availableMembership(1, {
+    const value = transaction(1, {
       fee_sats: 4_000,
-      entered_at_ms: NOW_MS - 2 * HOUR_MS,
+      entered_at_ms: OBSERVED_AT_MS - 2 * HOUR_MS,
     });
-    const first = createSwimLayout([membership], 1_200, 640, NOW_MS);
-    const second = createSwimLayout([membership], 1_200, 640, NOW_MS);
+    const first = createSwimLayout([value], 1_200, 640, OBSERVED_AT_MS);
+    const second = createSwimLayout([value], 1_200, 640, OBSERVED_AT_MS);
     const glyph = first.batches.flatMap((batch) => batch.glyphs)[0];
     const repeatedGlyph = second.batches.flatMap((batch) => batch.glyphs)[0];
 
@@ -97,34 +87,12 @@ describe("createSwimLayout", () => {
     );
   });
 
-  it("keeps awaiting facts out of numeric fee and age cells", () => {
-    const layout = createSwimLayout(
-      [awaitingMembership(1)],
-      1_200,
-      640,
-      NOW_MS,
-    );
-    const glyph = layout.awaitingBatch.glyphs[0];
-
-    expect(layout.summary).toMatchObject({
-      availableCount: 0,
-      awaitingCount: 1,
-      totalVsize: 0,
-    });
-    expect(glyph?.feeLaneIndex).toBeNull();
-    expect(glyph?.ageColumnIndex).toBeNull();
-    expect(glyph?.y).toBeGreaterThanOrEqual(layout.geometry.awaitingTop);
-    expect((glyph?.y ?? 0) + (glyph?.size ?? 0)).toBeLessThanOrEqual(
-      layout.geometry.awaitingTop + layout.geometry.awaitingHeight,
-    );
-  });
-
   it("keeps glyph sizes monotonic and within rendering bounds", () => {
-    const memberships = Array.from({ length: 10_000 }, (_, index) =>
-      availableMembership(index + 1),
+    const transactions = Array.from({ length: 10_000 }, (_, index) =>
+      transaction(index + 1),
     );
-    memberships.push(availableMembership(10_001, { vsize: 1_000 }));
-    const layout = createSwimLayout(memberships, 1_200, 640, NOW_MS);
+    transactions.push(transaction(10_001, { vsize: 1_000 }));
+    const layout = createSwimLayout(transactions, 1_200, 640, OBSERVED_AT_MS);
     const glyphs = layout.batches.flatMap((batch) => batch.glyphs);
     const regular = glyphs.find((glyph) => glyph.size < 14);
     const large = glyphs.at(-1);
@@ -138,13 +106,10 @@ describe("createSwimLayout", () => {
 
   it("preserves relative vsize in a sparse snapshot", () => {
     const layout = createSwimLayout(
-      [
-        availableMembership(1, { vsize: 100 }),
-        availableMembership(2, { vsize: 1_000 }),
-      ],
+      [transaction(1, { vsize: 100 }), transaction(2, { vsize: 1_000 })],
       1_200,
       640,
-      NOW_MS,
+      OBSERVED_AT_MS,
     );
     const glyphs = layout.batches.flatMap((batch) => batch.glyphs);
 
@@ -156,17 +121,15 @@ describe("createSwimLayout", () => {
     );
   });
 
-  it("paints one Canvas glyph for each of 70,770 memberships", () => {
-    const memberships = Array.from({ length: 70_770 }, (_, index) =>
-      index % 10 === 0
-        ? awaitingMembership(index + 1)
-        : availableMembership(index + 1, {
-            vsize: 120 + (index % 4_000),
-            fee_sats: 120 + (index % 4_000) * (1 + (index % 160)),
-            entered_at_ms: NOW_MS - (index % (5 * DAY_MS)),
-          }),
+  it("paints one Canvas glyph for each transaction at the 200,000-entry limit", () => {
+    const transactions = Array.from({ length: 200_000 }, (_, index) =>
+      transaction(index + 1, {
+        vsize: 120 + (index % 4_000),
+        fee_sats: 120 + (index % 4_000) * (1 + (index % 160)),
+        entered_at_ms: OBSERVED_AT_MS - (index % (5 * DAY_MS)),
+      }),
     );
-    const layout = createSwimLayout(memberships, 1_200, 640, NOW_MS);
+    const layout = createSwimLayout(transactions, 1_200, 640, OBSERVED_AT_MS);
     let paintedGlyphs = 0;
     const context: Pick<CanvasRenderingContext2D, "fillRect" | "fillStyle"> = {
       fillStyle: "",
@@ -177,10 +140,8 @@ describe("createSwimLayout", () => {
 
     paintMembershipGlyphs(context, layout);
 
-    expect(paintedGlyphs).toBe(70_770);
-    expect(layout.summary.availableCount + layout.summary.awaitingCount).toBe(
-      70_770,
-    );
+    expect(paintedGlyphs).toBe(200_000);
+    expect(layout.summary.transactionCount).toBe(200_000);
     expect(layout.summary.feeLaneCounts).toHaveLength(FEE_RATE_LANES.length);
     expect(layout.summary.ageColumnCounts).toHaveLength(AGE_COLUMNS.length);
   });

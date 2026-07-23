@@ -1,23 +1,40 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchMempool, parseMempoolResponse } from "./api";
+import {
+  fetchSourceSnapshot,
+  parseSourceSnapshotResponse,
+  parseSourcesResponse,
+} from "./api";
 
-const snapshot = (sourceId = "core") => ({
-  source_id: sourceId,
-  health: {
-    state_cursor: { epoch_id: "epoch-a", revision: 7 },
-    state_observed_at_ms: 1_700_000_000_000,
-    capture: { status: "not_collected" },
-  },
-  memberships: [
+const TXID = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+const BLOCK_HASH = "00".repeat(32);
+
+const source = () => ({
+  source_id: "core",
+  source_label: "Bitcoin Core",
+  availability: "ready",
+  poll_interval_seconds: 300,
+  last_poll_started_at_ms: 1_700_000_000_000,
+  snapshot_observed_at_ms: 1_700_000_001_000,
+  chain_tip: { height: 900_000, hash: BLOCK_HASH },
+  transaction_count: 1,
+  total_vsize: 141,
+  last_error: null,
+});
+
+const snapshot = () => ({
+  source_id: "core",
+  source_label: "Bitcoin Core",
+  observed_at_ms: 1_700_000_001_000,
+  chain_tip: { height: 900_000, hash: BLOCK_HASH },
+  transaction_count: 1,
+  total_vsize: 141,
+  transactions: [
     {
-      txid: "abc",
-      facts: {
-        status: "available",
-        vsize: 141,
-        fee_sats: 423,
-        entered_at_ms: 1_699_999_000_000,
-      },
+      txid: TXID,
+      vsize: 141,
+      fee_sats: 423,
+      entered_at_ms: 1_699_999_000_000,
     },
   ],
 });
@@ -26,194 +43,138 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("parseMempoolResponse", () => {
-  it("parses the read API response", () => {
-    const response = parseMempoolResponse(snapshot());
+describe("parseSourceSnapshotResponse", () => {
+  it("validates and retains the API object without rebuilding it", () => {
+    const value = { source: source(), snapshot: snapshot() };
+    const response = parseSourceSnapshotResponse(value);
 
-    expect(response.source_id).toBe("core");
-    expect(response.health.capture.status).toBe("not_collected");
-    expect(response.health.state_cursor).toEqual({
-      epoch_id: "epoch-a",
-      revision: 7,
-    });
-    expect(response.memberships[0]?.txid).toBe("abc");
-    expect(response.memberships[0]?.facts).toEqual({
-      status: "available",
-      vsize: 141,
-      fee_sats: 423,
-      entered_at_ms: 1_699_999_000_000,
+    expect(response).toBe(value);
+    expect(response.source.availability).toBe("ready");
+    expect(response.snapshot?.transactions[0]?.fee_sats).toBe(423);
+  });
+
+  it("accepts waiting state before the first snapshot", () => {
+    const waiting = {
+      ...source(),
+      availability: "waiting",
+      last_poll_started_at_ms: null,
+      snapshot_observed_at_ms: null,
+      chain_tip: null,
+      transaction_count: null,
+      total_vsize: null,
+    };
+
+    expect(
+      parseSourceSnapshotResponse({ source: waiting, snapshot: null }),
+    ).toMatchObject({
+      source: { availability: "waiting" },
+      snapshot: null,
     });
   });
 
-  it("parses a membership awaiting RPC facts", () => {
-    const response = parseMempoolResponse({
-      ...snapshot(),
-      memberships: [
-        {
-          txid: "def",
-          facts: { status: "awaiting_rpc" },
-        },
-      ],
-    });
+  it("accepts stale state only with a last error and retained snapshot", () => {
+    const stale = {
+      ...source(),
+      availability: "stale",
+      last_error: "node unavailable",
+    };
 
-    expect(response.memberships[0]?.facts).toEqual({
-      status: "awaiting_rpc",
+    expect(
+      parseSourceSnapshotResponse({ source: stale, snapshot: snapshot() }),
+    ).toMatchObject({
+      source: { availability: "stale", last_error: "node unavailable" },
     });
   });
 
-  it("parses a known capture gap", () => {
-    const response = parseMempoolResponse({
-      ...snapshot(),
-      health: {
-        state_cursor: { epoch_id: "epoch-a", revision: 7 },
-        state_observed_at_ms: 1_700_000_000_000,
-        capture: {
-          status: "contains_gaps",
-          first_gap_at_ms: 1_699_999_000_000,
-          latest_gap_at_ms: 1_700_000_000_000,
-          marker_count: 2,
-          strongest_certainty: "known_loss",
-          latest_input: "peer_observer_nats",
-          latest_reason: "slow_consumer",
-        },
-      },
-    });
-
-    expect(response.health.capture).toMatchObject({
-      status: "contains_gaps",
-      marker_count: 2,
-      strongest_certainty: "known_loss",
-    });
-  });
-
-  it("rejects a malformed membership", () => {
+  it("rejects inconsistent totals and source metadata", () => {
     expect(() =>
-      parseMempoolResponse({
-        source_id: "core",
-        health: snapshot().health,
-        memberships: [{ txid: "abc" }],
+      parseSourceSnapshotResponse({
+        source: source(),
+        snapshot: { ...snapshot(), total_vsize: 142 },
       }),
-    ).toThrow("Invalid membership at index 0");
-  });
+    ).toThrow("Snapshot total vsize does not match payload");
 
-  it("rejects legacy per-membership event provenance", () => {
     expect(() =>
-      parseMempoolResponse({
-        ...snapshot(),
-        memberships: [
-          {
-            ...snapshot().memberships[0],
-            updated_at_ms: 1_700_000_000_000,
-            evidence_event_id: "event-1",
-          },
-        ],
+      parseSourceSnapshotResponse({
+        source: source(),
+        snapshot: { ...snapshot(), source_id: "knots" },
       }),
-    ).toThrow("Invalid membership at index 0");
+    ).toThrow("Source summary does not match its snapshot");
   });
 
-  it.each([
-    undefined,
-    { status: "unknown" },
-    { status: "awaiting_rpc", vsize: 141 },
-    {
-      status: "available",
-      vsize: 0,
-      fee_sats: 423,
-      entered_at_ms: 1_699_999_000_000,
-    },
-    {
-      status: "available",
-      vsize: 141,
-      fee_sats: -1,
-      entered_at_ms: 1_699_999_000_000,
-    },
-    {
-      status: "available",
-      vsize: 141,
-      fee_sats: 423,
-    },
-  ])("rejects malformed membership facts %#", (facts) => {
+  it("rejects malformed or unordered transactions", () => {
     expect(() =>
-      parseMempoolResponse({
-        ...snapshot(),
-        memberships: [
-          {
-            txid: "abc",
-            facts,
-          },
-        ],
-      }),
-    ).toThrow("Invalid membership facts at index 0");
-  });
-
-  it("rejects a malformed capture status", () => {
-    expect(() =>
-      parseMempoolResponse({
-        ...snapshot(),
-        health: {
-          state_cursor: { epoch_id: "epoch-a", revision: 7 },
-          state_observed_at_ms: 1_700_000_000_000,
-          capture: {
-            status: "contains_gaps",
-            marker_count: 0,
-          },
+      parseSourceSnapshotResponse({
+        source: source(),
+        snapshot: {
+          ...snapshot(),
+          transaction_count: 2,
+          total_vsize: 282,
+          transactions: [
+            snapshot().transactions[0],
+            snapshot().transactions[0],
+          ],
         },
       }),
-    ).toThrow("Invalid capture status");
-  });
+    ).toThrow("Transactions are not strictly ordered by txid");
 
-  it("rejects an unestablished state cursor", () => {
     expect(() =>
-      parseMempoolResponse({
-        ...snapshot(),
-        health: {
-          ...snapshot().health,
-          state_cursor: { epoch_id: "epoch-a", revision: 0 },
+      parseSourceSnapshotResponse({
+        source: source(),
+        snapshot: {
+          ...snapshot(),
+          transactions: [{ ...snapshot().transactions[0], vsize: 0 }],
         },
       }),
-    ).toThrow("Invalid source state cursor");
-  });
-
-  it("rejects a state cursor with an invalid epoch identifier", () => {
-    expect(() =>
-      parseMempoolResponse({
-        ...snapshot(),
-        health: {
-          ...snapshot().health,
-          state_cursor: { epoch_id: "epoch a", revision: 7 },
-        },
-      }),
-    ).toThrow("Invalid source state cursor");
+    ).toThrow("Invalid transaction at index 0");
   });
 });
 
-describe("fetchMempool", () => {
-  it("requests the canonical source path", async () => {
+describe("parseSourcesResponse", () => {
+  it("parses source discovery", () => {
+    expect(
+      parseSourcesResponse({ sources: [source()] }).sources[0]?.source_id,
+    ).toBe("core");
+  });
+
+  it("rejects source IDs that normalize as URL dot segments", () => {
+    for (const sourceId of [".", ".."]) {
+      expect(() =>
+        parseSourcesResponse({
+          sources: [{ ...source(), source_id: sourceId }],
+        }),
+      ).toThrow("Invalid source summary");
+    }
+  });
+});
+
+describe("fetchSourceSnapshot", () => {
+  it("requests the source-scoped current snapshot", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => snapshot("core-v31.1"),
+      json: async () => ({ source: source(), snapshot: snapshot() }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await fetchMempool("core-v31.1");
+    await fetchSourceSnapshot("core");
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/v1/sources/core-v31.1/mempool",
-      { headers: { Accept: "application/json" } },
-    );
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/sources/core/mempool", {
+      headers: { Accept: "application/json" },
+    });
   });
 
-  it("rejects a response for another source", async () => {
+  it("surfaces an API error body", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => snapshot("knots"),
+        ok: false,
+        status: 404,
+        json: async () => ({ error: 'unknown source "missing"' }),
       }),
     );
 
-    await expect(fetchMempool("core")).rejects.toThrow(
-      "Mempool response source knots does not match core",
+    await expect(fetchSourceSnapshot("missing")).rejects.toThrow(
+      'Atlas request failed (404): unknown source "missing"',
     );
   });
 });

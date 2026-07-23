@@ -1,10 +1,11 @@
 import type {
-  CaptureStatus,
-  MempoolEntry,
-  MempoolFacts,
-  MempoolResponse,
-  ReplicaCursor,
-  SourceHealth,
+  ChainTip,
+  MempoolSnapshot,
+  MempoolTransaction,
+  SourceAvailability,
+  SourceSnapshotResponse,
+  SourceSummary,
+  SourcesResponse,
 } from "./types";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -12,6 +13,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const isNonNegativeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+const isSourceId = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value !== "." &&
+  value !== ".." &&
+  /^[A-Za-z0-9._-]{1,64}$/.test(value);
 
 const hasOnlyKeys = (
   value: Record<string, unknown>,
@@ -24,157 +31,253 @@ const hasOnlyKeys = (
   );
 };
 
-const parseMempoolFacts = (value: unknown, index: number): MempoolFacts => {
-  if (!isRecord(value)) {
-    throw new TypeError(`Invalid membership facts at index ${index}`);
-  }
-
-  if (value.status === "awaiting_rpc" && hasOnlyKeys(value, ["status"])) {
-    return { status: "awaiting_rpc" };
-  }
-
-  if (
-    value.status === "available" &&
-    hasOnlyKeys(value, ["status", "vsize", "fee_sats", "entered_at_ms"]) &&
-    isNonNegativeInteger(value.vsize) &&
-    value.vsize > 0 &&
-    isNonNegativeInteger(value.fee_sats) &&
-    isNonNegativeInteger(value.entered_at_ms)
-  ) {
-    return {
-      status: "available",
-      vsize: value.vsize,
-      fee_sats: value.fee_sats,
-      entered_at_ms: value.entered_at_ms,
-    };
-  }
-
-  throw new TypeError(`Invalid membership facts at index ${index}`);
-};
-
-const parseMembership = (value: unknown, index: number): MempoolEntry => {
+const parseChainTip = (value: unknown): ChainTip => {
   if (
     !isRecord(value) ||
-    typeof value.txid !== "string" ||
-    value.txid.length === 0 ||
-    !hasOnlyKeys(value, ["txid", "facts"])
+    !hasOnlyKeys(value, ["height", "hash"]) ||
+    !isNonNegativeInteger(value.height) ||
+    typeof value.hash !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.hash)
   ) {
-    throw new TypeError(`Invalid membership at index ${index}`);
+    throw new TypeError("Invalid chain tip");
   }
-
-  return {
-    txid: value.txid,
-    facts: parseMempoolFacts(value.facts, index),
-  };
+  return value as unknown as ChainTip;
 };
 
-const parseCaptureStatus = (value: unknown): CaptureStatus => {
-  if (!isRecord(value)) {
-    throw new TypeError("Invalid capture status");
+const parseNullableInteger = (value: unknown, field: string): number | null => {
+  if (value === null || isNonNegativeInteger(value)) {
+    return value;
   }
+  throw new TypeError(`Invalid ${field}`);
+};
 
-  if (value.status === "not_collected" && hasOnlyKeys(value, ["status"])) {
-    return { status: "not_collected" };
-  }
-
-  if (value.status === "no_reported_gaps" && hasOnlyKeys(value, ["status"])) {
-    return { status: "no_reported_gaps" };
-  }
-
+const parseAvailability = (value: unknown): SourceAvailability => {
   if (
-    value.status !== "contains_gaps" ||
-    !isNonNegativeInteger(value.first_gap_at_ms) ||
-    !isNonNegativeInteger(value.latest_gap_at_ms) ||
-    value.latest_gap_at_ms < value.first_gap_at_ms ||
-    !isNonNegativeInteger(value.marker_count) ||
-    value.marker_count === 0 ||
-    (value.strongest_certainty !== "possible_loss" &&
-      value.strongest_certainty !== "known_loss") ||
-    typeof value.latest_input !== "string" ||
-    value.latest_input.trim().length === 0 ||
-    typeof value.latest_reason !== "string" ||
-    value.latest_reason.trim().length === 0
+    value === "waiting" ||
+    value === "ready" ||
+    value === "stale" ||
+    value === "error"
   ) {
-    throw new TypeError("Invalid capture status");
+    return value;
   }
-
-  return {
-    status: "contains_gaps",
-    first_gap_at_ms: value.first_gap_at_ms,
-    latest_gap_at_ms: value.latest_gap_at_ms,
-    marker_count: value.marker_count,
-    strongest_certainty: value.strongest_certainty,
-    latest_input: value.latest_input,
-    latest_reason: value.latest_reason,
-  };
+  throw new TypeError("Invalid source availability");
 };
 
-export const parseReplicaCursor = (value: unknown): ReplicaCursor => {
+export const parseSourceSummary = (value: unknown): SourceSummary => {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ["epoch_id", "revision"]) ||
-    typeof value.epoch_id !== "string" ||
-    !/^[A-Za-z0-9._-]+$/.test(value.epoch_id) ||
-    !isNonNegativeInteger(value.revision) ||
-    value.revision === 0
+    !hasOnlyKeys(value, [
+      "source_id",
+      "source_label",
+      "availability",
+      "poll_interval_seconds",
+      "last_poll_started_at_ms",
+      "snapshot_observed_at_ms",
+      "chain_tip",
+      "transaction_count",
+      "total_vsize",
+      "last_error",
+    ]) ||
+    !isSourceId(value.source_id) ||
+    typeof value.source_label !== "string" ||
+    value.source_label.trim().length === 0 ||
+    !isNonNegativeInteger(value.poll_interval_seconds) ||
+    value.poll_interval_seconds === 0 ||
+    (value.last_error !== null && typeof value.last_error !== "string")
   ) {
-    throw new TypeError("Invalid source state cursor");
-  }
-  return { epoch_id: value.epoch_id, revision: value.revision };
-};
-
-export const parseSourceHealth = (value: unknown): SourceHealth => {
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, ["state_cursor", "state_observed_at_ms", "capture"]) ||
-    !isNonNegativeInteger(value.state_observed_at_ms)
-  ) {
-    throw new TypeError("Invalid source health");
-  }
-
-  return {
-    state_cursor: parseReplicaCursor(value.state_cursor),
-    state_observed_at_ms: value.state_observed_at_ms,
-    capture: parseCaptureStatus(value.capture),
-  };
-};
-
-export const parseMempoolResponse = (value: unknown): MempoolResponse => {
-  if (
-    !isRecord(value) ||
-    typeof value.source_id !== "string" ||
-    value.source_id.trim().length === 0 ||
-    !Array.isArray(value.memberships)
-  ) {
-    throw new TypeError("Invalid mempool response");
+    throw new TypeError("Invalid source summary");
   }
 
-  return {
-    source_id: value.source_id,
-    health: parseSourceHealth(value.health),
-    memberships: value.memberships.map(parseMembership),
-  };
-};
-
-export const fetchMempool = async (
-  sourceId: string,
-): Promise<MempoolResponse> => {
-  const response = await fetch(
-    `/api/v1/sources/${encodeURIComponent(sourceId)}/mempool`,
-    {
-      headers: { Accept: "application/json" },
-    },
+  const availability = parseAvailability(value.availability);
+  const lastPollStartedAtMs = parseNullableInteger(
+    value.last_poll_started_at_ms,
+    "last poll time",
   );
+  const snapshotObservedAtMs = parseNullableInteger(
+    value.snapshot_observed_at_ms,
+    "snapshot observation time",
+  );
+  const transactionCount = parseNullableInteger(
+    value.transaction_count,
+    "transaction count",
+  );
+  const totalVsize = parseNullableInteger(value.total_vsize, "total vsize");
+  const chainTip =
+    value.chain_tip === null ? null : parseChainTip(value.chain_tip);
 
-  if (!response.ok) {
-    throw new Error(`Mempool request failed with HTTP ${response.status}`);
+  const hasSnapshot =
+    snapshotObservedAtMs !== null &&
+    transactionCount !== null &&
+    totalVsize !== null &&
+    chainTip !== null;
+  const hasNoSnapshot =
+    snapshotObservedAtMs === null &&
+    transactionCount === null &&
+    totalVsize === null &&
+    chainTip === null;
+  if (!hasSnapshot && !hasNoSnapshot) {
+    throw new TypeError("Source summary contains a partial snapshot");
+  }
+  if (
+    (availability === "waiting" || availability === "error") &&
+    !hasNoSnapshot
+  ) {
+    throw new TypeError("Unavailable source unexpectedly contains a snapshot");
+  }
+  if ((availability === "ready" || availability === "stale") && !hasSnapshot) {
+    throw new TypeError("Available source is missing its snapshot");
+  }
+  if (
+    (availability === "waiting" || availability === "ready") &&
+    value.last_error !== null
+  ) {
+    throw new TypeError("Healthy source unexpectedly contains an error");
+  }
+  if (
+    (availability === "stale" || availability === "error") &&
+    (typeof value.last_error !== "string" ||
+      value.last_error.trim().length === 0)
+  ) {
+    throw new TypeError("Failed source is missing its error");
   }
 
-  const snapshot = parseMempoolResponse(await response.json());
-  if (snapshot.source_id !== sourceId) {
-    throw new Error(
-      `Mempool response source ${snapshot.source_id} does not match ${sourceId}`,
-    );
-  }
-  return snapshot;
+  return value as unknown as SourceSummary;
 };
+
+const parseTransaction = (
+  value: unknown,
+  index: number,
+): MempoolTransaction => {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["txid", "vsize", "fee_sats", "entered_at_ms"]) ||
+    typeof value.txid !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.txid) ||
+    !isNonNegativeInteger(value.vsize) ||
+    value.vsize === 0 ||
+    !isNonNegativeInteger(value.fee_sats) ||
+    !isNonNegativeInteger(value.entered_at_ms)
+  ) {
+    throw new TypeError(`Invalid transaction at index ${index}`);
+  }
+  return value as unknown as MempoolTransaction;
+};
+
+export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "source_id",
+      "source_label",
+      "observed_at_ms",
+      "chain_tip",
+      "transaction_count",
+      "total_vsize",
+      "transactions",
+    ]) ||
+    !isSourceId(value.source_id) ||
+    typeof value.source_label !== "string" ||
+    value.source_label.trim().length === 0 ||
+    !isNonNegativeInteger(value.observed_at_ms) ||
+    !isNonNegativeInteger(value.transaction_count) ||
+    !isNonNegativeInteger(value.total_vsize) ||
+    !Array.isArray(value.transactions)
+  ) {
+    throw new TypeError("Invalid mempool snapshot");
+  }
+
+  parseChainTip(value.chain_tip);
+  let totalVsize = 0;
+  let previousTxid: string | null = null;
+  for (const [index, item] of value.transactions.entries()) {
+    const transaction = parseTransaction(item, index);
+    if (previousTxid !== null && transaction.txid <= previousTxid) {
+      throw new TypeError("Transactions are not strictly ordered by txid");
+    }
+    previousTxid = transaction.txid;
+    totalVsize += transaction.vsize;
+    if (!Number.isSafeInteger(totalVsize)) {
+      throw new TypeError("Snapshot total vsize is not safely representable");
+    }
+  }
+  if (value.transaction_count !== value.transactions.length) {
+    throw new TypeError("Snapshot transaction count does not match payload");
+  }
+  if (value.total_vsize !== totalVsize) {
+    throw new TypeError("Snapshot total vsize does not match payload");
+  }
+
+  return value as unknown as MempoolSnapshot;
+};
+
+export const parseSourcesResponse = (value: unknown): SourcesResponse => {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["sources"]) ||
+    !Array.isArray(value.sources)
+  ) {
+    throw new TypeError("Invalid sources response");
+  }
+  for (const source of value.sources) {
+    parseSourceSummary(source);
+  }
+  return value as unknown as SourcesResponse;
+};
+
+export const parseSourceSnapshotResponse = (
+  value: unknown,
+): SourceSnapshotResponse => {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["source", "snapshot"])) {
+    throw new TypeError("Invalid source snapshot response");
+  }
+  const source = parseSourceSummary(value.source);
+  if (value.snapshot === null) {
+    if (source.snapshot_observed_at_ms !== null) {
+      throw new TypeError("Source summary references a missing snapshot");
+    }
+    return value as unknown as SourceSnapshotResponse;
+  }
+
+  const snapshot = parseMempoolSnapshot(value.snapshot);
+  if (
+    snapshot.source_id !== source.source_id ||
+    snapshot.source_label !== source.source_label ||
+    snapshot.observed_at_ms !== source.snapshot_observed_at_ms ||
+    snapshot.transaction_count !== source.transaction_count ||
+    snapshot.total_vsize !== source.total_vsize ||
+    snapshot.chain_tip.height !== source.chain_tip?.height ||
+    snapshot.chain_tip.hash !== source.chain_tip.hash
+  ) {
+    throw new TypeError("Source summary does not match its snapshot");
+  }
+  return value as unknown as SourceSnapshotResponse;
+};
+
+const fetchJson = async (path: string): Promise<unknown> => {
+  const response = await fetch(path, {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body: unknown = await response.json();
+      if (isRecord(body) && typeof body.error === "string") {
+        detail = `: ${body.error}`;
+      }
+    } catch {
+      // The HTTP status remains useful when the body is not JSON.
+    }
+    throw new Error(`Atlas request failed (${response.status})${detail}`);
+  }
+  return response.json();
+};
+
+export const fetchSources = async (): Promise<SourcesResponse> =>
+  parseSourcesResponse(await fetchJson("/api/v1/sources"));
+
+export const fetchSourceSnapshot = async (
+  sourceId: string,
+): Promise<SourceSnapshotResponse> =>
+  parseSourceSnapshotResponse(
+    await fetchJson(`/api/v1/sources/${encodeURIComponent(sourceId)}/mempool`),
+  );

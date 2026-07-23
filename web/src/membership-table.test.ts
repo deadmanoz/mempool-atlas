@@ -5,12 +5,17 @@ import {
   formatMembershipAge,
   membershipPage,
 } from "./membership-table";
-import type { MempoolEntry } from "./types";
+import type { MempoolTransaction } from "./types";
 
-const memberships = Array.from({ length: 205 }, (_, index): MempoolEntry => ({
-  txid: `${index.toString(16).padStart(4, "0")}transaction`,
-  facts: { status: "awaiting_rpc" },
-}));
+const memberships = Array.from(
+  { length: 205 },
+  (_, index): MempoolTransaction => ({
+    txid: index.toString(16).padStart(64, "0"),
+    vsize: 141,
+    fee_sats: 423,
+    entered_at_ms: 1_700_000_000_000,
+  }),
+);
 
 describe("membershipPage", () => {
   it("caps each page at 100 memberships", () => {
@@ -36,10 +41,15 @@ describe("membershipPage", () => {
   });
 
   it("matches a case-insensitive transaction ID prefix", () => {
-    const page = membershipPage(memberships, "  00CC  ", 0);
+    const expectedTxid = memberships[204]?.txid;
+    const page = membershipPage(
+      memberships,
+      `  ${expectedTxid?.toUpperCase()}  `,
+      0,
+    );
 
     expect(page.matchCount).toBe(1);
-    expect(page.entries[0]?.txid).toBe("00cctransaction");
+    expect(page.entries[0]?.txid).toBe(expectedTxid);
   });
 
   it("returns an empty page when the prefix does not match", () => {

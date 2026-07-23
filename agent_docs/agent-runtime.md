@@ -1,83 +1,110 @@
-# Atlas Agent Runtime
+# Atlas runtime
 
-`atlas-agent` is the source-local state durability boundary. One process and one persistent SQLite database represent exactly one configured Bitcoin node. The current production runtime observes RPC state only; peer evidence capture is not mounted.
+The `mempool-atlas` binary runs one periodic collector, one in-memory source
+runtime, and one HTTP listener on the presentation host. It stores no
+application data on disk.
 
-## Runtime loops
+## Startup
 
-`state_runtime::run` starts two independent loops:
+`main.rs` parses one source configuration, rejects a non-loopback bind, reads a
+one-line RPC password file, constructs the RPC client and `SourceRuntime`, then
+starts the poll task and Axum server.
 
-- The RPC loop connects with `corepc-client`, preflights `getmempoolinfo.size` against `ATLAS_MAX_MEMPOOL_ENTRIES`, obtains an initial verbose `getrawmempool` snapshot, then polls at the configured cadence. A failed poll retains the last complete snapshot.
-- The delivery loop asks `SourceReplica::next_action` for one frozen delta, checkpoint, or heartbeat and sends it to `POST /api/v1/state`. Delivery continues while RPC is unavailable.
+The process can serve `/healthz` and static files before a snapshot exists.
+`/readyz` returns unavailable until the first complete poll succeeds.
 
-Both blocking RPC and SQLite work run outside Tokio worker threads. SQLite `BUSY` and `LOCKED` results are transient: delivery retries without changing the frozen action, and RPC persistence retains the last complete replica until the next full poll. This prevents a long snapshot replacement or checkpoint freeze in one loop from terminating the other. Shutdown signals stop both loops cleanly.
+## Collection sequence
 
-The runtime caps the `corepc` log target at debug even under a broader `RUST_LOG=trace`. `corepc-client` trace records contain complete raw RPC results, which would otherwise write one verbose mempool response per poll.
+Each poll runs all blocking RPC and decoding work in `spawn_blocking`:
 
-## Persistent identity and revision
+1. Call `getmempoolinfo`.
+2. Reject a reported size above `ATLAS_MAX_MEMPOOL_ENTRIES`.
+3. Call `getrawmempool true`.
+4. Decode only `vsize`, `time`, and `fees.base`.
+5. Enforce the entry limit again while decoding.
+6. Validate txids and convert BTC fees exactly to integer satoshis.
+7. Sort transactions by txid.
+8. Call `getblockchaininfo` and validate the best block hash.
+9. Record the completed observation time.
+10. Build and validate the complete `MempoolSnapshot`.
 
-`SourceReplica::open` binds a migrated database to one `source_id`. First use creates a random `epoch_id`; reopening the same database preserves it. A different configured source is rejected.
+`getmempoolinfo` and `getrawmempool` are not atomic. Both size checks are
+required.
 
-Revision zero means no complete RPC observation has been accepted. The first valid observation becomes revision 1 and requires a checkpoint, including when the mempool is empty. Later changed snapshots advance once per complete observation. Unchanged snapshots retain the revision and update freshness only.
+## Publication and failure
 
-The wire cursor is `(epoch_id, revision)`. A new database creates a new epoch and checkpoints over the server's old active cursor. A checkpoint in the same epoch must strictly advance the replaced revision. If the server reports that epoch at or ahead of local state, the agent treats that as local rollback, rotates its epoch, and republishes the current complete snapshot as revision 1.
+The collector builds the next snapshot without holding the runtime lock.
+`record_success` then replaces the reader-visible `Arc<MempoolSnapshot>` under
+a short write lock and clears any prior error.
 
-## Local tables and bounds
+If any call or validation fails, `record_failure` keeps the current snapshot and
+stores a stable public error. Detailed transport and validation errors remain in
+service logs so private response content cannot leak through the website.
+Source availability is:
 
-| Table | Role | Bound |
+| Snapshot | Last error | Availability |
 | --- | --- | --- |
-| `source_replica_state` | Singleton identity, cursors, freshness, and checkpoint flags | One row |
-| `source_replica_membership` | Latest complete fact-bearing RPC snapshot | `ATLAS_MAX_MEMPOOL_ENTRIES` |
-| `source_replica_dirty` | Net divergence per txid | `ATLAS_MAX_DIRTY_MUTATIONS` and `ATLAS_MAX_DIRTY_BYTES` |
-| `source_replica_frozen_action` | Metadata for the exact retryable action | One row |
-| `source_replica_frozen_delta` | Stable sorted delta mutations | Dirty mutation bound |
-| `source_replica_frozen_checkpoint` | Stable complete checkpoint indexed by ordinal | Membership bound |
+| absent | absent | `waiting` |
+| absent | present | `error` |
+| present | absent | `ready` |
+| present | present | `stale` |
 
-The diff is a merge stream over sorted stored membership and the validated RPC `BTreeMap`. Once the remaining dirty budget would be exceeded, the collector stops retaining detailed changes, clears any partial detail, counts the remainder only, and directly replaces membership from the already-held RPC map. This avoids an additional full diff allocation.
+The loop sleeps for `ATLAS_POLL_SECONDS` after each attempt. A slow RPC call
+therefore lengthens the start-to-start cadence. Shutdown aborts the poll task
+after the HTTP server finishes graceful shutdown.
 
-A frozen action is immutable across retries and restarts. New observations update current membership while retaining it. Dirty state after acknowledgement is rebased against the membership that the frozen action delivered.
+## Read API
 
-## Delivery contract
+`GET /api/v1/sources` returns source metadata without the transaction vector.
+`GET /api/v1/sources/{source_id}/mempool` returns the same metadata plus the
+latest snapshot, or `null` while waiting. Both use `Cache-Control: no-store`.
 
-Deltas bind base revision, target revision, observation time, sorted mutations, and a canonical SHA-256 digest. Checkpoints bind the replacement cursor, optional exact staging checkpoint to supersede, target cursor, observation time, total entries, total chunks, and a chunk-independent canonical digest. Each chunk has a separate digest that includes checkpoint ID and chunk index.
+After each success or failure transition, Atlas serializes the complete
+snapshot response once on a blocking worker. It atomically stores the resulting
+immutable `Bytes` with the structured snapshot. Requests clone that shared
+buffer, so concurrent readers do not allocate and serialize independent
+full-snapshot bodies. A replacement can briefly retain the old structured and
+encoded representations while an existing response finishes.
 
-The agent validates every successful acknowledgement before changing local delivery state. Exact lost-ack retries are safe. Cursor, epoch, checkpoint, or replay conflicts trigger a replacement checkpoint against the server's reported active cursor and staging checkpoint ID. That staging ID is a compare-and-swap token: a delayed begin cannot delete a different checkpoint. Other operator-action failures and transient failures differ only in retry delay; neither discards state.
+## Bounds and validation
 
-Checkpoint requests are resumable from server-reported progress. The agent sends only the remaining sequential chunks, then commits. It clears the frozen action only after the expected active cursor is acknowledged.
+The hard application entry limit is 200,000. Configuration may lower it but may
+not raise it. Required numeric fields must be exactly representable by a
+JavaScript number. Transaction virtual size must be positive, source identity
+must be URL-safe, and the transaction vector must be strictly sorted and
+duplicate-free.
+
+`corepc-client` buffers the JSON-RPC response before the custom deserializer
+runs. The entry cap is not a byte or peak-memory guarantee. Deployment
+acceptance must measure real memory using the target node and a large mempool.
+The version 0.8 transport timeout is fixed at 15 seconds, so acceptance must also
+verify large real responses finish reliably within that window.
+The process always caps the `corepc` log target at debug even when a broader
+`RUST_LOG` enables trace, because the dependency's trace record contains the
+complete verbose mempool response.
 
 ## Configuration
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `ATLAS_SOURCE_ID` | yes | none | Stable logical source identity |
-| `ATLAS_AGENT_DATABASE` | no | `var/atlas-agent.db` | Persistent source-local SQLite database |
-| `ATLAS_SERVER_URL` | yes | none | Central Atlas base URL |
-| `ATLAS_RPC_URL` | no | `http://127.0.0.1:8332` | Bitcoin RPC endpoint |
-| `ATLAS_RPC_USERNAME` | yes | none | RPC username |
-| `ATLAS_RPC_PASSWORD` | yes | none | RPC password |
-| `ATLAS_RPC_POLL_SECONDS` | no | `5` | Full observation cadence |
-| `ATLAS_DELIVERY_RETRY_MILLISECONDS` | no | `1000` | Initial retry band |
-| `ATLAS_DELIVERY_RETRY_MAX_MILLISECONDS` | no | `60000` | Maximum retry band |
-| `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `200000` | Maximum complete membership |
-| `ATLAS_MAX_DIRTY_MUTATIONS` | no | `4096` | Maximum coalesced delta rows |
-| `ATLAS_MAX_DIRTY_BYTES` | no | `1048576` | Estimated coalesced delta bytes |
-| `ATLAS_CHECKPOINT_CHUNK_ENTRIES` | no | `512` | Entries per checkpoint chunk |
-| `ATLAS_AGENT_DB_MAX_BYTES` | no | `1073741824` | Main SQLite page cap, excluding WAL |
-| `ATLAS_AGENT_STORAGE_MAX_BYTES` | no | `1879048192` | DB/WAL/SHM write-admission envelope |
-| `ATLAS_FILESYSTEM_RESERVE_BYTES` | no | `134217728` | Minimum absolute filesystem reserve |
-| `ATLAS_FILESYSTEM_RESERVE_PERCENT` | no | `5` | Minimum percentage filesystem reserve |
-| `ATLAS_AGENT_WAL_RETAINED_BYTES` | no | `67108864` | WAL retention and pressure target |
-| `ATLAS_AGENT_WAL_AUTOCHECKPOINT_PAGES` | no | `1000` | WAL auto-checkpoint interval |
+| Variable | Required | Default |
+| --- | --- | --- |
+| `ATLAS_SOURCE_ID` | yes | none |
+| `ATLAS_SOURCE_LABEL` | no | source ID |
+| `ATLAS_RPC_URL` | yes | none |
+| `ATLAS_RPC_USERNAME` | no | `atlas` |
+| `ATLAS_RPC_PASSWORD_FILE` | yes | none |
+| `ATLAS_POLL_SECONDS` | no | `300` |
+| `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `200000` |
+| `ATLAS_BIND` | no | `127.0.0.1:3101` |
+| `ATLAS_WEB_ROOT` | no | `web/dist` |
 
-The agent sets SQLite temporary storage to memory and journal mode to WAL. It applies and verifies `max_page_count` from `ATLAS_AGENT_DB_MAX_BYTES`, the 64 MiB retained WAL target, and the 1,000-page auto-checkpoint interval. Before a write transaction it attempts to truncate an oversized WAL, then checks the main database, the combined DB/WAL/SHM envelope, and non-privileged filesystem space. It repeats admission inside the transaction before mutation. A pinned WAL checkpoint or a high-water crossing between those checks is retryable contention, so the current replica and any frozen action remain intact.
+The RPC URL points at the existing private WireGuard-only node proxy. The
+binary has no WireGuard-specific code and no public RPC fallback.
+Deployment must whitelist the Atlas RPC identity to exactly
+`getmempoolinfo`, `getrawmempool`, and `getblockchaininfo`. The proxy path must
+stream the response without writing it through proxy-temp storage.
 
-The 1.75 GiB SQLite envelope is proactive admission control, not a filesystem quota. SQLite can temporarily grow its WAL beyond the 64 MiB target during a transaction, and `corepc-client` buffers the verbose RPC response before decoding. The fixed canary filesystem and memory cgroup therefore remain the hard limits.
+## Restart and recovery
 
-## Recovery and deployment
-
-Use `just agent-db-migrate-deploy` for a fresh database, `just agent-db-backup` for an explicit backup, and `just agent-db-reinitialize-deploy` for a deliberate preproduction replacement. Schema generation 5 rejects stale databases. Every migration or reinitialization must go through the backup-first wrapper.
-
-An ordinary restart needs no special action. A lost HTTP response retries the exact frozen payload. A central reset causes the agent to checkpoint against no active cursor. A deliberate agent reset creates a new epoch and replaces the server cursor on the next checkpoint.
-
-The verbose RPC response decodes directly into the one full `BTreeMap` used for an observation, rather than first building a second raw map. The agent checks the node-reported count before the verbose call and the decoded count afterwards. This is an entry-count guard rather than a complete response-byte bound. Checkpoint freezing can temporarily retain a second membership copy in SQLite, so the release scale test exercises the 200,000-entry checkpoint path and records the resulting SQLite footprint. Live canary acceptance separately observes cgroup memory while the agent performs the real verbose RPC call, which includes the buffered response and snapshot map.
-
-The canary service profile mounts an exactly 2 GiB ext4 image at `/var/lib/mempool-atlas-agent`. It runs each agent with `MemoryHigh=768M`, `MemoryMax=1G`, `MemorySwapMax=0`, a 50 percent CPU quota, 25 MiB/s read and 10 MiB/s write limits on the deployment disk, and `TasksMax=64`. The image is fully allocated before mounting, and image creation or service start is refused unless the host root filesystem retains the greater of 5 GiB or 20 percent free. These deployment controls bound failure impact even if a buffered response, transient WAL, or allocator peak occurs before the application can reject work.
+An ordinary restart loses the in-memory snapshot and begins collecting again.
+No migrations, backups, checkpoints, replays, or recovery commands exist.
+Historical data and forensic archives are outside this process.

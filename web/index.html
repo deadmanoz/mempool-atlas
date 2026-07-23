@@ -5,263 +5,184 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Explore one Bitcoin node's observed mempool."
+      content="Explore a periodically observed Bitcoin node mempool."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23080610'/%3E%3Ccircle cx='32' cy='32' r='18' fill='%23ff7a18'/%3E%3Cpath d='M24 18v28M36 18v28M20 24h19a7 7 0 0 1 0 14H20m3-7h18a7 7 0 0 1 0 14H20' fill='none' stroke='%23080610' stroke-width='5'/%3E%3C/svg%3E"
     />
     <title>Mempool Atlas</title>
   </head>
   <body>
-    <main class="page">
-      <header class="page-header">
-        <p class="eyebrow">One node's mempool, honestly</p>
-        <h1>Mempool Atlas</h1>
-        <p>
-          Explore the constituency of the transactions currently visible to one
-          selected node.
-        </p>
+    <main class="shell">
+      <header class="site-header">
+        <div>
+          <p class="eyebrow">Whole-mempool explorer</p>
+          <h1>Mempool Atlas</h1>
+          <p class="lede">
+            One complete, periodically observed snapshot from one Bitcoin node.
+          </p>
+        </div>
+        <button id="refresh" class="primary-action" type="button">
+          Refresh snapshot
+        </button>
       </header>
 
-      <nav class="mode-switch" aria-label="View mode">
-        <div id="mode-tabs" class="tab-group" role="tablist">
-          <button
-            id="mode-workbench"
-            type="button"
-            class="tab"
-            role="tab"
-            data-active="true"
-            aria-selected="true"
-            aria-controls="workbench-mode"
-            tabindex="0"
-          >
-            Workbench
-          </button>
-          <button
-            id="mode-compare"
-            type="button"
-            class="tab"
-            role="tab"
-            aria-selected="false"
-            aria-controls="comparison"
-            tabindex="-1"
-          >
-            Compare
-          </button>
-        </div>
-      </nav>
-
-      <div id="workbench-mode" role="tabpanel" aria-labelledby="mode-workbench">
-        <section class="panel workbench" aria-labelledby="workbench-heading">
-          <div class="workbench-header">
-            <div class="workbench-title">
-              <i id="live-dot" class="live-dot" aria-hidden="true"></i>
-              <h2 id="workbench-heading">Workbench</h2>
-              <select id="source-select" aria-label="Selected source"></select>
-            </div>
-            <div class="workbench-metrics">
-              <span class="metric"
-                ><strong id="metric-total" class="mono">–</strong> tx</span
-              >
-              <span class="metric metric-accent"
-                ><strong id="metric-matching" class="mono">–</strong> match ·
-                <span id="metric-share">–</span></span
-              >
-              <span class="awaiting-pill"
-                ><i aria-hidden="true"></i
-                ><span id="metric-awaiting">–</span> awaiting RPC</span
-              >
-              <button id="workbench-reset" type="button">Reset</button>
-            </div>
-          </div>
-
-          <p id="workbench-status" class="status" role="status">
-            Loading summary…
-          </p>
-          <p
-            id="workbench-banner"
-            class="capture-status"
-            role="note"
-            hidden
-          ></p>
-
-          <div class="workbench-body">
-            <aside class="workbench-sidebar" aria-label="Filters">
-              <div id="taxonomy-groups"></div>
-              <div>
-                <h3 class="sidebar-heading">Script type</h3>
-                <div id="script-chips" class="chip-wrap"></div>
-              </div>
-              <p id="sidebar-note" class="sidebar-note"></p>
-            </aside>
-
-            <div class="workbench-hero">
-              <div class="hero-tabs">
-                <div id="primary-tabs" class="tab-group"></div>
-                <div id="group-tabs" class="tab-group" hidden></div>
-                <div id="metric-tabs" class="tab-group" hidden></div>
-              </div>
-              <div id="treemap" class="treemap" hidden></div>
-              <div id="composition" class="composition"></div>
-            </div>
-
-            <div class="workbench-rail">
-              <div>
-                <h3 class="rail-heading">Fee-rate ECDF</h3>
-                <p id="ecdf-subtitle" class="rail-sub">
-                  cumulative vsize share
-                </p>
-                <svg
-                  id="ecdf"
-                  viewBox="0 0 480 172"
-                  role="img"
-                  aria-label="Cumulative fee-rate distribution"
-                ></svg>
-                <div id="ecdf-axis" class="axis-row mono"></div>
-              </div>
-              <div>
-                <h3 class="rail-heading">Joint · fee × size</h3>
-                <p class="rail-sub">summed vsize with marginals</p>
-                <div class="joint-layout">
-                  <div id="joint-top" class="joint-top"></div>
-                  <div></div>
-                  <div id="joint-cells" class="joint-cells"></div>
-                  <div id="joint-right" class="joint-right"></div>
-                </div>
-                <div id="joint-axis" class="axis-row mono"></div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <details id="membership-panel" class="panel membership-panel">
-          <summary>
-            <span id="membership-heading">Per-transaction detail</span>
-          </summary>
-
-          <div class="panel-heading">
-            <p class="panel-note">
-              Bounded inspection of individual memberships; the workbench above
-              only ever sees aggregates.
-            </p>
-            <button id="refresh" type="button">Refresh</button>
-          </div>
-
-          <p id="status" class="status" role="status">Open to load.</p>
-          <p id="capture-status" class="capture-status" role="note" hidden></p>
-          <p id="empty" class="empty" hidden>No memberships were returned.</p>
-
-          <figure id="visual-wrap" class="swim-view" hidden>
-            <canvas
-              id="mempool-canvas"
-              class="swim-canvas"
-              role="img"
-              aria-describedby="swim-description visual-summary"
-            ></canvas>
-            <figcaption id="swim-description" class="swim-description">
-              Each square is one transaction. Rows show individual base fee rate
-              in sat/vB, columns and colour show age, and square area represents
-              vsize. The neutral strip contains transactions awaiting RPC facts.
-            </figcaption>
-            <div class="swim-legend" aria-label="Visual encoding legend">
-              <span><i class="legend-glyph"></i>Area is vsize</span>
-              <span><i class="legend-age"></i>Oldest to newest</span>
-              <span><i class="legend-awaiting"></i>Awaiting RPC facts</span>
-            </div>
-            <p id="visual-summary" class="visual-summary"></p>
-          </figure>
-
-          <details id="inspector" class="inspector" hidden>
-            <summary>Inspect transactions</summary>
-            <div class="inspector-controls">
-              <label for="txid-search">Transaction ID prefix</label>
-              <input
-                id="txid-search"
-                type="search"
-                inputmode="text"
-                autocomplete="off"
-                spellcheck="false"
-                aria-controls="memberships"
-                placeholder="Enter the start of a txid"
-              />
-              <p id="table-summary" class="table-summary" role="status"></p>
-              <div class="pagination" aria-label="Transaction table pages">
-                <button id="previous-page" type="button">Previous</button>
-                <button id="next-page" type="button">Next</button>
-              </div>
-            </div>
-
-            <div class="table-wrap">
-              <table>
-                <caption class="visually-hidden">
-                  Transactions currently present in the selected source mempool
-                </caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Transaction ID</th>
-                    <th scope="col">Base fee rate (sat/vB)</th>
-                    <th scope="col">vsize (vB)</th>
-                    <th scope="col">Age</th>
-                  </tr>
-                </thead>
-                <tbody id="memberships"></tbody>
-              </table>
-            </div>
-          </details>
-        </details>
-      </div>
-
       <section
-        id="comparison"
-        class="panel comparison"
-        role="tabpanel"
-        aria-labelledby="mode-compare comparison-heading"
-        hidden
+        id="page-status"
+        class="status-panel"
+        data-state="waiting"
+        aria-live="polite"
       >
-        <div class="comparison-header">
-          <div class="workbench-title">
-            <i id="compare-live-dot" class="live-dot" aria-hidden="true"></i>
-            <h2 id="comparison-heading">Source comparison</h2>
-          </div>
-          <div id="compare-metric-tabs" class="tab-group" hidden></div>
-        </div>
-
-        <p id="compare-status" class="status" role="status">
-          Select 2–4 sources to compare.
-        </p>
-
-        <div class="compare-picker">
-          <div class="compare-picker-block">
-            <h3 class="sidebar-heading">Available sources</h3>
-            <div id="compare-available" class="chip-wrap"></div>
-          </div>
-          <div class="compare-picker-block">
-            <div class="compare-order-head">
-              <h3 class="sidebar-heading">
-                Comparison hypothesis · least → most permissive
-              </h3>
-              <button id="compare-clear" type="button">Clear</button>
-            </div>
-            <div id="compare-order" class="compare-order"></div>
-            <p id="compare-note" class="sidebar-note"></p>
-          </div>
-        </div>
-
-        <div
-          id="compare-totals"
-          class="compare-totals"
-          aria-label="Compared source sizes"
-        ></div>
-
-        <div id="compare-stages" class="compare-stages"></div>
-
-        <div class="compare-rejections-wrap">
-          <h3 class="rail-heading">What each source refused</h3>
-          <p class="rail-sub">
-            Point-in-time rejection evidence, shown alongside the set
-            differences above, not joined to them. Absence of a rejection is
-            never acceptance.
-          </p>
-          <div id="compare-rejections" class="rejection-grid"></div>
+        <span class="status-light" aria-hidden="true"></span>
+        <div>
+          <strong id="status-title">Connecting to Atlas</strong>
+          <p id="status-detail">Loading the configured source.</p>
         </div>
       </section>
+
+      <section class="metric-grid" aria-label="Snapshot summary">
+        <article class="metric-card source-card">
+          <span class="metric-label">Source</span>
+          <strong id="source-label" class="metric-value">Loading</strong>
+          <code id="source-id" class="metric-note">unknown</code>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Observed</span>
+          <strong id="observed-value" class="metric-value">Waiting</strong>
+          <span class="metric-note">Snapshot time</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Chain tip</span>
+          <strong id="tip-value" class="metric-value">Unknown</strong>
+          <span class="metric-note">Height and block hash</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Transactions</span>
+          <strong id="transaction-count" class="metric-value">Waiting</strong>
+          <span class="metric-note">Complete RPC membership</span>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Virtual size</span>
+          <strong id="total-vsize" class="metric-value">Waiting</strong>
+          <span class="metric-note">Across this snapshot</span>
+        </article>
+      </section>
+
+      <section class="panel filter-panel" aria-labelledby="filters-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Explore</p>
+            <h2 id="filters-heading">Filter the snapshot</h2>
+          </div>
+          <p id="filter-summary" class="panel-summary">No snapshot loaded.</p>
+        </div>
+
+        <form id="filters" class="filter-grid">
+          <label>
+            <span>Minimum fee rate</span>
+            <span class="input-with-unit">
+              <input
+                id="minimum-fee-rate"
+                type="number"
+                min="0"
+                step="0.1"
+                value="0"
+              />
+              <small>sat/vB</small>
+            </span>
+          </label>
+          <label>
+            <span>Newest transactions</span>
+            <select id="maximum-age">
+              <option value="all">Any age</option>
+              <option value="600000">Last 10 minutes</option>
+              <option value="3600000">Last hour</option>
+              <option value="21600000">Last 6 hours</option>
+              <option value="86400000">Last 24 hours</option>
+              <option value="259200000">Last 3 days</option>
+            </select>
+          </label>
+          <label>
+            <span>Minimum transaction size</span>
+            <span class="input-with-unit">
+              <input
+                id="minimum-vsize"
+                type="number"
+                min="0"
+                step="1"
+                value="0"
+              />
+              <small>vB</small>
+            </span>
+          </label>
+          <div class="filter-actions">
+            <button class="primary-action" type="submit">Apply filters</button>
+            <button id="reset-filters" type="button">Reset</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel visual-panel" aria-labelledby="visual-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Swimming in the mempool</p>
+            <h2 id="visual-heading">Fee rate × age</h2>
+          </div>
+          <p class="panel-summary">Square area represents virtual size.</p>
+        </div>
+
+        <p id="empty" class="empty-state">
+          The first complete mempool snapshot is being collected.
+        </p>
+        <div id="visual-wrap" class="canvas-wrap" hidden>
+          <canvas id="mempool-canvas" role="img"></canvas>
+        </div>
+        <p id="visual-summary" class="visual-summary"></p>
+      </section>
+
+      <details id="inspector" class="panel inspector" hidden>
+        <summary>
+          <span>
+            <span class="eyebrow">Inspector</span>
+            <strong>Find a transaction</strong>
+          </span>
+          <span class="summary-hint">Search the filtered snapshot by txid</span>
+        </summary>
+
+        <form id="txid-search-form" class="search-form">
+          <label for="txid-search">Transaction ID prefix</label>
+          <div class="search-row">
+            <input
+              id="txid-search"
+              type="search"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Enter a txid prefix"
+            />
+            <button type="submit">Search</button>
+          </div>
+        </form>
+
+        <p id="table-summary" class="panel-summary">No snapshot loaded.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Transaction ID</th>
+                <th scope="col">Fee rate (sat/vB)</th>
+                <th scope="col">vsize (vB)</th>
+                <th scope="col">Age at observation</th>
+              </tr>
+            </thead>
+            <tbody id="transactions"></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <button id="previous-page" type="button">Previous</button>
+          <button id="next-page" type="button">Next</button>
+        </div>
+      </details>
     </main>
 
     <script type="module" src="/src/main.ts"></script>

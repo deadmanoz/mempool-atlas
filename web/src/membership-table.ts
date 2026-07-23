@@ -1,4 +1,4 @@
-import type { MempoolEntry } from "./types";
+import type { MempoolTransaction } from "./types";
 
 export const MEMBERSHIP_PAGE_SIZE = 100;
 
@@ -28,7 +28,7 @@ export const formatMembershipAge = (ageMs: number): string => {
 };
 
 export interface MembershipPage {
-  entries: MempoolEntry[];
+  entries: MempoolTransaction[];
   matchCount: number;
   pageIndex: number;
   pageCount: number;
@@ -37,16 +37,16 @@ export interface MembershipPage {
 }
 
 export const membershipPage = (
-  memberships: readonly MempoolEntry[],
+  memberships: readonly MempoolTransaction[],
   txidPrefix: string,
   requestedPageIndex: number,
 ): MembershipPage => {
   const normalizedPrefix = txidPrefix.trim().toLowerCase();
-  const matches: readonly MempoolEntry[] =
+  const matches: readonly MempoolTransaction[] =
     normalizedPrefix.length === 0
       ? memberships
       : memberships.filter((membership) =>
-          membership.txid.toLowerCase().startsWith(normalizedPrefix),
+          membership.txid.startsWith(normalizedPrefix),
         );
   const pageCount = Math.ceil(matches.length / MEMBERSHIP_PAGE_SIZE);
   const pageIndex =
