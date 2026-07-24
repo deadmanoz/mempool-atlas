@@ -13,9 +13,12 @@ the single-node viewer.
 ## How it works
 
 ```mermaid
-flowchart LR
-    node["Bitcoin node host"] -->|"existing private WireGuard RPC<br/>membership plus bounded enrichment"| atlas["Mempool Atlas<br/>presentation host"]
-    atlas --> current["Current membership, wtxid cache,<br/>and rule evidence in memory"]
+flowchart TB
+    node["Bitcoin node host"] -->|"existing private WireGuard RPC"| atlas["Mempool Atlas<br/>presentation host"]
+    atlas --> membership["Complete membership generation"]
+    membership -->|"publish immediately<br/>with exact surviving classifications"| current["Current snapshot, classification revision,<br/>and rule evidence in memory"]
+    membership -->|"wake bounded slices"| policy["Current-generation classification"]
+    policy -->|"generation and revision guard"| current
     current --> api["Current-snapshot API"]
     current --> web["Classification terrain"]
     browser["Browser"] --> web
@@ -23,31 +26,53 @@ flowchart LR
 ```
 
 The production deployment reuses the existing private WireGuard network and
-the node's private nginx RPC proxy. No Atlas service, database, queue, or
-container runs beside Bitcoin Core. Every poll begins with three membership
-calls:
+the node's private nginx RPC proxy. No Atlas service, database, queue, ZMQ
+subscriber, container, or new listener runs beside Bitcoin Core. Every
+membership poll makes three calls:
 
 1. `getmempoolinfo` checks the reported entry count.
 2. `getrawmempool true` collects the complete current membership.
 3. `getblockchaininfo` records the chain tip associated with the observation.
 
-Atlas then spends a bounded budget enriching uncached witness variants.
+Membership polling and classification run independently. Atlas installs and
+publishes each validated membership generation immediately, including any
+classification whose exact `txid` and `wtxid` survived from the prior
+generation. Fresh membership therefore never waits for new policy RPC work.
+
+A second loop drains bounded classification slices for the current generation.
 `getrawtransaction` supplies exact transaction bytes, and
 `gettxout(txid, vout, false)` supplies confirmed prevout scripts while ignoring
 mempool spends. Unconfirmed parents are read from their raw mempool
 transactions. Atlas verifies both `txid` and `wtxid` before attaching any
-result, and retains classifications only while that `wtxid` remains in the
-current source. A source-local round-robin cursor advances after every attempted
-batch so retryable early transactions cannot consume every later poll.
+result. Each slice prefers entries without any classification before retrying
+carried partial results, and each witness variant is attempted at most once in
+one membership generation. The next successful membership makes unresolved
+current variants eligible again.
 
 Incomplete enrichment never invalidates fresh membership. Entries not reached
-within the budget, or whose raw transaction cannot be verified, remain
-explicitly unclassified. A transaction with only some prevouts available keeps
-its proven results, exposes typed unknowns for the gaps, and is retried on a
-later poll. A complete successful observation atomically replaces the in-memory
-snapshot and its transaction details. A failed membership poll leaves the last
-good observation available and marks it stale. A process restart simply waits
-for the next poll; there is no application data to migrate or recover.
+yet, or whose raw transaction cannot be verified, remain explicitly
+unclassified. A transaction with only some prevouts available keeps its proven
+results and exposes typed unknowns for the gaps. Successful slices publish
+progressive current-snapshot replacements. If a newer generation arrives while
+work is in flight, the classifier stops scheduling new waves for the old
+generation and both the policy coordinator and runtime reject its stale result.
+Already buffered requests can still finish. If a slice makes no classification
+progress and reports a systemic batch or all-response failure, Atlas pauses the
+rest of that generation until the next successful membership instead of
+rapidly repeating the failure.
+
+Each published snapshot includes a membership-local
+`classification_revision`, beginning at zero and advancing with progressive
+classification. Transaction detail carries the same field. The browser pairs
+the revision with `observed_at_ms`, source identity, `txid`, and `wtxid` before
+showing rule evidence. A detail response from a later revision is safe only
+when its compact assessment still exactly matches the visible transaction.
+Older detail, changed assessments, and detail racing a locally refreshed
+snapshot are not rendered.
+
+A failed membership poll leaves the last good observation available and marks
+it stale. A process restart simply waits for the next poll; there is no
+application data to migrate or recover.
 
 See [docs/architecture.md](docs/architecture.md) and
 [ADR 0003](docs/adr/0003-periodic-in-memory-snapshots.md) for the design
@@ -97,10 +122,11 @@ host's existing web proxy.
 | `ATLAS_RPC_URL` | yes | none | Private Bitcoin RPC proxy URL |
 | `ATLAS_RPC_USERNAME` | no | `atlas` | Dedicated least-privilege RPC user |
 | `ATLAS_RPC_PASSWORD_FILE` | yes | none | One-line RPC password credential |
-| `ATLAS_POLL_SECONDS` | no | `300` | Delay between complete polls |
+| `ATLAS_POLL_SECONDS` | no | `300` | Scheduled complete-membership interval |
 | `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `200000` | Preflight and decode entry limit |
-| `ATLAS_MAX_CLASSIFICATIONS_PER_POLL` | no | `10000` | Maximum uncached witness variants attempted per poll |
-| `ATLAS_CLASSIFICATION_BUDGET_SECONDS` | no | `45` | Stop starting enrichment batches after this budget |
+| `ATLAS_CLASSIFICATION_SLICE_ENTRIES` | no | `2048` | Maximum witness variants attempted in one slice; range 1 to 8192 |
+| `ATLAS_CLASSIFICATION_RPC_LANES` | no | `4` | Concurrent raw-transaction RPC batches; range 1 to 8 |
+| `ATLAS_CLASSIFICATION_CACHE_MIB` | no | `256` | Auxiliary output-script cache admission; range 1 to 512 MiB |
 | `ATLAS_BIND` | no | `127.0.0.1:3101` | Loopback API and website listener |
 | `ATLAS_WEB_ROOT` | no | `web/dist` | Built website directory |
 
@@ -123,9 +149,10 @@ Deployment configuration owns those values.
 - `GET /readyz` becomes ready after the first valid snapshot.
 - `GET /api/v1/sources` returns source status and small snapshot metadata.
 - `GET /api/v1/sources/{source_id}/mempool` returns status plus the current
-  complete snapshot.
+  complete snapshot and its `classification_revision`.
 - `GET /api/v1/sources/{source_id}/transactions/{txid}` returns the current
-  compact assessment and typed evidence for one classified witness variant.
+  compact assessment, typed evidence, and matching classification revision for
+  one classified witness variant.
 
 All API responses disable caching. Static website files are served by the same
 process.
@@ -147,16 +174,37 @@ proxy-temp spill and use timeouts compatible with the validated collection
 window.
 
 `corepc-client` 0.8 buffers the verbose membership response and has a fixed
-15-second transport timeout. The small enrichment batches use the `jsonrpc`
-crate's minreq transport with a 20-second per-batch timeout. The five-minute
-poll starts no new enrichment batch after its configured budget.
+15-second transport timeout. Classification uses the `jsonrpc` crate's minreq
+transport with a 20-second per-batch timeout. Raw transaction and mempool-parent
+batches contain at most 256 requests and are split by an estimated 16 MiB
+response target. Confirmed prevout batches have a nominal 512-request cap, but
+the 16 MiB estimate and 64 KiB per-script-hex bound currently limit them to 254
+requests. Returned transaction hex is limited to 8,000,000 characters. A batch
+is rejected if its decoded JSON-RPC response envelope exceeds 16 MiB. The
+transport has already buffered and parsed that response, so these are admission
+guards rather than complete peak-memory limits. The deployment's 2 GiB memory
+cgroup is the hard boundary for transient response buffering.
+
+The default four raw RPC lanes are reduced to two lanes for confirmed prevout
+batches. A slice defaults to 2,048 candidates and is capped at 8,192. Candidate
+raw responses are admitted against a 256 MiB aggregate estimate. Mempool-parent
+raw work has its own 8,192-transaction and 256 MiB estimated phase cap. Atlas
+considers at most 65,536 unique required prevouts per slice. Confirmed-prevout
+requests have a separate 256 MiB estimated aggregate cap, which permits 4,064
+worst-case calls under the current 64 KiB plus 512-byte per-response estimate.
+These phase estimates bound planned work, not transport allocation.
+
+Classification drains slices until the current generation has been attempted,
+is paused after systemic no-progress failure, or is replaced by newer
+membership. It does not lengthen an otherwise on-schedule membership interval.
 The first deployed membership-only slice accepted complete
 28,520 to 33,381 entry snapshots over WireGuard in 6.9 to 15.4 seconds
 end-to-end. Peak service memory after collection and a full browser load stayed
 below 49 MB, with no proxy temporary files, swap, pressure, or OOM events. This
-does not include the classification cache and does not prove the 200,000-entry
-limit will fit the service's 1 GiB production cgroup. Revalidate the classified
-slice on the target before treating those earlier measurements as current.
+predates continuous classification and its auxiliary caches, and does not prove
+the 200,000-entry limit will fit the service's 2 GiB production cgroup.
+Revalidate the classified slice on the target before treating those earlier
+measurements as current.
 
 The five-minute default is intentionally not live. Choose the production
 cadence from measured response bytes, transfer duration, node cost, and desired
@@ -165,8 +213,10 @@ freshness. Do not shorten it merely because the viewer can poll more often.
 ## Deliberate omissions
 
 Attempt #3 has no SQLite database, migrations, event queue, delta protocol,
-node-local agent, forensic evidence ingest, historical archive, or comparison
-endpoint. Git history preserves the earlier experiments and their lessons.
+node-local agent, ZMQ subscriber, container, forensic evidence ingest,
+historical archive, or comparison endpoint. It adds no network path beyond the
+existing WireGuard RPC route. Git history preserves the earlier experiments
+and their lessons.
 
 Comparison is the next product slice. It will collect independent snapshots
 using the same private transport and derive set differences at read time. It

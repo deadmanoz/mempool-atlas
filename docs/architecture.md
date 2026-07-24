@@ -15,16 +15,19 @@ flowchart TB
 
     subgraph presentation["Presentation host: one Atlas process"]
         membership["Complete membership collector"]
-        enrichment["Bounded classification enrichment<br/>source-bound current wtxid cache"]
+        generation["Install current in-memory generation<br/>reuse exact surviving classifications"]
+        enrichment["Continuous bounded classification slices<br/>current wtxid and script caches"]
         evaluator["Pure seven-rule evaluator"]
-        next["Validated snapshot and detail map"]
-        current["Latest good snapshot, detail map,<br/>and encoded response in memory"]
+        guard["Generation and revision guard"]
+        current["Latest membership, classification revision,<br/>detail map, and encoded response in memory"]
         api["Source-scoped JSON API"]
         static["Static website"]
-        membership --> enrichment
+        membership --> generation
+        generation -->|"publish membership first"| current
+        generation -->|"wake slices"| enrichment
         enrichment --> evaluator
-        evaluator --> next
-        next -->|"atomic replacement"| current
+        evaluator --> guard
+        guard -->|"publish current progress"| current
         current --> api
     end
 
@@ -41,12 +44,16 @@ flowchart TB
 - `rpc.rs` collects complete membership with `getmempoolinfo`, verbose
   `getrawmempool`, and `getblockchaininfo` through `corepc-client`.
 - `policy.rs` enriches a bounded set of current witness variants through
-  batched `getrawtransaction` and `gettxout(txid, vout, false)` calls.
+  batched concurrent `getrawtransaction` and
+  `gettxout(txid, vout, false)` calls. It owns current policy generations,
+  exact surviving classification reuse, auxiliary script caches, and stale
+  result rejection.
 - `model.rs` defines the complete flat snapshot, compact classification, and
   typed transaction-detail contracts.
-- `runtime.rs` periodically builds an observation away from reader-visible
-  state, then atomically replaces the snapshot and matching detail map after
-  validation succeeds.
+- `runtime.rs` runs membership and classification as independent loops.
+  Membership is published before new policy work, and each successful
+  current-generation slice atomically replaces the snapshot and matching detail
+  map with a strictly newer revision.
 - `api.rs` exposes health, readiness, source discovery, current membership,
   current transaction detail, and the built website.
 - `main.rs` owns configuration, the loopback listener, credential-file loading,
@@ -75,11 +82,13 @@ classification:
 | `entered_at_ms` | Node-reported mempool entry time |
 | `bip110` | Compatible, violating, indeterminate, or `null` when not yet classified |
 
-The snapshot also records source identity, membership observation time, block
-height, best block hash, transaction count, total virtual size, evaluator
-identity, policy scope, and the four classification totals. Transactions are
-strictly sorted by txid. This makes equality, future merge-based comparison,
-and payload validation straightforward.
+The snapshot also records source identity, membership observation time,
+membership-local `classification_revision`, block height, best block hash,
+transaction count, total virtual size, evaluator identity, policy scope, and
+the four classification totals. The revision begins at zero for every
+membership generation and advances with each published classification slice.
+Transactions are strictly sorted by txid. This makes equality, future
+merge-based comparison, and payload validation straightforward.
 
 The compact assessment identifies all proven violated rules, all rules with
 missing facts, and the deterministic first rejection when it can be known. A
@@ -135,39 +144,83 @@ limit again because membership can change between the two RPC calls. It rejects
 the complete poll if a required membership field is absent, malformed,
 inexact, overflowing, or unsafe for JSON.
 
-Classification is then best effort and bounded:
+Complete membership installation and policy enrichment are separate. A
+successful collector result first installs a new process-local generation,
+copies only exact surviving `txid` and `wtxid` classifications, and reuses
+exact current-transaction output scripts subject to the new generation's cache
+admission. It then materializes, encodes, and publishes complete membership as
+revision 0 before waking classification. Confirmed prevout scripts are not
+carried between generations.
 
-1. Prune the source-bound cache to `wtxid` variants still present with the same
-   `txid`, and attach cached assessments.
-2. Resume after a source-local round-robin cursor, wrap through sorted
-   membership, and select at most `ATLAS_MAX_CLASSIFICATIONS_PER_POLL` uncached
-   or incomplete variants, 10,000 by default. Advancing the cursor prevents
-   persistent partial results at low txids from starving later members.
-3. Fetch and verify raw transactions in batches of 16. Unconfirmed parent
-   transactions use the same batch size; confirmed prevout scripts use
-   `gettxout(txid, vout, false)` in batches of 128.
-4. Evaluate every raw transaction for which bytes were available. Missing
+The classification loop then drains best-effort bounded slices for that
+generation:
+
+1. Select at most `ATLAS_CLASSIFICATION_SLICE_ENTRIES` variants, 2,048 by
+   default and configurable up to a hard 8,192-entry slice maximum. Candidate
+   selection also stops at a 256 MiB aggregate raw-response estimate. Entries
+   with no classification are fresh and run first. Exact surviving partial
+   classifications with missing prevouts are retryable and run after fresh
+   work.
+2. Mark selected variants attempted. Each exact witness variant is tried at
+   most once in one generation, then becomes eligible again after the next
+   successful complete membership.
+3. Fetch and verify candidate raw transactions in batches of at most 256, split
+   by a `vsize`-based 16 MiB response estimate. Fetch unconfirmed mempool
+   parents through a separate raw phase capped at 8,192 transactions and its
+   own 256 MiB aggregate estimate.
+4. Consider at most 65,536 unique required prevouts from candidate
+   transactions. Confirmed prevout scripts use
+   `gettxout(txid, vout, false)`. Their nominal 512-request cap is reduced by
+   the 16 MiB estimate and 64 KiB per-script-hex bound to a current effective
+   batch maximum of 254. A separate 256 MiB aggregate estimate permits 4,064
+   worst-case confirmed calls per slice with the current constants.
+5. Run up to `ATLAS_CLASSIFICATION_RPC_LANES` raw batches concurrently, four by
+   default and at most eight. Confirmed prevout work uses half that lane count
+   rounded up.
+6. Evaluate every raw transaction for which bytes were available. Missing
    prevouts yield typed unknowns, so output-scoped violations and any other
    decidable rules remain visible.
-5. Cache complete results and retryable partial results by current `wtxid`.
+7. Merge only while the generation remains current. Publish a full
+   current-snapshot replacement after each slice that adds classifications,
+   then continue without waiting for another membership tick.
 
 A missing or invalid raw transaction response leaves that membership entry
 unclassified. An incomplete prevout set produces a visible partial
-classification and remains eligible for retry on the next poll. Neither case
-invalidates fresh membership.
+classification. Both become eligible again with the next membership generation,
+and neither invalidates fresh membership.
 
-The default classification budget is 45 seconds, checked before starting more
-work. It is a soft start budget: a batch already in flight may complete after
-the deadline. Classification batches use a 20-second transport timeout.
+Classification batches use a 20-second transport timeout. Returned transaction
+hex is capped at 8,000,000 characters, confirmed script hex at 64 KiB, and a
+batch is rejected if its decoded JSON-RPC response envelope exceeds 16 MiB.
+The minreq transport buffers and parses the response before the application can
+enforce that guard. The candidate-raw, mempool-parent-raw, and
+confirmed-prevout phase estimates bound planned work, not transport allocation.
+The production 2 GiB memory cgroup is the hard transient boundary.
 
 ## Publication and failure
 
-The next membership snapshot and detail map are built and cross-validated
-before publication. The runtime also serializes the complete snapshot response
-on a blocking worker. It then replaces the structured snapshot, matching
-detail map, and shared encoded response under one short write lock. Readers
-therefore see the previous complete observation or the next complete
-observation, never membership from one poll with details from another.
+Each membership or policy-progress snapshot and detail map is built and
+cross-validated before publication. The runtime also serializes the complete
+snapshot response on a blocking worker. It then replaces the structured
+snapshot, matching detail map, and shared encoded response under one short
+write lock. Readers therefore see complete membership with the exact matching
+classification revision, never membership from one generation with details
+from another.
+
+Stale policy work is rejected twice. The policy coordinator merges results only
+when its generation object is still current. The runtime then accepts progress
+only when the generation matches its published membership and the revision
+strictly advances. A superseded classification drain stops and waits for the
+new membership wake-up. RPC schedulers check generation identity before each
+replacement wave, so already in-flight requests can finish but no further
+batches or downstream phases are scheduled for stale work.
+
+When a slice publishes classifications, its revision is embedded in both the
+snapshot and runtime publication and must match exactly. A slice that adds no
+classifications and reports a batch failure, or response failures at least
+equal to its attempted candidate count, pauses the current generation until
+the next membership. This avoids a tight all-failure drain loop while keeping
+fresh membership visible.
 
 A failed membership poll records its error but preserves the last good
 observation as stale. Before the first success, readiness remains false. Batch
@@ -186,22 +239,28 @@ private node details through the website.
 `corepc-client` buffers the HTTP response before custom deserialization. During
 replacement, the old structured snapshot and encoded response can also remain
 alive while a reader finishes. The 200,000-entry cap is therefore an entry
-bound, not a complete memory bound. The current classification cache and detail
-map add bounded-per-entry state, so deployment acceptance must still observe
-real peak memory.
+bound, not a complete memory bound. The auxiliary output-script cache has a
+configurable admission estimate of 256 MiB by default and 512 MiB maximum, but
+classification details, concurrent RPC responses, allocator overhead, and
+reader overlap are outside that budget. Deployment acceptance must still
+observe real peak memory. Classification HTTP bodies are buffered before the
+decoded 16 MiB envelope guard runs, so the deployment's 2 GiB memory cgroup is
+the hard transient response boundary.
 
 Version 0.8 of `corepc-client` also fixes the JSON-RPC transport timeout at 15
 seconds for the complete membership path. The first membership-only deployment
 accepted complete 28,520 to 33,381 entry snapshots over the target WireGuard
 path in 6.9 to 15.4 seconds end-to-end and peaked below 49 MB after a full
-browser load. Those measurements do not include the classification cache or
-detail map and are not a 200,000-entry proof. Materially larger mempools and the
-classified deployment require renewed measurement.
+browser load. Those measurements predate the continuous classifier, auxiliary
+caches, and progressive detail publications, and are not a 200,000-entry proof.
+Materially larger mempools and the classified deployment require renewed
+measurement.
 
 ## Network boundary
 
 The service does not expose Bitcoin RPC publicly and does not introduce a new
-node-side service, container, queue, database, listener, or transport.
+node-side service, agent, container, queue, database, ZMQ subscriber, listener,
+or transport.
 Deployment supplies the existing WireGuard-only node RPC proxy URL and a
 dedicated least-privilege RPC credential. Authentication alone is not an
 authorization boundary: the node must whitelist that identity to exactly
@@ -222,8 +281,9 @@ complete snapshot, or `null` before the first successful poll.
 `GET /api/v1/sources/{source_id}/transactions/{txid}` reads the detail map bound
 to the current snapshot. It returns:
 
-- `200` with current `txid`, `wtxid`, compact assessment, seven rule outcomes,
-  exact counts, and bounded exemplars when classified;
+- `200` with current `txid`, `wtxid`, `classification_revision`, compact
+  assessment, seven rule outcomes, exact counts, and bounded exemplars when
+  classified;
 - `400` for a malformed transaction ID;
 - `404` for an unknown source or a transaction absent from current membership;
 - `503` while no snapshot exists or when the present transaction has no
@@ -246,9 +306,22 @@ source, fetches one complete snapshot, validates it, and renders:
 The UI performs no automatic full-snapshot polling. Manual refresh fetches the
 current server copy and does not initiate node collection.
 
-The service defaults to a five-minute collection delay. Production cadence is
-an operational capacity choice based on measured response bytes, transfer time,
-node work, and required freshness, not a live-data promise.
+Both snapshot and detail parsing require a non-negative
+`classification_revision`. While loading detail, the browser also holds the
+snapshot's `observed_at_ms`, source, `txid`, and `wtxid`. It ignores a response
+if its local snapshot changed in flight. It rejects older detail revisions and
+accepts a later server revision only when the compact assessment still exactly
+matches the visible transaction. Unrelated classification progress can
+therefore coexist with an open inspector without attaching changed evidence to
+a stale terrain tile.
+
+The service defaults to a five-minute membership interval. A separate
+classification loop means policy work does not lengthen a membership poll that
+fits within that interval. The interval uses delayed missed ticks, so an
+overrunning membership request delays the next start instead of creating
+catch-up polls. Production cadence is an operational capacity choice based on
+measured response bytes, transfer time, node work, and required freshness, not
+a live-data promise.
 
 ## Products kept separate
 

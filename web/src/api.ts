@@ -38,6 +38,33 @@ const isSourceId = (value: unknown): value is string =>
   value !== ".." &&
   /^[A-Za-z0-9._-]{1,64}$/.test(value);
 
+const sameRuleIds = (left: RuleId[], right: RuleId[]): boolean =>
+  left.length === right.length &&
+  left.every((rule, index) => rule === right[index]);
+
+const sameAssessment = (
+  left: Bip110Assessment,
+  right: Bip110Assessment | null,
+): boolean =>
+  right !== null &&
+  left.status === right.status &&
+  left.primary_rule === right.primary_rule &&
+  sameRuleIds(left.violated_rules, right.violated_rules) &&
+  sameRuleIds(left.unknown_rules, right.unknown_rules);
+
+export const transactionDetailMatchesSnapshot = (
+  snapshot: MempoolSnapshot,
+  transaction: MempoolTransaction,
+  detail: TransactionDetailResponse,
+): boolean =>
+  detail.source_id === snapshot.source_id &&
+  detail.snapshot_observed_at_ms === snapshot.observed_at_ms &&
+  detail.txid === transaction.txid &&
+  detail.wtxid === transaction.wtxid &&
+  (detail.classification_revision === snapshot.classification_revision ||
+    (detail.classification_revision > snapshot.classification_revision &&
+      sameAssessment(detail.assessment, transaction.bip110)));
+
 const hasOnlyKeys = (
   value: Record<string, unknown>,
   expectedKeys: readonly string[],
@@ -300,6 +327,7 @@ export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
       "source_id",
       "source_label",
       "observed_at_ms",
+      "classification_revision",
       "chain_tip",
       "transaction_count",
       "total_vsize",
@@ -310,6 +338,7 @@ export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
     typeof value.source_label !== "string" ||
     value.source_label.trim().length === 0 ||
     !isNonNegativeInteger(value.observed_at_ms) ||
+    !isNonNegativeInteger(value.classification_revision) ||
     !isNonNegativeInteger(value.transaction_count) ||
     !isNonNegativeInteger(value.total_vsize) ||
     !Array.isArray(value.transactions)
@@ -414,6 +443,7 @@ export const parseTransactionDetailResponse = (
     !hasOnlyKeys(value, [
       "source_id",
       "snapshot_observed_at_ms",
+      "classification_revision",
       "txid",
       "wtxid",
       "assessment",
@@ -421,6 +451,7 @@ export const parseTransactionDetailResponse = (
     ]) ||
     !isSourceId(value.source_id) ||
     !isNonNegativeInteger(value.snapshot_observed_at_ms) ||
+    !isNonNegativeInteger(value.classification_revision) ||
     !isTxid(value.txid) ||
     !isTxid(value.wtxid) ||
     !Array.isArray(value.rules) ||

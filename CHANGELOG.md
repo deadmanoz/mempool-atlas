@@ -20,10 +20,23 @@ All notable changes to Mempool Atlas will be documented in this file.
 - Add a pure seven-rule RDTS evaluator with separate consensus and deployed
   Knots mempool-policy modes, deterministic primary rejection, all proven
   violations, and typed unknown facts.
-- Enrich only the current snapshot through bounded `getrawtransaction` and
-  `gettxout(..., false)` batches, verify `txid` and `wtxid`, cache by the
-  source-bound witness variant, advance work with a fair round-robin cursor,
-  and retain no history.
+- Publish complete membership independently from policy work, then continuously
+  enrich only its current in-memory generation through bounded concurrent
+  `getrawtransaction` and `gettxout(..., false)` slices.
+- Reuse exact surviving `txid` and `wtxid` classifications across membership
+  generations, prefer fresh unclassified variants before retryable partial
+  results, and discard stale work through generation and revision guards.
+- Bound classification with configurable slice size, RPC lanes, and auxiliary
+  script-cache admission while retaining no history.
+- Cap each slice at 8,192 candidates, each candidate-raw and mempool-parent-raw
+  phase at a 256 MiB response estimate, required prevouts at 65,536 unique
+  outpoints, and confirmed-prevout work at a 256 MiB aggregate estimate.
+- Stop scheduling new work for superseded generations and pause a generation
+  after systemic no-progress RPC failure instead of rapidly draining more
+  failing slices.
+- Expose `classification_revision` with snapshots and transaction detail so the
+  browser can keep progressive rule evidence consistent with its visible
+  terrain.
 - Remove the experimental node agents, SQLite replicas, checkpoint and delta
   protocol, evidence pipeline, classifiers, database tooling, and multi-node
   comparison surface from the active workspace. Their code and lessons remain

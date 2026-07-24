@@ -49,6 +49,7 @@ export interface MempoolSnapshot {
   source_id: string;
   source_label: string;
   observed_at_ms: number;
+  classification_revision: number;
   chain_tip: ChainTip;
   transaction_count: number;
   total_vsize: number;
@@ -69,6 +70,7 @@ export interface RuleAssessment {
 export interface TransactionDetailResponse {
   source_id: string;
   snapshot_observed_at_ms: number;
+  classification_revision: number;
   txid: string;
   wtxid: string;
   assessment: Bip110Assessment;

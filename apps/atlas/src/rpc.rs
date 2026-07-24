@@ -15,10 +15,8 @@ use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
 use crate::model::{
-    ChainTip, MAX_SUPPORTED_MEMPOOL_ENTRIES, MempoolEntry, MempoolObservation, MempoolSnapshot,
-    ModelError,
+    ChainTip, MAX_SUPPORTED_MEMPOOL_ENTRIES, MempoolEntry, MempoolSnapshot, ModelError,
 };
-use crate::policy::{PolicyEnricher, PolicyError, PolicyLimits};
 
 thread_local! {
     /// `corepc-client::Client::call` owns deserialization and does not expose a
@@ -31,7 +29,6 @@ thread_local! {
 #[derive(Clone, Debug)]
 pub struct RpcClient {
     inner: Arc<Client>,
-    policy: PolicyEnricher,
     max_mempool_entries: u64,
 }
 
@@ -41,39 +38,24 @@ impl RpcClient {
         username: impl Into<String>,
         password: impl Into<String>,
         max_mempool_entries: u64,
-        policy_limits: PolicyLimits,
     ) -> Result<Self, RpcError> {
         validate_configured_limit(max_mempool_entries)?;
-        if u64::try_from(policy_limits.max_transactions_per_snapshot()).unwrap_or(u64::MAX)
-            > max_mempool_entries
-        {
-            return Err(RpcError::InvalidPolicyTransactionLimit {
-                configured: policy_limits.max_transactions_per_snapshot(),
-                maximum: max_mempool_entries,
-            });
-        }
-        let username = username.into();
-        let password = password.into();
-        let inner = Client::new_with_auth(url, Auth::UserPass(username.clone(), password.clone()))
+        let inner = Client::new_with_auth(url, Auth::UserPass(username.into(), password.into()))
             .map_err(RpcError::ClientInitialization)?;
-        let policy = PolicyEnricher::new(url, username, password, policy_limits)
-            .map_err(RpcError::PolicyClientInitialization)?;
         Ok(Self {
             inner: Arc::new(inner),
-            policy,
             max_mempool_entries,
         })
     }
 
-    /// Fetches one complete mempool observation and binds it to the node's
+    /// Fetches one complete mempool snapshot and binds it to the node's
     /// chain tip immediately after the verbose mempool call.
-    pub async fn get_mempool_observation(
+    pub async fn get_mempool_snapshot(
         &self,
         source_id: &str,
         source_label: &str,
-    ) -> Result<MempoolObservation, RpcError> {
+    ) -> Result<MempoolSnapshot, RpcError> {
         let client = Arc::clone(&self.inner);
-        let policy = self.policy.clone();
         let maximum = self.max_mempool_entries;
         let source_id = source_id.to_owned();
         let source_label = source_label.to_owned();
@@ -84,7 +66,7 @@ impl RpcClient {
             validate_reported_mempool_size(info.size, maximum)?;
 
             let _decode_limit = DecodeEntryLimitGuard::set(maximum);
-            let mut entries = client
+            let entries = client
                 .call::<RawMempoolWire>("getrawmempool", &[serde_json::Value::Bool(true)])
                 .map_err(RpcError::GetRawMempool)?
                 .into_entries(maximum)?;
@@ -97,17 +79,7 @@ impl RpcClient {
                 .to_string();
             let observed_at_ms = system_now_ms()?;
 
-            let enrichment = policy.enrich(&mut entries);
-            tracing::info!(
-                attempted = enrichment.attempted,
-                newly_classified = enrichment.newly_classified,
-                response_failures = enrichment.response_failures,
-                batch_failures = enrichment.batch_failures,
-                deadline_reached = enrichment.deadline_reached,
-                classified = enrichment.classifications.len(),
-                "completed bounded BIP-110 enrichment"
-            );
-            let snapshot = MempoolSnapshot::new(
+            MempoolSnapshot::new(
                 source_id,
                 source_label,
                 observed_at_ms,
@@ -117,9 +89,7 @@ impl RpcClient {
                 },
                 entries,
             )
-            .map_err(RpcError::InvalidSnapshot)?;
-            MempoolObservation::new(snapshot, enrichment.classifications)
-                .map_err(RpcError::InvalidSnapshot)
+            .map_err(RpcError::InvalidSnapshot)
         })
         .await?
     }
@@ -129,8 +99,6 @@ impl RpcClient {
 pub enum RpcError {
     #[error("failed to create Bitcoin RPC client: {0}")]
     ClientInitialization(#[source] CorepcError),
-    #[error("failed to create BIP-110 policy RPC client: {0}")]
-    PolicyClientInitialization(#[source] PolicyError),
     #[error("getmempoolinfo RPC failed or returned an invalid response: {0}")]
     GetMempoolInfo(#[source] CorepcError),
     #[error("getrawmempool RPC failed or returned an invalid response: {0}")]
@@ -141,10 +109,6 @@ pub enum RpcError {
     Task(#[from] tokio::task::JoinError),
     #[error("configured mempool entry limit {configured} exceeds the supported maximum {maximum}")]
     InvalidMempoolEntryLimit { configured: u64, maximum: u64 },
-    #[error(
-        "configured policy transaction limit {configured} exceeds the mempool entry limit {maximum}"
-    )]
-    InvalidPolicyTransactionLimit { configured: usize, maximum: u64 },
     #[error("getmempoolinfo returned negative transaction count {size}")]
     InvalidMempoolSize { size: i64 },
     #[error(
@@ -185,15 +149,12 @@ impl RpcError {
             Self::GetMempoolInfo(_) | Self::GetRawMempool(_) | Self::GetBlockchainInfo(_) => {
                 "Bitcoin node RPC is unavailable"
             }
-            Self::SnapshotTooLarge { .. }
-            | Self::InvalidMempoolEntryLimit { .. }
-            | Self::InvalidPolicyTransactionLimit { .. } => {
+            Self::SnapshotTooLarge { .. } | Self::InvalidMempoolEntryLimit { .. } => {
                 "Bitcoin node mempool exceeds the configured limit"
             }
             Self::Task(_) => "Atlas snapshot worker failed",
             Self::InvalidSystemClock | Self::SystemTimeOverflow => "Atlas system clock is invalid",
             Self::ClientInitialization(_)
-            | Self::PolicyClientInitialization(_)
             | Self::InvalidMempoolSize { .. }
             | Self::InvalidTxid(_)
             | Self::InvalidWtxid(_)
@@ -461,13 +422,6 @@ mod tests {
                     }),
                     Value::Null,
                 ),
-                "getrawtransaction" => (
-                    Value::Null,
-                    json!({
-                        "code": -5,
-                        "message": "transaction left the mempool"
-                    }),
-                ),
                 other => panic!("unexpected RPC method {other}"),
             };
             responses.push(json!({
@@ -485,7 +439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn performs_authenticated_snapshot_and_bounded_enrichment_sequence() {
+    async fn performs_authenticated_membership_snapshot_sequence() {
         let calls = Shared::new(AsyncMutex::new(Vec::new()));
         let application = Router::new()
             .route("/", post(rpc_fixture))
@@ -505,20 +459,24 @@ mod tests {
             "atlas",
             "secret",
             MAX_SUPPORTED_MEMPOOL_ENTRIES,
-            PolicyLimits::new(10, std::time::Duration::from_secs(5)).expect("policy limits"),
         )
         .expect("RPC client");
-        let observation = client
-            .get_mempool_observation("core", "Bitcoin Core")
+        let snapshot = client
+            .get_mempool_snapshot("core", "Bitcoin Core")
             .await
             .expect("snapshot");
         server.abort();
 
-        let snapshot = observation.snapshot;
         assert_eq!(snapshot.transaction_count, 1);
         assert_eq!(snapshot.transactions[0].fee_sats, 1_200);
         assert_eq!(snapshot.chain_tip.height, 900_000);
         assert_eq!(snapshot.bip110_summary.unclassified_count, 1);
+        assert!(
+            snapshot
+                .transactions
+                .iter()
+                .all(|entry| entry.bip110.is_none())
+        );
 
         let calls = calls.lock().await;
         assert_eq!(
@@ -526,17 +484,11 @@ mod tests {
                 .iter()
                 .map(|call| call.method.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "getmempoolinfo",
-                "getrawmempool",
-                "getblockchaininfo",
-                "getrawtransaction"
-            ]
+            ["getmempoolinfo", "getrawmempool", "getblockchaininfo"]
         );
         assert_eq!(calls[0].params, json!([]));
         assert_eq!(calls[1].params, json!([true]));
         assert_eq!(calls[2].params, json!([]));
-        assert_eq!(calls[3].params, json!([TXID_A, 0]));
         assert!(
             calls
                 .iter()

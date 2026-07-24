@@ -1,13 +1,13 @@
-//! Bounded, best-effort enrichment of one disposable mempool snapshot.
+//! Continuous, bounded enrichment of one disposable mempool snapshot.
 //!
-//! The node remains the membership authority. This module only adds current
-//! RDTS mempool-policy compatibility facts, caches them by witness transaction
-//! ID, and returns explicit gaps when the enrichment budget or RPC data is
-//! incomplete.
+//! The node remains the membership authority. One generation owns only the
+//! classifications and output scripts that still belong to its exact current
+//! witness variants. RPC work happens away from that state and is merged only
+//! while the generation is still current.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bitcoin::consensus::encode::deserialize_hex;
 use bitcoin::{OutPoint, ScriptBuf, Transaction, Txid};
@@ -21,50 +21,71 @@ use serde_json::json;
 use thiserror::Error;
 use tracing::warn;
 
+#[cfg(test)]
+use crate::model::MempoolEntry;
 use crate::model::{
     Bip110Assessment, Bip110RuleDetail, Bip110RuleId, Bip110RuleVerdict, Bip110Status,
-    MAX_BIP110_DETAIL_EXEMPLARS_PER_RULE, MempoolEntry, TransactionClassification,
-    TransactionClassifications,
+    MAX_BIP110_DETAIL_EXEMPLARS_PER_RULE, MempoolObservation, MempoolSnapshot, ModelError,
+    TransactionClassification, TransactionClassifications,
 };
 
-const RAW_TRANSACTION_BATCH_SIZE: usize = 16;
-const GETTXOUT_BATCH_SIZE: usize = 128;
+const RAW_TRANSACTION_BATCH_SIZE: usize = 256;
+const MAX_GETTXOUT_BATCH_SIZE: usize = 512;
+const MAX_RPC_LANES: usize = 8;
+const MAX_TRANSACTIONS_PER_SLICE: usize = 8_192;
+const MAX_BATCH_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_RAW_RESPONSE_BYTES_PER_SLICE: usize = 256 * 1024 * 1024;
+const MAX_CONFIRMED_RESPONSE_BYTES_PER_SLICE: usize = 256 * 1024 * 1024;
+const MAX_UNIQUE_PREVOUTS_PER_SLICE: usize = 65_536;
+const MAX_AUXILIARY_CACHE_BYTES: usize = 512 * 1024 * 1024;
+const ESTIMATED_JSON_BYTES_PER_RESPONSE: usize = 512;
 const MAX_TRANSACTION_HEX_CHARACTERS: usize = 8_000_000;
+// Classification is best effort, and scripts above this generous ceiling stay
+// typed as missing. The ceiling is far above every 4..=42 byte witness program
+// while still bounding legacy-script decoding and per-batch response estimates.
+const MAX_CONFIRMED_SCRIPT_HEX_CHARACTERS: usize = 64 * 1024;
+const ESTIMATED_GETTXOUT_RESPONSE_BYTES: usize =
+    MAX_CONFIRMED_SCRIPT_HEX_CHARACTERS + ESTIMATED_JSON_BYTES_PER_RESPONSE;
 const RPC_BATCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PolicyLimits {
-    max_transactions_per_snapshot: usize,
-    max_duration: Duration,
+    max_transactions_per_slice: usize,
+    rpc_lanes: usize,
+    max_auxiliary_cache_bytes: usize,
 }
 
 impl PolicyLimits {
     pub fn new(
-        max_transactions_per_snapshot: usize,
-        max_duration: Duration,
+        max_transactions_per_slice: usize,
+        rpc_lanes: usize,
+        max_auxiliary_cache_bytes: usize,
     ) -> Result<Self, PolicyError> {
-        if max_transactions_per_snapshot == 0
-            || max_duration.is_zero()
-            || Instant::now().checked_add(max_duration).is_none()
+        if max_transactions_per_slice == 0
+            || max_transactions_per_slice > MAX_TRANSACTIONS_PER_SLICE
+            || rpc_lanes == 0
+            || rpc_lanes > MAX_RPC_LANES
+            || max_auxiliary_cache_bytes == 0
+            || max_auxiliary_cache_bytes > MAX_AUXILIARY_CACHE_BYTES
         {
             return Err(PolicyError::InvalidLimits);
         }
         Ok(Self {
-            max_transactions_per_snapshot,
-            max_duration,
+            max_transactions_per_slice,
+            rpc_lanes,
+            max_auxiliary_cache_bytes,
         })
     }
 
-    pub(crate) fn max_transactions_per_snapshot(self) -> usize {
-        self.max_transactions_per_snapshot
+    fn prevout_rpc_lanes(self) -> usize {
+        self.rpc_lanes.div_ceil(2)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct PolicyEnricher {
     client: Arc<JsonRpcClient>,
-    cache: Arc<Mutex<BTreeMap<String, CachedClassification>>>,
-    candidate_cursor: Arc<Mutex<Option<String>>>,
+    coordinator: Arc<Mutex<PolicyCoordinator>>,
     limits: PolicyLimits,
 }
 
@@ -83,115 +104,482 @@ impl PolicyEnricher {
             .build();
         Ok(Self {
             client: Arc::new(JsonRpcClient::with_transport(transport)),
-            cache: Arc::new(Mutex::new(BTreeMap::new())),
-            candidate_cursor: Arc::new(Mutex::new(None)),
+            coordinator: Arc::new(Mutex::new(PolicyCoordinator::default())),
             limits,
         })
     }
 
-    /// Adds every cached result, then attempts a bounded number of new or
-    /// incomplete witness variants. A missing raw transaction remains
-    /// unclassified. Missing prevouts produce retryable typed unknowns. Neither
-    /// case invalidates the underlying membership snapshot.
-    pub fn enrich(&self, entries: &mut [MempoolEntry]) -> PolicyEnrichmentReport {
-        let started_at = Instant::now();
-        let deadline = started_at
-            .checked_add(self.limits.max_duration)
-            .unwrap_or(started_at);
-        let membership = entries
+    /// Installs fresh complete membership and immediately materializes every
+    /// exact classification that survived from the previous generation.
+    pub(crate) fn install_snapshot(
+        &self,
+        membership: MempoolSnapshot,
+    ) -> Result<PolicyPublication, PolicyError> {
+        let variants = membership
+            .transactions
             .iter()
-            .filter_map(|entry| {
+            .map(|entry| {
                 entry
                     .txid
                     .parse::<Txid>()
-                    .ok()
-                    .map(|txid| (txid, entry.wtxid.clone()))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let current_variants = entries
-            .iter()
-            .map(|entry| (entry.wtxid.clone(), entry.txid.clone()))
-            .collect::<BTreeMap<_, _>>();
-
-        {
-            let mut cache = self.cache();
-            cache.retain(|wtxid, result| {
-                current_variants
-                    .get(wtxid)
-                    .is_some_and(|txid| txid == &result.classification.txid)
-            });
-        }
-        self.apply_cache(entries);
-
-        let candidates = {
-            let cursor = self.candidate_cursor();
-            let start = cursor.as_deref().map_or(0, |txid| {
-                entries.partition_point(|entry| entry.txid.as_str() <= txid)
-            });
-            drop(cursor);
-            let cache = self.cache();
-            let candidates = entries[start..]
-                .iter()
-                .chain(entries[..start].iter())
-                .filter(|entry| {
-                    cache.get(&entry.wtxid).is_none_or(|cached| {
-                        cached.classification.txid != entry.txid || cached.retryable
+                    .map(|txid| {
+                        (
+                            txid,
+                            CurrentVariant {
+                                wtxid: entry.wtxid.clone(),
+                                vsize: entry.vsize,
+                            },
+                        )
                     })
-                })
-                .take(self.limits.max_transactions_per_snapshot)
-                .map(|entry| ExpectedVariant {
+                    .map_err(|_| PolicyError::InvalidMembershipTxid(entry.txid.clone()))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let membership = Arc::new(membership);
+
+        let generation = {
+            let mut coordinator = self.coordinator();
+            let id = coordinator
+                .next_generation
+                .checked_add(1)
+                .ok_or(PolicyError::GenerationOverflow)?;
+            coordinator.next_generation = id;
+
+            let mut work = GenerationWork::default();
+            if let Some(previous) = coordinator.current.as_ref() {
+                let previous_work = previous.work();
+                for entry in &membership.transactions {
+                    if let Some(cached) = previous_work.classifications.get(&entry.wtxid)
+                        && cached.classification.txid == entry.txid
+                    {
+                        work.classifications
+                            .insert(entry.wtxid.clone(), cached.clone());
+                    }
+                    let Ok(txid) = entry.txid.parse::<Txid>() else {
+                        continue;
+                    };
+                    if let Some(outputs) = previous_work.outputs.get(&txid)
+                        && outputs.wtxid == entry.wtxid
+                        && work
+                            .auxiliary_cache_bytes
+                            .checked_add(outputs.estimated_bytes)
+                            .is_some_and(|bytes| bytes <= self.limits.max_auxiliary_cache_bytes)
+                    {
+                        work.auxiliary_cache_bytes += outputs.estimated_bytes;
+                        work.outputs.insert(txid, outputs.clone());
+                    }
+                }
+            }
+
+            let generation = Arc::new(PolicyGeneration {
+                id,
+                membership,
+                variants,
+                work: Mutex::new(work),
+            });
+            coordinator.current = Some(Arc::clone(&generation));
+            generation
+        };
+
+        self.publication_for(&generation)
+    }
+
+    /// Classifies one bounded slice from the current generation. Every current
+    /// variant is attempted at most once per generation. A later membership
+    /// snapshot makes incomplete variants eligible again.
+    pub async fn classify_next(&self) -> Result<PolicyEnrichmentReport, PolicyError> {
+        let expected_generation = self.current_generation().map(|generation| generation.id);
+        self.classify_next_for_generation(expected_generation).await
+    }
+
+    pub(crate) async fn classify_next_for_generation(
+        &self,
+        expected_generation: Option<u64>,
+    ) -> Result<PolicyEnrichmentReport, PolicyError> {
+        let Some(generation) = self.current_generation() else {
+            return Ok(PolicyEnrichmentReport::waiting());
+        };
+        if expected_generation != Some(generation.id) {
+            return Ok(PolicyEnrichmentReport::stale(generation.id));
+        }
+        let candidates = {
+            let mut work = generation.work();
+            let fresh = generation.membership.transactions.iter().filter(|entry| {
+                !work.attempted.contains(&entry.wtxid)
+                    && !work.classifications.contains_key(&entry.wtxid)
+            });
+            let retryable = generation.membership.transactions.iter().filter(|entry| {
+                !work.attempted.contains(&entry.wtxid)
+                    && work
+                        .classifications
+                        .get(&entry.wtxid)
+                        .is_some_and(|cached| cached.retryable)
+            });
+            let candidates = bounded_variants(
+                fresh.chain(retryable).map(|entry| ExpectedVariant {
                     txid: entry.txid.clone(),
                     wtxid: entry.wtxid.clone(),
-                })
-                .collect::<Vec<_>>();
-            drop(cache);
+                    vsize: entry.vsize,
+                }),
+                self.limits.max_transactions_per_slice,
+            );
+            work.attempted
+                .extend(candidates.iter().map(|candidate| candidate.wtxid.clone()));
             candidates
         };
-        let mut report = PolicyEnrichmentReport {
-            attempted: 0,
-            newly_classified: 0,
-            response_failures: 0,
-            batch_failures: 0,
-            deadline_reached: false,
-            classifications: BTreeMap::new(),
+
+        if candidates.is_empty() {
+            let (classified, classifications) = {
+                let work = generation.work();
+                (
+                    work.classifications.len(),
+                    current_classifications(&generation.membership, &work.classifications),
+                )
+            };
+            return Ok(PolicyEnrichmentReport {
+                generation: generation.id,
+                attempted: 0,
+                newly_classified: 0,
+                response_failures: 0,
+                batch_failures: 0,
+                response_bytes: 0,
+                classified,
+                remaining: 0,
+                complete: true,
+                stale: false,
+                publication: None,
+                classifications,
+            });
+        }
+
+        let attempted = candidates.len();
+        let result = self
+            .classify_candidates(Arc::clone(&generation), candidates)
+            .await;
+
+        let (publication_inputs, classified, remaining, stale) = {
+            let coordinator = self.coordinator();
+            if coordinator
+                .current
+                .as_ref()
+                .is_none_or(|current| !Arc::ptr_eq(current, &generation))
+            {
+                (None, 0, 0, true)
+            } else {
+                let mut work = generation.work();
+                for (txid, outputs) in &result.outputs {
+                    insert_outputs(
+                        &mut work,
+                        *txid,
+                        outputs.clone(),
+                        self.limits.max_auxiliary_cache_bytes,
+                    );
+                }
+                for (outpoint, script) in &result.confirmed_scripts {
+                    insert_confirmed_script(
+                        &mut work,
+                        *outpoint,
+                        script.clone(),
+                        self.limits.max_auxiliary_cache_bytes,
+                    );
+                }
+                for cached in &result.classifications {
+                    work.classifications
+                        .insert(cached.classification.wtxid.clone(), cached.clone());
+                }
+                if !result.classifications.is_empty() {
+                    work.revision = work
+                        .revision
+                        .checked_add(1)
+                        .ok_or(PolicyError::GenerationOverflow)?;
+                }
+                let classified = work.classifications.len();
+                let remaining = generation
+                    .membership
+                    .transactions
+                    .iter()
+                    .filter(|entry| {
+                        !work.attempted.contains(&entry.wtxid)
+                            && work
+                                .classifications
+                                .get(&entry.wtxid)
+                                .is_none_or(|cached| cached.retryable)
+                    })
+                    .count();
+                let publication_inputs = (!result.classifications.is_empty()).then(|| {
+                    (
+                        work.revision,
+                        current_classifications(&generation.membership, &work.classifications),
+                    )
+                });
+                (publication_inputs, classified, remaining, false)
+            }
         };
 
-        for expected_batch in candidates.chunks(RAW_TRANSACTION_BATCH_SIZE) {
-            if Instant::now() >= deadline {
-                report.deadline_reached = true;
-                break;
-            }
-            report.attempted += expected_batch.len();
-            if let Some(last) = expected_batch.last() {
-                *self.candidate_cursor() = Some(last.txid.clone());
-            }
-            let fetched = match self.fetch_raw_transactions(expected_batch) {
-                Ok(fetched) => fetched,
-                Err(error) => {
-                    report.batch_failures += 1;
-                    warn!(error = %error, "BIP-110 raw transaction batch failed");
-                    break;
-                }
-            };
-            report.response_failures += fetched.response_failures;
+        let publication = if let Some((revision, classifications)) = publication_inputs {
+            Some(PolicyPublication {
+                generation: generation.id,
+                revision,
+                observation: MempoolObservation::materialize(
+                    &generation.membership,
+                    revision,
+                    classifications,
+                )?,
+            })
+        } else {
+            None
+        };
+        let classifications = publication
+            .as_ref()
+            .map_or_else(BTreeMap::new, |publication| {
+                publication.observation.classifications.clone()
+            });
+        Ok(PolicyEnrichmentReport {
+            generation: generation.id,
+            attempted,
+            newly_classified: result.classifications.len(),
+            response_failures: result.response_failures,
+            batch_failures: result.batch_failures,
+            response_bytes: result.response_bytes,
+            classified,
+            remaining,
+            complete: remaining == 0,
+            stale,
+            publication,
+            classifications,
+        })
+    }
 
-            let transactions = expected_batch
+    #[cfg(test)]
+    fn enrich(&self, entries: &mut [MempoolEntry]) -> PolicyEnrichmentReport {
+        let mut membership = entries.to_vec();
+        for entry in &mut membership {
+            entry.bip110 = None;
+        }
+        membership.sort_unstable_by(|left, right| left.txid.cmp(&right.txid));
+        let membership = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            1,
+            crate::model::ChainTip {
+                height: 1,
+                hash: "00".repeat(32),
+            },
+            membership,
+        )
+        .expect("test membership");
+        let initial = self
+            .install_snapshot(membership)
+            .expect("install membership");
+        entries.clone_from_slice(&initial.observation.snapshot.transactions);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let report = runtime
+            .block_on(self.classify_next())
+            .expect("classification slice");
+        if let Some(publication) = &report.publication {
+            entries.clone_from_slice(&publication.observation.snapshot.transactions);
+        }
+        report
+    }
+
+    fn publication_for(
+        &self,
+        generation: &Arc<PolicyGeneration>,
+    ) -> Result<PolicyPublication, PolicyError> {
+        let (revision, classifications) = {
+            let work = generation.work();
+            (
+                work.revision,
+                current_classifications(&generation.membership, &work.classifications),
+            )
+        };
+        Ok(PolicyPublication {
+            generation: generation.id,
+            revision,
+            observation: MempoolObservation::materialize(
+                &generation.membership,
+                revision,
+                classifications,
+            )?,
+        })
+    }
+
+    async fn classify_candidates(
+        &self,
+        generation: Arc<PolicyGeneration>,
+        candidates: Vec<ExpectedVariant>,
+    ) -> ClassificationBatch {
+        let fetched = self
+            .fetch_raw_transactions_concurrently(
+                candidates,
+                self.limits.rpc_lanes,
+                Some(&generation),
+            )
+            .await;
+        if !self.is_current_generation(&generation) {
+            return ClassificationBatch {
+                response_failures: fetched.response_failures,
+                batch_failures: fetched.batch_failures,
+                response_bytes: fetched.response_bytes,
+                ..ClassificationBatch::default()
+            };
+        }
+        let transactions = fetched
+            .values
+            .into_iter()
+            .filter_map(|(expected, transaction)| {
+                transaction.map(|transaction| (expected, transaction))
+            })
+            .collect::<Vec<_>>();
+        if transactions.is_empty() {
+            return ClassificationBatch {
+                response_failures: fetched.response_failures,
+                batch_failures: fetched.batch_failures,
+                response_bytes: fetched.response_bytes,
+                ..ClassificationBatch::default()
+            };
+        }
+
+        let mut outputs = transactions
+            .iter()
+            .filter_map(|(expected, transaction)| {
+                expected
+                    .txid
+                    .parse::<Txid>()
+                    .ok()
+                    .map(|txid| (txid, cached_outputs(expected, transaction)))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut scripts = BTreeMap::new();
+        let mut required = BTreeSet::new();
+        for outpoint in transactions.iter().flat_map(|(_, transaction)| {
+            transaction
+                .input
                 .iter()
-                .zip(fetched.values)
-                .filter_map(|(expected, transaction)| {
-                    transaction.map(|transaction| (expected, transaction))
-                })
-                .collect::<Vec<_>>();
-            if transactions.is_empty() {
+                .filter(|input| !input.previous_output.is_null())
+                .map(|input| input.previous_output)
+        }) {
+            if required.len() >= MAX_UNIQUE_PREVOUTS_PER_SLICE && !required.contains(&outpoint) {
                 continue;
             }
+            required.insert(outpoint);
+        }
+        let mut missing_parents = BTreeSet::new();
+        let mut missing_confirmed = Vec::new();
 
-            let resolution = self.resolve_prevouts(&transactions, &membership, deadline);
-            report.response_failures += resolution.response_failures;
-            report.batch_failures += resolution.batch_failures;
-            report.deadline_reached |= resolution.deadline_reached;
+        {
+            let work = generation.work();
+            for outpoint in required {
+                if let Some(parent) = generation.variants.get(&outpoint.txid) {
+                    let local = outputs
+                        .get(&outpoint.txid)
+                        .filter(|cached| cached.wtxid == parent.wtxid)
+                        .or_else(|| {
+                            work.outputs
+                                .get(&outpoint.txid)
+                                .filter(|cached| cached.wtxid == parent.wtxid)
+                        });
+                    if let Some(script) = local.and_then(|cached| cached.script(outpoint.vout)) {
+                        scripts.insert(outpoint, script);
+                    } else {
+                        missing_parents.insert(outpoint.txid);
+                    }
+                } else if let Some(script) = work.confirmed_scripts.get(&outpoint) {
+                    scripts.insert(outpoint, script.clone());
+                } else if missing_confirmed.len() < maximum_confirmed_prevouts_per_slice() {
+                    missing_confirmed.push(outpoint);
+                }
+            }
+        }
 
-            for (expected, transaction) in transactions {
+        let parent_variants = bounded_variants(
+            missing_parents.into_iter().filter_map(|txid| {
+                generation
+                    .variants
+                    .get(&txid)
+                    .map(|variant| ExpectedVariant {
+                        txid: txid.to_string(),
+                        wtxid: variant.wtxid.clone(),
+                        vsize: variant.vsize,
+                    })
+            }),
+            MAX_TRANSACTIONS_PER_SLICE,
+        );
+        if !self.is_current_generation(&generation) {
+            return ClassificationBatch {
+                response_failures: fetched.response_failures,
+                batch_failures: fetched.batch_failures,
+                response_bytes: fetched.response_bytes,
+                ..ClassificationBatch::default()
+            };
+        }
+        let parent_fetch = self
+            .fetch_raw_transactions_concurrently(
+                parent_variants,
+                self.limits.rpc_lanes,
+                Some(&generation),
+            )
+            .await;
+        if !self.is_current_generation(&generation) {
+            return ClassificationBatch {
+                response_failures: fetched.response_failures + parent_fetch.response_failures,
+                batch_failures: fetched.batch_failures + parent_fetch.batch_failures,
+                response_bytes: fetched.response_bytes + parent_fetch.response_bytes,
+                ..ClassificationBatch::default()
+            };
+        }
+        for (expected, transaction) in parent_fetch.values {
+            let Some(transaction) = transaction else {
+                continue;
+            };
+            let Ok(txid) = expected.txid.parse::<Txid>() else {
+                continue;
+            };
+            outputs.insert(txid, cached_outputs(&expected, &transaction));
+        }
+        for transaction in &transactions {
+            for input in &transaction.1.input {
+                let outpoint = input.previous_output;
+                if scripts.contains_key(&outpoint) {
+                    continue;
+                }
+                let Some(parent) = generation.variants.get(&outpoint.txid) else {
+                    continue;
+                };
+                if let Some(script) = outputs
+                    .get(&outpoint.txid)
+                    .filter(|cached| cached.wtxid == parent.wtxid)
+                    .and_then(|cached| cached.script(outpoint.vout))
+                {
+                    scripts.insert(outpoint, script);
+                }
+            }
+        }
+
+        let confirmed_fetch = self
+            .fetch_confirmed_prevouts_concurrently(
+                missing_confirmed,
+                self.limits.prevout_rpc_lanes(),
+                Some(&generation),
+            )
+            .await;
+        let confirmed_scripts = confirmed_fetch
+            .values
+            .into_iter()
+            .filter_map(|(outpoint, script)| script.map(|script| (outpoint, script)))
+            .collect::<BTreeMap<_, _>>();
+        scripts.extend(
+            confirmed_scripts
+                .iter()
+                .map(|(outpoint, script)| (*outpoint, script.clone())),
+        );
+
+        let classifications = transactions
+            .into_iter()
+            .map(|(expected, transaction)| {
                 let (prevouts, retryable) = if transaction.is_coinbase() {
                     (PrevoutSet::default(), false)
                 } else {
@@ -199,8 +587,7 @@ impl PolicyEnricher {
                         .input
                         .iter()
                         .map(|input| {
-                            resolution
-                                .scripts
+                            scripts
                                 .get(&input.previous_output)
                                 .map(|script| PrevoutFacts::new(script.clone(), None))
                         })
@@ -208,37 +595,163 @@ impl PolicyEnricher {
                     let retryable = facts.iter().any(Option::is_none);
                     (PrevoutSet::from_vec(facts), retryable)
                 };
-
                 let evidence = evaluate_mempool_policy(&transaction, &prevouts);
-                let classification = Arc::new(classification_from_evidence(
-                    expected.txid.clone(),
-                    expected.wtxid.clone(),
-                    evidence,
-                ));
-                self.cache().insert(
-                    expected.wtxid.clone(),
-                    CachedClassification {
-                        classification,
-                        retryable,
-                    },
-                );
-                report.newly_classified += 1;
-            }
+                CachedClassification {
+                    classification: Arc::new(classification_from_evidence(
+                        expected.txid,
+                        expected.wtxid,
+                        evidence,
+                    )),
+                    retryable,
+                }
+            })
+            .collect();
 
-            if resolution.stop_requested {
+        ClassificationBatch {
+            classifications,
+            outputs,
+            confirmed_scripts,
+            response_failures: fetched.response_failures
+                + parent_fetch.response_failures
+                + confirmed_fetch.response_failures,
+            batch_failures: fetched.batch_failures
+                + parent_fetch.batch_failures
+                + confirmed_fetch.batch_failures,
+            response_bytes: fetched.response_bytes
+                + parent_fetch.response_bytes
+                + confirmed_fetch.response_bytes,
+        }
+    }
+
+    async fn fetch_raw_transactions_concurrently(
+        &self,
+        expected: Vec<ExpectedVariant>,
+        lanes: usize,
+        generation: Option<&Arc<PolicyGeneration>>,
+    ) -> ConcurrentFetch<ExpectedVariant, Transaction> {
+        let mut remaining = expected.into_iter().peekable();
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..lanes {
+            if generation.is_some_and(|generation| !self.is_current_generation(generation)) {
                 break;
             }
+            let Some(batch) = next_raw_transaction_batch(&mut remaining) else {
+                break;
+            };
+            let enricher = self.clone();
+            tasks.spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    let fetched = enricher.fetch_raw_transactions(&batch);
+                    (batch, fetched)
+                })
+                .await
+            });
         }
 
-        self.apply_cache(entries);
-        report.classifications = self.current_classifications(entries);
-        report
+        let mut fetched = ConcurrentFetch::default();
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok((batch, Ok(values)))) => {
+                    fetched.response_failures += values.response_failures;
+                    fetched.response_bytes += values.response_bytes;
+                    fetched.values.extend(batch.into_iter().zip(values.values));
+                }
+                Ok(Ok((_, Err(error)))) => {
+                    fetched.batch_failures += 1;
+                    warn!(error = %error, "BIP-110 raw transaction batch failed");
+                }
+                Ok(Err(error)) | Err(error) => {
+                    fetched.batch_failures += 1;
+                    warn!(error = %error, "BIP-110 raw transaction task failed");
+                }
+            }
+            if generation.is_none_or(|generation| self.is_current_generation(generation))
+                && let Some(batch) = next_raw_transaction_batch(&mut remaining)
+            {
+                let enricher = self.clone();
+                tasks.spawn(async move {
+                    tokio::task::spawn_blocking(move || {
+                        let fetched = enricher.fetch_raw_transactions(&batch);
+                        (batch, fetched)
+                    })
+                    .await
+                });
+            }
+            debug_assert!(tasks.len() <= lanes);
+        }
+        fetched
+    }
+
+    async fn fetch_confirmed_prevouts_concurrently(
+        &self,
+        outpoints: Vec<OutPoint>,
+        lanes: usize,
+        generation: Option<&Arc<PolicyGeneration>>,
+    ) -> ConcurrentFetch<OutPoint, ScriptBuf> {
+        let mut remaining = outpoints.into_iter();
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..lanes {
+            if generation.is_some_and(|generation| !self.is_current_generation(generation)) {
+                break;
+            }
+            let Some(batch) = next_confirmed_prevout_batch(&mut remaining) else {
+                break;
+            };
+            let enricher = self.clone();
+            tasks.spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    let fetched = enricher.fetch_confirmed_prevouts(&batch);
+                    (batch, fetched)
+                })
+                .await
+            });
+        }
+
+        let mut fetched = ConcurrentFetch::default();
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok((batch, Ok(values)))) => {
+                    fetched.response_failures += values.response_failures;
+                    fetched.response_bytes += values.response_bytes;
+                    fetched.values.extend(batch.into_iter().zip(values.values));
+                }
+                Ok(Ok((_, Err(error)))) => {
+                    fetched.batch_failures += 1;
+                    warn!(error = %error, "BIP-110 confirmed prevout batch failed");
+                }
+                Ok(Err(error)) | Err(error) => {
+                    fetched.batch_failures += 1;
+                    warn!(error = %error, "BIP-110 confirmed prevout task failed");
+                }
+            }
+            if generation.is_none_or(|generation| self.is_current_generation(generation))
+                && let Some(batch) = next_confirmed_prevout_batch(&mut remaining)
+            {
+                let enricher = self.clone();
+                tasks.spawn(async move {
+                    tokio::task::spawn_blocking(move || {
+                        let fetched = enricher.fetch_confirmed_prevouts(&batch);
+                        (batch, fetched)
+                    })
+                    .await
+                });
+            }
+            debug_assert!(tasks.len() <= lanes);
+        }
+        fetched
     }
 
     fn fetch_raw_transactions(
         &self,
         expected: &[ExpectedVariant],
     ) -> Result<BatchFetch<Transaction>, PolicyError> {
+        let estimated_response_bytes = estimated_raw_batch_response_bytes(expected);
+        if estimated_response_bytes > MAX_BATCH_RESPONSE_BYTES {
+            return Err(PolicyError::BatchResponseEstimateTooLarge {
+                estimated: estimated_response_bytes,
+                maximum: MAX_BATCH_RESPONSE_BYTES,
+            });
+        }
         let parameters = expected
             .iter()
             .map(|variant| jsonrpc::try_arg(json!([variant.txid, 0])))
@@ -255,6 +768,7 @@ impl PolicyEnricher {
             .client
             .send_batch(&requests)
             .map_err(PolicyError::Batch)?;
+        let response_bytes = validated_decoded_response_bytes(&responses)?;
 
         let mut response_failures = 0;
         let values = expected
@@ -263,13 +777,16 @@ impl PolicyEnricher {
             .map(|(expected, response)| {
                 let transaction = response
                     .ok_or(())
-                    .and_then(valid_rpc_response)
-                    .and_then(|response| response.result::<String>().map_err(|_| ()))
-                    .and_then(|hex| {
+                    .and_then(|response| {
+                        let result = valid_rpc_result(&response)?;
+                        if result.get().len() > MAX_TRANSACTION_HEX_CHARACTERS + 2 {
+                            return Err(());
+                        }
+                        let hex = serde_json::from_str::<&str>(result.get()).map_err(|_| ())?;
                         if hex.len() > MAX_TRANSACTION_HEX_CHARACTERS {
                             return Err(());
                         }
-                        deserialize_hex::<Transaction>(&hex).map_err(|_| ())
+                        deserialize_hex::<Transaction>(hex).map_err(|_| ())
                     })
                     .and_then(|transaction| {
                         if transaction.compute_txid().to_string() != expected.txid
@@ -291,27 +808,23 @@ impl PolicyEnricher {
         Ok(BatchFetch {
             values,
             response_failures,
+            response_bytes,
         })
-    }
-
-    fn fetch_parent_transactions(
-        &self,
-        expected: &[(Txid, String)],
-    ) -> Result<BatchFetch<Transaction>, PolicyError> {
-        let variants = expected
-            .iter()
-            .map(|(txid, wtxid)| ExpectedVariant {
-                txid: txid.to_string(),
-                wtxid: wtxid.clone(),
-            })
-            .collect::<Vec<_>>();
-        self.fetch_raw_transactions(&variants)
     }
 
     fn fetch_confirmed_prevouts(
         &self,
         outpoints: &[OutPoint],
     ) -> Result<BatchFetch<ScriptBuf>, PolicyError> {
+        let estimated_response_bytes = estimated_confirmed_batch_response_bytes(outpoints.len());
+        if outpoints.len() > MAX_GETTXOUT_BATCH_SIZE
+            || estimated_response_bytes > MAX_BATCH_RESPONSE_BYTES
+        {
+            return Err(PolicyError::BatchResponseEstimateTooLarge {
+                estimated: estimated_response_bytes,
+                maximum: MAX_BATCH_RESPONSE_BYTES,
+            });
+        }
         let parameters = outpoints
             .iter()
             .map(|outpoint| {
@@ -327,17 +840,25 @@ impl PolicyEnricher {
             .client
             .send_batch(&requests)
             .map_err(PolicyError::Batch)?;
+        let response_bytes = validated_decoded_response_bytes(&responses)?;
 
         let mut response_failures = 0;
         let values = responses
             .into_iter()
             .map(|response| {
-                let script = response
-                    .ok_or(())
-                    .and_then(valid_rpc_response)
-                    .and_then(|response| response.result::<Option<GetTxOutWire>>().map_err(|_| ()))
-                    .and_then(|wire| wire.ok_or(()))
-                    .and_then(|wire| ScriptBuf::from_hex(&wire.script_pub_key.hex).map_err(|_| ()));
+                let script = response.ok_or(()).and_then(|response| {
+                    let result = valid_rpc_result(&response)?;
+                    if result.get().len() > ESTIMATED_GETTXOUT_RESPONSE_BYTES {
+                        return Err(());
+                    }
+                    let wire = serde_json::from_str::<Option<GetTxOutWire<'_>>>(result.get())
+                        .map_err(|_| ())?
+                        .ok_or(())?;
+                    if wire.script_pub_key.hex.len() > MAX_CONFIRMED_SCRIPT_HEX_CHARACTERS {
+                        return Err(());
+                    }
+                    ScriptBuf::from_hex(wire.script_pub_key.hex).map_err(|_| ())
+                });
                 match script {
                     Ok(script) => Some(script),
                     Err(()) => {
@@ -350,131 +871,23 @@ impl PolicyEnricher {
         Ok(BatchFetch {
             values,
             response_failures,
+            response_bytes,
         })
     }
 
-    fn resolve_prevouts(
-        &self,
-        transactions: &[(&ExpectedVariant, Transaction)],
-        membership: &BTreeMap<Txid, String>,
-        deadline: Instant,
-    ) -> PrevoutResolution {
-        let required = transactions
-            .iter()
-            .flat_map(|(_, transaction)| {
-                transaction
-                    .input
-                    .iter()
-                    .filter(|input| !input.previous_output.is_null())
-                    .map(|input| input.previous_output)
-            })
-            .collect::<BTreeSet<_>>();
-        let mut parent_outpoints = BTreeMap::<Txid, Vec<OutPoint>>::new();
-        let mut confirmed_outpoints = Vec::new();
-        for outpoint in required {
-            if membership.contains_key(&outpoint.txid) {
-                parent_outpoints
-                    .entry(outpoint.txid)
-                    .or_default()
-                    .push(outpoint);
-            } else {
-                confirmed_outpoints.push(outpoint);
-            }
-        }
-
-        let mut resolution = PrevoutResolution::default();
-        let expected_parents = parent_outpoints
-            .keys()
-            .filter_map(|txid| membership.get(txid).map(|wtxid| (*txid, wtxid.clone())))
-            .collect::<Vec<_>>();
-        for parent_batch in expected_parents.chunks(RAW_TRANSACTION_BATCH_SIZE) {
-            if Instant::now() >= deadline {
-                resolution.deadline_reached = true;
-                resolution.stop_requested = true;
-                return resolution;
-            }
-            let fetched = match self.fetch_parent_transactions(parent_batch) {
-                Ok(fetched) => fetched,
-                Err(error) => {
-                    resolution.batch_failures += 1;
-                    resolution.stop_requested = true;
-                    warn!(error = %error, "BIP-110 mempool parent batch failed");
-                    return resolution;
-                }
-            };
-            resolution.response_failures += fetched.response_failures;
-            for ((parent_txid, _), transaction) in parent_batch.iter().zip(fetched.values) {
-                let Some(transaction) = transaction else {
-                    continue;
-                };
-                for outpoint in &parent_outpoints[parent_txid] {
-                    if let Some(output) = transaction.output.get(outpoint.vout as usize) {
-                        resolution
-                            .scripts
-                            .insert(*outpoint, output.script_pubkey.clone());
-                    } else {
-                        resolution.response_failures += 1;
-                    }
-                }
-            }
-        }
-
-        for outpoint_batch in confirmed_outpoints.chunks(GETTXOUT_BATCH_SIZE) {
-            if Instant::now() >= deadline {
-                resolution.deadline_reached = true;
-                resolution.stop_requested = true;
-                return resolution;
-            }
-            let fetched = match self.fetch_confirmed_prevouts(outpoint_batch) {
-                Ok(fetched) => fetched,
-                Err(error) => {
-                    resolution.batch_failures += 1;
-                    resolution.stop_requested = true;
-                    warn!(error = %error, "BIP-110 confirmed prevout batch failed");
-                    return resolution;
-                }
-            };
-            resolution.response_failures += fetched.response_failures;
-            for (outpoint, script) in outpoint_batch.iter().zip(fetched.values) {
-                if let Some(script) = script {
-                    resolution.scripts.insert(*outpoint, script);
-                }
-            }
-        }
-        resolution
+    fn current_generation(&self) -> Option<Arc<PolicyGeneration>> {
+        self.coordinator().current.clone()
     }
 
-    fn apply_cache(&self, entries: &mut [MempoolEntry]) {
-        let cache = self.cache();
-        for entry in entries {
-            entry.bip110 = cache
-                .get(&entry.wtxid)
-                .filter(|cached| cached.classification.txid == entry.txid)
-                .map(|cached| cached.classification.assessment.clone());
-        }
+    fn is_current_generation(&self, generation: &Arc<PolicyGeneration>) -> bool {
+        self.coordinator()
+            .current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, generation))
     }
 
-    fn current_classifications(&self, entries: &[MempoolEntry]) -> TransactionClassifications {
-        let cache = self.cache();
-        entries
-            .iter()
-            .filter_map(|entry| {
-                cache
-                    .get(&entry.wtxid)
-                    .filter(|cached| cached.classification.txid == entry.txid)
-                    .map(|cached| (entry.txid.clone(), Arc::clone(&cached.classification)))
-            })
-            .collect()
-    }
-
-    fn cache(&self) -> MutexGuard<'_, BTreeMap<String, CachedClassification>> {
-        self.cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn candidate_cursor(&self) -> MutexGuard<'_, Option<String>> {
-        self.candidate_cursor
+    fn coordinator(&self) -> MutexGuard<'_, PolicyCoordinator> {
+        self.coordinator
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -482,17 +895,68 @@ impl PolicyEnricher {
 
 #[derive(Debug)]
 pub struct PolicyEnrichmentReport {
+    pub generation: u64,
     pub attempted: usize,
     pub newly_classified: usize,
     pub response_failures: usize,
     pub batch_failures: usize,
-    pub deadline_reached: bool,
+    pub response_bytes: usize,
+    pub classified: usize,
+    pub remaining: usize,
+    pub complete: bool,
+    pub stale: bool,
+    pub(crate) publication: Option<PolicyPublication>,
     pub classifications: TransactionClassifications,
+}
+
+impl PolicyEnrichmentReport {
+    fn waiting() -> Self {
+        Self {
+            generation: 0,
+            attempted: 0,
+            newly_classified: 0,
+            response_failures: 0,
+            batch_failures: 0,
+            response_bytes: 0,
+            classified: 0,
+            remaining: 0,
+            complete: true,
+            stale: false,
+            publication: None,
+            classifications: BTreeMap::new(),
+        }
+    }
+
+    fn stale(generation: u64) -> Self {
+        Self {
+            generation,
+            attempted: 0,
+            newly_classified: 0,
+            response_failures: 0,
+            batch_failures: 0,
+            response_bytes: 0,
+            classified: 0,
+            remaining: 0,
+            complete: false,
+            stale: true,
+            publication: None,
+            classifications: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PolicyPublication {
+    pub(crate) generation: u64,
+    pub(crate) revision: u64,
+    pub(crate) observation: MempoolObservation,
 }
 
 #[derive(Debug, Error)]
 pub enum PolicyError {
-    #[error("policy enrichment limits must be greater than zero")]
+    #[error(
+        "policy limits require 1..={MAX_RPC_LANES} RPC lanes, a 1..={MAX_AUXILIARY_CACHE_BYTES}-byte auxiliary cache, and 1..={MAX_TRANSACTIONS_PER_SLICE} transactions per slice"
+    )]
     InvalidLimits,
     #[error("failed to create policy RPC client: {0}")]
     ClientInitialization(#[source] jsonrpc::minreq_http::Error),
@@ -500,12 +964,25 @@ pub enum PolicyError {
     EncodeParameters(#[source] serde_json::Error),
     #[error("policy RPC batch failed: {0}")]
     Batch(#[source] jsonrpc::Error),
+    #[error("policy RPC batch response used {actual} bytes, exceeding the {maximum}-byte limit")]
+    BatchResponseTooLarge { actual: usize, maximum: usize },
+    #[error(
+        "policy RPC batch response is estimated at {estimated} bytes, exceeding the {maximum}-byte limit"
+    )]
+    BatchResponseEstimateTooLarge { estimated: usize, maximum: usize },
+    #[error("membership contained invalid txid {0:?}")]
+    InvalidMembershipTxid(String),
+    #[error("policy generation counter overflowed")]
+    GenerationOverflow,
+    #[error("policy publication was invalid: {0}")]
+    InvalidObservation(#[from] ModelError),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ExpectedVariant {
     txid: String,
     wtxid: String,
+    vsize: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -518,26 +995,307 @@ struct CachedClassification {
 struct BatchFetch<T> {
     values: Vec<Option<T>>,
     response_failures: usize,
+    response_bytes: usize,
+}
+
+#[derive(Debug)]
+struct ConcurrentFetch<K, V> {
+    values: Vec<(K, Option<V>)>,
+    response_failures: usize,
+    batch_failures: usize,
+    response_bytes: usize,
+}
+
+impl<K, V> Default for ConcurrentFetch<K, V> {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            response_failures: 0,
+            batch_failures: 0,
+            response_bytes: 0,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
-struct PrevoutResolution {
-    scripts: BTreeMap<OutPoint, ScriptBuf>,
+struct PolicyCoordinator {
+    next_generation: u64,
+    current: Option<Arc<PolicyGeneration>>,
+}
+
+#[derive(Debug)]
+struct PolicyGeneration {
+    id: u64,
+    membership: Arc<MempoolSnapshot>,
+    variants: BTreeMap<Txid, CurrentVariant>,
+    work: Mutex<GenerationWork>,
+}
+
+impl PolicyGeneration {
+    fn work(&self) -> MutexGuard<'_, GenerationWork> {
+        self.work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CurrentVariant {
+    wtxid: String,
+    vsize: u64,
+}
+
+#[derive(Debug, Default)]
+struct GenerationWork {
+    classifications: BTreeMap<String, CachedClassification>,
+    outputs: BTreeMap<Txid, CachedOutputs>,
+    confirmed_scripts: BTreeMap<OutPoint, ScriptBuf>,
+    attempted: BTreeSet<String>,
+    auxiliary_cache_bytes: usize,
+    revision: u64,
+}
+
+#[derive(Clone, Debug)]
+struct CachedOutputs {
+    wtxid: String,
+    scripts: Arc<Vec<ScriptBuf>>,
+    estimated_bytes: usize,
+}
+
+impl CachedOutputs {
+    fn script(&self, vout: u32) -> Option<ScriptBuf> {
+        usize::try_from(vout)
+            .ok()
+            .and_then(|index| self.scripts.get(index))
+            .cloned()
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClassificationBatch {
+    classifications: Vec<CachedClassification>,
+    outputs: BTreeMap<Txid, CachedOutputs>,
+    confirmed_scripts: BTreeMap<OutPoint, ScriptBuf>,
     response_failures: usize,
     batch_failures: usize,
-    deadline_reached: bool,
-    stop_requested: bool,
+    response_bytes: usize,
 }
 
 #[derive(Debug, Deserialize)]
-struct GetTxOutWire {
-    #[serde(rename = "scriptPubKey")]
-    script_pub_key: ScriptPubKeyWire,
+struct GetTxOutWire<'a> {
+    #[serde(borrow, rename = "scriptPubKey")]
+    script_pub_key: ScriptPubKeyWire<'a>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ScriptPubKeyWire {
-    hex: String,
+struct ScriptPubKeyWire<'a> {
+    hex: &'a str,
+}
+
+fn current_classifications(
+    membership: &MempoolSnapshot,
+    cache: &BTreeMap<String, CachedClassification>,
+) -> TransactionClassifications {
+    membership
+        .transactions
+        .iter()
+        .filter_map(|entry| {
+            cache
+                .get(&entry.wtxid)
+                .filter(|cached| cached.classification.txid == entry.txid)
+                .map(|cached| (entry.txid.clone(), Arc::clone(&cached.classification)))
+        })
+        .collect()
+}
+
+fn cached_outputs(expected: &ExpectedVariant, transaction: &Transaction) -> CachedOutputs {
+    let scripts = transaction
+        .output
+        .iter()
+        .map(|output| output.script_pubkey.clone())
+        .collect::<Vec<_>>();
+    let estimated_bytes = scripts
+        .iter()
+        .fold(ESTIMATED_JSON_BYTES_PER_RESPONSE, |total, script| {
+            total.saturating_add(script.len())
+        });
+    CachedOutputs {
+        wtxid: expected.wtxid.clone(),
+        scripts: Arc::new(scripts),
+        estimated_bytes,
+    }
+}
+
+fn insert_outputs(work: &mut GenerationWork, txid: Txid, outputs: CachedOutputs, maximum: usize) {
+    let replaced_bytes = work
+        .outputs
+        .get(&txid)
+        .map_or(0, |existing| existing.estimated_bytes);
+    let base = work.auxiliary_cache_bytes.saturating_sub(replaced_bytes);
+    let Some(new_total) = base.checked_add(outputs.estimated_bytes) else {
+        return;
+    };
+    if new_total > maximum {
+        return;
+    }
+    work.auxiliary_cache_bytes = new_total;
+    work.outputs.insert(txid, outputs);
+}
+
+fn insert_confirmed_script(
+    work: &mut GenerationWork,
+    outpoint: OutPoint,
+    script: ScriptBuf,
+    maximum: usize,
+) {
+    if work.confirmed_scripts.contains_key(&outpoint) {
+        return;
+    }
+    let estimated_bytes = script
+        .len()
+        .saturating_add(ESTIMATED_JSON_BYTES_PER_RESPONSE);
+    let Some(new_total) = work.auxiliary_cache_bytes.checked_add(estimated_bytes) else {
+        return;
+    };
+    if new_total > maximum {
+        return;
+    }
+    work.auxiliary_cache_bytes = new_total;
+    work.confirmed_scripts.insert(outpoint, script);
+}
+
+fn bounded_variants(
+    variants: impl IntoIterator<Item = ExpectedVariant>,
+    maximum_entries: usize,
+) -> Vec<ExpectedVariant> {
+    let mut bounded = Vec::with_capacity(maximum_entries.min(MAX_TRANSACTIONS_PER_SLICE));
+    let mut estimated_bytes = 0_usize;
+    for variant in variants {
+        if bounded.len() >= maximum_entries {
+            break;
+        }
+        let variant_bytes = estimated_raw_response_bytes(&variant);
+        if !bounded.is_empty()
+            && estimated_bytes.saturating_add(variant_bytes) > MAX_RAW_RESPONSE_BYTES_PER_SLICE
+        {
+            break;
+        }
+        estimated_bytes = estimated_bytes.saturating_add(variant_bytes);
+        bounded.push(variant);
+    }
+    bounded
+}
+
+#[cfg(test)]
+fn raw_transaction_batches(expected: Vec<ExpectedVariant>) -> Vec<Vec<ExpectedVariant>> {
+    let mut remaining = expected.into_iter().peekable();
+    std::iter::from_fn(|| next_raw_transaction_batch(&mut remaining)).collect()
+}
+
+fn next_raw_transaction_batch(
+    remaining: &mut std::iter::Peekable<std::vec::IntoIter<ExpectedVariant>>,
+) -> Option<Vec<ExpectedVariant>> {
+    let mut batch = Vec::with_capacity(RAW_TRANSACTION_BATCH_SIZE);
+    let mut estimated_bytes = 0_usize;
+    while batch.len() < RAW_TRANSACTION_BATCH_SIZE {
+        let Some(next) = remaining.peek() else {
+            break;
+        };
+        let next_bytes = estimated_raw_response_bytes(next);
+        if !batch.is_empty()
+            && estimated_bytes.saturating_add(next_bytes) > MAX_BATCH_RESPONSE_BYTES
+        {
+            break;
+        }
+        estimated_bytes = estimated_bytes.saturating_add(next_bytes);
+        batch.push(remaining.next().expect("peeked raw transaction variant"));
+    }
+    (!batch.is_empty()).then_some(batch)
+}
+
+fn next_confirmed_prevout_batch(
+    remaining: &mut std::vec::IntoIter<OutPoint>,
+) -> Option<Vec<OutPoint>> {
+    let maximum_count = maximum_confirmed_prevouts_per_batch();
+    let batch = remaining.by_ref().take(maximum_count).collect::<Vec<_>>();
+    (!batch.is_empty()).then_some(batch)
+}
+
+fn maximum_confirmed_prevouts_per_batch() -> usize {
+    MAX_GETTXOUT_BATCH_SIZE.min(
+        MAX_BATCH_RESPONSE_BYTES
+            .checked_div(ESTIMATED_GETTXOUT_RESPONSE_BYTES)
+            .unwrap_or(0),
+    )
+}
+
+fn maximum_confirmed_prevouts_per_slice() -> usize {
+    MAX_UNIQUE_PREVOUTS_PER_SLICE.min(
+        MAX_CONFIRMED_RESPONSE_BYTES_PER_SLICE
+            .checked_div(ESTIMATED_GETTXOUT_RESPONSE_BYTES)
+            .unwrap_or(0),
+    )
+}
+
+fn estimated_raw_response_bytes(expected: &ExpectedVariant) -> usize {
+    usize::try_from(expected.vsize)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(8)
+        .saturating_add(ESTIMATED_JSON_BYTES_PER_RESPONSE)
+}
+
+fn estimated_raw_batch_response_bytes(expected: &[ExpectedVariant]) -> usize {
+    expected.iter().fold(0_usize, |total, variant| {
+        total.saturating_add(estimated_raw_response_bytes(variant))
+    })
+}
+
+fn estimated_confirmed_batch_response_bytes(outpoint_count: usize) -> usize {
+    outpoint_count.saturating_mul(ESTIMATED_GETTXOUT_RESPONSE_BYTES)
+}
+
+fn validated_decoded_response_bytes(
+    responses: &[Option<jsonrpc::Response>],
+) -> Result<usize, PolicyError> {
+    // jsonrpc's minreq transport has already buffered and parsed the HTTP body
+    // here. It exposes no receive-size setting, so this guard prevents further
+    // per-result decoding while the process memory cgroup remains the hard
+    // transient bound.
+    validated_decoded_response_bytes_with_limit(responses, MAX_BATCH_RESPONSE_BYTES)
+}
+
+fn validated_decoded_response_bytes_with_limit(
+    responses: &[Option<jsonrpc::Response>],
+    maximum: usize,
+) -> Result<usize, PolicyError> {
+    let mut counter = ResponseByteCounter(2);
+    for response in responses.iter().flatten() {
+        if serde_json::to_writer(&mut counter, response).is_err() {
+            counter.0 = usize::MAX;
+            break;
+        }
+        counter.0 = counter.0.saturating_add(1);
+    }
+    if counter.0 > maximum {
+        return Err(PolicyError::BatchResponseTooLarge {
+            actual: counter.0,
+            maximum,
+        });
+    }
+    Ok(counter.0)
+}
+
+struct ResponseByteCounter(usize);
+
+impl std::io::Write for ResponseByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buffer.len());
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn classification_from_evidence(
@@ -620,13 +1378,14 @@ fn public_rule_id(rule: RuleId) -> Bip110RuleId {
     }
 }
 
-fn valid_rpc_response(response: jsonrpc::Response) -> Result<jsonrpc::Response, ()> {
+fn valid_rpc_result(response: &jsonrpc::Response) -> Result<&serde_json::value::RawValue, ()> {
     if response
         .jsonrpc
         .as_deref()
         .is_none_or(|version| version == "2.0")
+        && response.error.is_none()
     {
-        Ok(response)
+        response.result.as_deref().ok_or(())
     } else {
         Err(())
     }
@@ -637,6 +1396,7 @@ mod tests {
     use std::collections::{BTreeMap, VecDeque};
     use std::net::SocketAddr;
     use std::sync::Arc as Shared;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::extract::State;
     use axum::routing::post;
@@ -653,13 +1413,20 @@ mod tests {
 
     use super::*;
 
-    type FixtureState = Shared<AsyncMutex<RpcFixture>>;
+    #[derive(Debug)]
+    struct FixtureState {
+        fixture: AsyncMutex<RpcFixture>,
+        active_requests: AtomicUsize,
+        max_active_requests: AtomicUsize,
+        delay: Duration,
+    }
 
     #[derive(Debug)]
     struct RpcFixture {
         calls: Vec<(String, Value)>,
         raw_transactions: BTreeMap<String, String>,
         gettxout_results: VecDeque<Value>,
+        delay: Duration,
     }
 
     impl RpcFixture {
@@ -677,11 +1444,17 @@ mod tests {
                 calls: Vec::new(),
                 raw_transactions,
                 gettxout_results: VecDeque::new(),
+                delay: Duration::ZERO,
             }
         }
 
         fn with_gettxout_results(mut self, results: impl IntoIterator<Item = Value>) -> Self {
             self.gettxout_results = results.into_iter().collect();
+            self
+        }
+
+        fn with_delay(mut self, delay: Duration) -> Self {
+            self.delay = delay;
             self
         }
     }
@@ -708,12 +1481,17 @@ mod tests {
     }
 
     async fn rpc_fixture(
-        State(state): State<FixtureState>,
+        State(state): State<Shared<FixtureState>>,
         Json(request): Json<Value>,
     ) -> Json<Value> {
         let requests = request.as_array().expect("batch request");
         let mut responses = Vec::with_capacity(requests.len());
-        let mut fixture = state.lock().await;
+        let active = state.active_requests.fetch_add(1, Ordering::SeqCst) + 1;
+        state
+            .max_active_requests
+            .fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(state.delay).await;
+        let mut fixture = state.fixture.lock().await;
         for request in requests {
             let method = request["method"].as_str().expect("method").to_owned();
             let params = request["params"].clone();
@@ -742,6 +1520,7 @@ mod tests {
                 "id": request["id"]
             }));
         }
+        state.active_requests.fetch_sub(1, Ordering::SeqCst);
         Json(Value::Array(responses))
     }
 
@@ -753,8 +1532,16 @@ mod tests {
         })
     }
 
-    async fn start_rpc_fixture(fixture: RpcFixture) -> (FixtureState, SocketAddr, JoinHandle<()>) {
-        let state = Shared::new(AsyncMutex::new(fixture));
+    async fn start_rpc_fixture(
+        fixture: RpcFixture,
+    ) -> (Shared<FixtureState>, SocketAddr, JoinHandle<()>) {
+        let delay = fixture.delay;
+        let state = Shared::new(FixtureState {
+            fixture: AsyncMutex::new(fixture),
+            active_requests: AtomicUsize::new(0),
+            max_active_requests: AtomicUsize::new(0),
+            delay,
+        });
         let application = Router::new()
             .route("/", post(rpc_fixture))
             .with_state(Shared::clone(&state));
@@ -773,7 +1560,7 @@ mod tests {
     fn test_enricher(address: SocketAddr) -> PolicyEnricher {
         test_enricher_with_limits(
             address,
-            PolicyLimits::new(10, Duration::from_secs(5)).expect("limits"),
+            PolicyLimits::new(10, 4, 16 * 1024 * 1024).expect("limits"),
         )
     }
 
@@ -856,7 +1643,10 @@ mod tests {
         assert_eq!(second.1.newly_classified, 0);
 
         enricher
-            .cache()
+            .current_generation()
+            .expect("current generation")
+            .work()
+            .classifications
             .get_mut(&transaction.compute_wtxid().to_string())
             .expect("cached classification")
             .retryable = true;
@@ -874,7 +1664,7 @@ mod tests {
 
         assert_eq!(third.1.attempted, 1);
         assert_eq!(third.1.newly_classified, 1);
-        let fixture = fixture.lock().await;
+        let fixture = fixture.fixture.lock().await;
         assert_eq!(
             fixture
                 .calls
@@ -931,9 +1721,11 @@ mod tests {
             ));
         }
         {
-            let cache = enricher.cache();
+            let generation = enricher.current_generation().expect("current generation");
+            let cache = generation.work();
             assert!(
                 cache
+                    .classifications
                     .get(&wtxid)
                     .expect("retryable classification")
                     .retryable
@@ -966,15 +1758,17 @@ mod tests {
                 .all(|detail| detail.verdict == Bip110RuleVerdict::Pass)
         );
         {
-            let cache = enricher.cache();
+            let generation = enricher.current_generation().expect("current generation");
+            let cache = generation.work();
             assert!(
                 !cache
+                    .classifications
                     .get(&wtxid)
                     .expect("complete classification")
                     .retryable
             );
         }
-        let fixture = fixture.lock().await;
+        let fixture = fixture.fixture.lock().await;
         assert_eq!(
             fixture
                 .calls
@@ -1025,7 +1819,7 @@ mod tests {
                 .is_some_and(|assessment| assessment.status == Bip110Status::Compatible)
         }));
 
-        let fixture = fixture.lock().await;
+        let fixture = fixture.fixture.lock().await;
         let parent_txid = parent_txid.to_string();
         assert_eq!(
             fixture
@@ -1035,8 +1829,8 @@ mod tests {
                     method == "getrawtransaction" && params[0] == parent_txid
                 })
                 .count(),
-            2,
-            "the parent is fetched once as a member and once to resolve the child prevout"
+            1,
+            "the child's parent output is reused from the same raw batch"
         );
         assert_eq!(
             fixture
@@ -1056,6 +1850,112 @@ mod tests {
         assert_eq!(gettxout_calls.len(), 1);
         assert_eq!(gettxout_calls[0].1[0], external_txid.to_string());
         assert_eq!(gettxout_calls[0].1[2], Value::Bool(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_parent_outputs_are_reused_across_membership_snapshots() {
+        let parent = transaction();
+        let parent_txid = parent.compute_txid();
+        let mut child = transaction();
+        child.input[0].previous_output = OutPoint {
+            txid: parent_txid,
+            vout: 0,
+        };
+        child.input[0].witness = Witness::from_slice(&[vec![3], vec![4]]);
+        let child_txid = child.compute_txid().to_string();
+        let (fixture, address, server) =
+            start_rpc_fixture(RpcFixture::new([parent.clone(), child.clone()])).await;
+        let enricher = test_enricher(address);
+
+        let first = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            1,
+            crate::model::ChainTip {
+                height: 1,
+                hash: "00".repeat(32),
+            },
+            vec![mempool_entry(&parent)],
+        )
+        .expect("first membership");
+        enricher.install_snapshot(first).expect("first generation");
+        enricher.classify_next().await.expect("parent slice");
+
+        let mut entries = vec![mempool_entry(&parent), mempool_entry(&child)];
+        entries.sort_unstable_by(|left, right| left.txid.cmp(&right.txid));
+        let second = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            2,
+            crate::model::ChainTip {
+                height: 2,
+                hash: "11".repeat(32),
+            },
+            entries,
+        )
+        .expect("second membership");
+        let immediate = enricher
+            .install_snapshot(second)
+            .expect("second generation");
+        assert_eq!(
+            immediate
+                .observation
+                .snapshot
+                .bip110_summary
+                .compatible_count,
+            1
+        );
+        let report = enricher.classify_next().await.expect("child slice");
+        assert_eq!(
+            report.classifications[&child_txid].assessment.status,
+            Bip110Status::Compatible
+        );
+
+        let empty = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            3,
+            crate::model::ChainTip {
+                height: 3,
+                hash: "22".repeat(32),
+            },
+            Vec::new(),
+        )
+        .expect("empty membership");
+        enricher.install_snapshot(empty).expect("empty generation");
+        let generation = enricher.current_generation().expect("current generation");
+        {
+            let work = generation.work();
+            assert!(work.classifications.is_empty());
+            assert!(work.outputs.is_empty());
+            assert!(work.confirmed_scripts.is_empty());
+            assert!(work.attempted.is_empty());
+            assert_eq!(work.auxiliary_cache_bytes, 0);
+        }
+        server.abort();
+
+        let fixture = fixture.fixture.lock().await;
+        assert_eq!(
+            fixture
+                .calls
+                .iter()
+                .filter(|(method, params)| {
+                    method == "getrawtransaction" && params[0] == parent_txid.to_string()
+                })
+                .count(),
+            1,
+            "the current parent is not fetched again for the child"
+        );
+        assert_eq!(
+            fixture
+                .calls
+                .iter()
+                .filter(|(method, params)| {
+                    method == "getrawtransaction" && params[0] == child_txid
+                })
+                .count(),
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1079,6 +1979,7 @@ mod tests {
         );
 
         fixture
+            .fixture
             .lock()
             .await
             .raw_transactions
@@ -1097,11 +1998,13 @@ mod tests {
                 .map(|assessment| assessment.status),
             Some(Bip110Status::Compatible)
         );
-        let cache = enricher.cache();
-        assert_eq!(cache.len(), 1);
-        assert!(!cache.contains_key(&first_wtxid));
+        let generation = enricher.current_generation().expect("current generation");
+        let cache = generation.work();
+        assert_eq!(cache.classifications.len(), 1);
+        assert!(!cache.classifications.contains_key(&first_wtxid));
         assert_eq!(
             cache
+                .classifications
                 .get(&second_wtxid)
                 .expect("replacement witness variant")
                 .classification
@@ -1111,7 +2014,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn round_robin_prevents_retryable_entries_from_starving_fresh_members() {
+    async fn fresh_entries_are_classified_before_retryable_entries() {
         let first_variant = transaction();
         let mut second_variant = transaction();
         second_variant.output[0].value = Amount::from_sat(501);
@@ -1127,7 +2030,7 @@ mod tests {
         let (fixture, address, server) = start_rpc_fixture(rpc).await;
         let enricher = test_enricher_with_limits(
             address,
-            PolicyLimits::new(1, Duration::from_secs(5)).expect("limits"),
+            PolicyLimits::new(1, 4, 16 * 1024 * 1024).expect("limits"),
         );
 
         let (entries, first) = enrich_entries(&enricher, entries).await;
@@ -1148,9 +2051,9 @@ mod tests {
         );
         assert!(
             second.classifications.contains_key(&first_txid),
-            "the retryable cached result remains visible while the cursor advances"
+            "the retryable cached result remains visible while fresh work runs first"
         );
-        let fixture = fixture.lock().await;
+        let fixture = fixture.fixture.lock().await;
         let fetched_txids = fixture
             .calls
             .iter()
@@ -1160,11 +2063,317 @@ mod tests {
         assert_eq!(fetched_txids, [first_txid, second_txid]);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auxiliary_cache_never_exceeds_its_admission_limit() {
+        let transaction = transaction();
+        let (fixture, address, server) =
+            start_rpc_fixture(RpcFixture::new([transaction.clone()])).await;
+        let enricher = test_enricher_with_limits(
+            address,
+            PolicyLimits::new(1, 1, 1).expect("tiny cache limit"),
+        );
+        let membership = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            1,
+            crate::model::ChainTip {
+                height: 1,
+                hash: "00".repeat(32),
+            },
+            vec![mempool_entry(&transaction)],
+        )
+        .expect("membership");
+        enricher.install_snapshot(membership).expect("generation");
+
+        let report = enricher.classify_next().await.expect("slice");
+        server.abort();
+
+        assert_eq!(report.newly_classified, 1);
+        let generation = enricher.current_generation().expect("current generation");
+        {
+            let work = generation.work();
+            assert_eq!(work.classifications.len(), 1);
+            assert!(work.outputs.is_empty());
+            assert!(work.confirmed_scripts.is_empty());
+            assert!(work.auxiliary_cache_bytes <= 1);
+        }
+        assert!(!fixture.fixture.lock().await.calls.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn late_results_from_a_replaced_generation_are_discarded() {
+        let transaction = transaction();
+        let (fixture, address, server) = start_rpc_fixture(
+            RpcFixture::new([transaction.clone()]).with_delay(Duration::from_millis(50)),
+        )
+        .await;
+        let enricher = test_enricher(address);
+        let membership = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            1,
+            crate::model::ChainTip {
+                height: 1,
+                hash: "00".repeat(32),
+            },
+            vec![mempool_entry(&transaction)],
+        )
+        .expect("membership");
+        enricher
+            .install_snapshot(membership)
+            .expect("first generation");
+
+        let task = tokio::spawn({
+            let enricher = enricher.clone();
+            async move { enricher.classify_next().await.expect("stale slice") }
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let replacement = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            2,
+            crate::model::ChainTip {
+                height: 2,
+                hash: "11".repeat(32),
+            },
+            Vec::new(),
+        )
+        .expect("replacement membership");
+        let current = enricher
+            .install_snapshot(replacement)
+            .expect("replacement generation");
+        let stale = task.await.expect("classification task");
+        server.abort();
+
+        assert!(stale.stale);
+        assert!(stale.publication.is_none());
+        assert!(current.observation.classifications.is_empty());
+        let generation = enricher.current_generation().expect("current generation");
+        let work = generation.work();
+        assert!(work.classifications.is_empty());
+        assert!(work.outputs.is_empty());
+        assert!(
+            fixture.max_active_requests.load(Ordering::SeqCst) >= 1,
+            "the stale request reached the fixture"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_batches_use_multiple_but_bounded_rpc_lanes() {
+        let transactions = (0..1_300_u64)
+            .map(|index| {
+                let mut transaction = transaction();
+                transaction.output[0].value = Amount::from_sat(500 + index);
+                transaction
+            })
+            .collect::<Vec<_>>();
+        let entries = transactions.iter().map(mempool_entry).collect::<Vec<_>>();
+        let (fixture, address, server) =
+            start_rpc_fixture(RpcFixture::new(transactions).with_delay(Duration::from_millis(30)))
+                .await;
+        let enricher = test_enricher_with_limits(
+            address,
+            PolicyLimits::new(1_300, 4, 16 * 1024 * 1024).expect("limits"),
+        );
+        let membership = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            1,
+            crate::model::ChainTip {
+                height: 1,
+                hash: "00".repeat(32),
+            },
+            {
+                let mut entries = entries;
+                entries.sort_unstable_by(|left, right| left.txid.cmp(&right.txid));
+                entries
+            },
+        )
+        .expect("membership");
+        enricher.install_snapshot(membership).expect("generation");
+
+        let report = enricher.classify_next().await.expect("parallel slice");
+        server.abort();
+
+        assert_eq!(report.attempted, 1_300);
+        assert_eq!(report.newly_classified, 1_300);
+        assert_eq!(report.batch_failures, 0);
+        let maximum = fixture.max_active_requests.load(Ordering::SeqCst);
+        assert_eq!(maximum, 4, "all configured lanes should be usable");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn confirmed_batches_use_multiple_but_bounded_rpc_lanes() {
+        let outpoint_count = maximum_confirmed_prevouts_per_batch() * 3;
+        let (fixture, address, server) =
+            start_rpc_fixture(RpcFixture::new([]).with_delay(Duration::from_millis(30))).await;
+        let enricher = test_enricher(address);
+
+        let fetched = enricher
+            .fetch_confirmed_prevouts_concurrently(vec![OutPoint::null(); outpoint_count], 2, None)
+            .await;
+        server.abort();
+
+        assert_eq!(fetched.values.len(), outpoint_count);
+        assert_eq!(fetched.response_failures, 0);
+        assert_eq!(fetched.batch_failures, 0);
+        assert_eq!(fixture.max_active_requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn raw_batches_obey_count_and_estimated_response_bounds() {
+        let variants = (0..RAW_TRANSACTION_BATCH_SIZE + 1)
+            .map(|index| ExpectedVariant {
+                txid: format!("{index:064x}"),
+                wtxid: format!("{index:064x}"),
+                vsize: 100,
+            })
+            .collect();
+        let batches = raw_transaction_batches(variants);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), RAW_TRANSACTION_BATCH_SIZE);
+        assert_eq!(batches[1].len(), 1);
+
+        let large = (0..2)
+            .map(|index| ExpectedVariant {
+                txid: format!("{index:064x}"),
+                wtxid: format!("{index:064x}"),
+                vsize: u64::try_from(MAX_BATCH_RESPONSE_BYTES / 8).expect("vsize"),
+            })
+            .collect();
+        assert_eq!(raw_transaction_batches(large).len(), 2);
+    }
+
+    #[test]
+    fn slice_candidates_obey_the_aggregate_raw_response_estimate() {
+        let variants = (0..40)
+            .map(|index| ExpectedVariant {
+                txid: format!("{index:064x}"),
+                wtxid: format!("{index:064x}"),
+                vsize: 1024 * 1024,
+            })
+            .collect::<Vec<_>>();
+        let bounded = bounded_variants(variants.clone(), MAX_TRANSACTIONS_PER_SLICE);
+        let estimated = estimated_raw_batch_response_bytes(&bounded);
+
+        assert_eq!(bounded.len(), 31);
+        assert!(estimated <= MAX_RAW_RESPONSE_BYTES_PER_SLICE);
+        assert!(
+            estimated.saturating_add(estimated_raw_response_bytes(&variants[bounded.len()]))
+                > MAX_RAW_RESPONSE_BYTES_PER_SLICE
+        );
+    }
+
+    #[test]
+    fn confirmed_prevout_batches_obey_estimated_response_bounds() {
+        let maximum = maximum_confirmed_prevouts_per_batch();
+        assert!(maximum > 0);
+        assert!(maximum < MAX_GETTXOUT_BATCH_SIZE);
+
+        let mut remaining = vec![OutPoint::null(); maximum * 2 + 1].into_iter();
+        let batches =
+            std::iter::from_fn(|| next_confirmed_prevout_batch(&mut remaining)).collect::<Vec<_>>();
+
+        assert_eq!(
+            batches.iter().map(Vec::len).collect::<Vec<_>>(),
+            [maximum, maximum, 1]
+        );
+        assert!(batches.iter().all(|batch| {
+            estimated_confirmed_batch_response_bytes(batch.len()) <= MAX_BATCH_RESPONSE_BYTES
+        }));
+        let slice_maximum = maximum_confirmed_prevouts_per_slice();
+        assert!(slice_maximum >= maximum);
+        assert!(
+            estimated_confirmed_batch_response_bytes(slice_maximum)
+                <= MAX_CONFIRMED_RESPONSE_BYTES_PER_SLICE
+        );
+        assert!(
+            estimated_confirmed_batch_response_bytes(slice_maximum + 1)
+                > MAX_CONFIRMED_RESPONSE_BYTES_PER_SLICE
+        );
+    }
+
+    #[test]
+    fn oversized_confirmed_prevout_batch_is_rejected_before_dispatch() {
+        let enricher = PolicyEnricher::new(
+            "http://127.0.0.1:1/",
+            "atlas".to_owned(),
+            "secret".to_owned(),
+            PolicyLimits::new(1, 1, 1).expect("limits"),
+        )
+        .expect("enricher");
+        let outpoints =
+            vec![OutPoint::null(); maximum_confirmed_prevouts_per_batch().saturating_add(1)];
+
+        let error = enricher
+            .fetch_confirmed_prevouts(&outpoints)
+            .expect_err("oversized estimate");
+
+        assert!(matches!(
+            error,
+            PolicyError::BatchResponseEstimateTooLarge {
+                maximum: MAX_BATCH_RESPONSE_BYTES,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oversized_confirmed_script_is_rejected_after_bounded_decode() {
+        let oversized_hex = "00".repeat(MAX_CONFIRMED_SCRIPT_HEX_CHARACTERS / 2 + 1);
+        let rpc = RpcFixture::new([]).with_gettxout_results([json!({
+            "scriptPubKey": {
+                "hex": oversized_hex
+            }
+        })]);
+        let (fixture, address, server) = start_rpc_fixture(rpc).await;
+        let enricher = test_enricher(address);
+        let fetch = tokio::task::spawn_blocking(move || {
+            enricher.fetch_confirmed_prevouts(&[OutPoint::null()])
+        })
+        .await
+        .expect("fetch task")
+        .expect("bounded response");
+        server.abort();
+
+        assert_eq!(fetch.values.len(), 1);
+        assert!(fetch.values[0].is_none());
+        assert_eq!(fetch.response_failures, 1);
+        assert!(fetch.response_bytes < MAX_BATCH_RESPONSE_BYTES);
+        assert_eq!(fixture.fixture.lock().await.calls.len(), 1);
+    }
+
+    #[test]
+    fn decoded_response_guard_counts_the_complete_response_object() {
+        let response = jsonrpc::Response {
+            result: Some(
+                serde_json::value::RawValue::from_string("\"bounded\"".to_owned())
+                    .expect("raw JSON string"),
+            ),
+            error: None,
+            id: json!(1),
+            jsonrpc: Some("2.0".to_owned()),
+        };
+
+        let error = validated_decoded_response_bytes_with_limit(&[Some(response)], 8)
+            .expect_err("complete response exceeds tiny limit");
+
+        assert!(matches!(
+            error,
+            PolicyError::BatchResponseTooLarge { maximum: 8, .. }
+        ));
+    }
+
     #[test]
     fn policy_limits_must_be_nonzero() {
-        assert!(PolicyLimits::new(0, Duration::from_secs(1)).is_err());
-        assert!(PolicyLimits::new(1, Duration::ZERO).is_err());
-        assert!(PolicyLimits::new(1, Duration::MAX).is_err());
+        assert!(PolicyLimits::new(0, 1, 1).is_err());
+        assert!(PolicyLimits::new(1, 0, 1).is_err());
+        assert!(PolicyLimits::new(1, MAX_RPC_LANES + 1, 1).is_err());
+        assert!(PolicyLimits::new(1, 1, 0).is_err());
+        assert!(PolicyLimits::new(1, 1, MAX_AUXILIARY_CACHE_BYTES + 1).is_err());
+        assert!(PolicyLimits::new(2_048, 4, 256 * 1024 * 1024).is_ok());
+        assert!(PolicyLimits::new(MAX_TRANSACTIONS_PER_SLICE, 1, 1).is_ok());
+        assert!(PolicyLimits::new(MAX_TRANSACTIONS_PER_SLICE + 1, 1, 1).is_err());
     }
 
     #[test]

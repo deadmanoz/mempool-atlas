@@ -21,15 +21,38 @@ survive.
 
 Run one Mempool Atlas process on the presentation host. It periodically pulls a
 complete verbose mempool snapshot through the existing WireGuard-only node RPC
-proxy. It validates the whole observation, atomically replaces one in-memory
-snapshot and matching transaction-detail map, exposes that current observation
-through a source-scoped HTTP API, and serves the single-node website.
+proxy. It validates and publishes complete membership independently from
+classification, progressively replaces that membership's in-memory
+classification detail, exposes the current observation through a source-scoped
+HTTP API, and serves the single-node website.
 
 Complete membership remains authoritative and uses `getmempoolinfo`, verbose
-`getrawmempool`, and `getblockchaininfo`. After membership succeeds, the same
-central process performs bounded, best-effort classification through
-`getrawtransaction` and `gettxout(txid, vout, false)`. It caches only
-source-bound current `wtxid` variants and prunes results with membership.
+`getrawmempool`, and `getblockchaininfo`. A fixed-interval membership loop
+installs each successful result as a new process-local generation. It
+immediately publishes complete membership with only the exact `txid` and
+`wtxid` classifications that survived from the previous generation.
+
+A separate loop then continuously drains bounded, best-effort classification
+slices through `getrawtransaction` and
+`gettxout(txid, vout, false)`. Fresh unclassified variants run before carried
+partial results with missing prevouts. Each witness variant is attempted at
+most once per membership generation and becomes eligible again with the next
+successful generation.
+
+Policy results merge only while their generation remains current. Runtime
+publication separately requires the same generation and a strictly increasing
+revision. Work superseded by newer membership is discarded rather than
+crossing the snapshot boundary, and its RPC schedulers stop starting new waves.
+Already in-flight transport work can finish. A systemic slice that produces no
+classifications and reports batch or all-response failure pauses the rest of
+that generation until the next membership.
+
+Each new membership exposes `classification_revision` 0 and every published
+classification slice advances it. Both snapshots and transaction details carry
+this membership-local revision. The browser rejects older detail and detail
+whose compact assessment changed, while allowing a later detail revision when
+source, membership, transaction identity, witness identity, and compact
+assessment remain consistent.
 
 Missing raw transaction data leaves a member explicitly unclassified. Missing
 prevouts produce typed unknowns, preserve any independently proven rule
@@ -37,11 +60,12 @@ violations, and remain eligible for retry. The current detail map retains exact
 evidence and missing-fact counts with at most one exemplar of each per rule.
 Classification gaps do not invalidate fresh membership.
 
-No Atlas process, database, event log, queue, container, new listener, delivery
-protocol, or retained history runs on the node. The central viewer also has no
-database, event log, queue, or retained history. A failed membership poll
-preserves the last good in-memory observation and makes its stale state visible.
-A restart waits for a new snapshot.
+No Atlas process, database, event log, queue, ZMQ subscriber, container, new
+listener, delivery protocol, or retained history runs on the node. The central
+viewer also has no database, event log, queue, or retained history. It uses only
+the existing WireGuard RPC route and adds no network path. A failed membership
+poll preserves the last good in-memory observation and makes its stale state
+visible. A restart waits for a new snapshot.
 
 The primary interface is a Canvas classification terrain. It partitions the
 current source into compatible, indeterminate, unclassified, unresolved-primary,
@@ -80,13 +104,36 @@ migrations, database backups, replay guarantees, or node-side Atlas units.
 
 A full verbose RPC response and two briefly overlapping snapshots can consume
 significant memory. The 200,000-entry limit bounds membership count but not
-response bytes or allocator peaks. The current classification cache and detail
-map add bounded-per-entry state. Classification defaults to 10,000 uncached or
-incomplete witness variants per poll and a 45-second soft budget for starting
-more work. Raw transaction and mempool-parent batches contain at most 16
-requests, confirmed prevout batches contain at most 128, and classification
-batches have a 20-second transport timeout. The complete membership path keeps
-the `corepc-client` 0.8 fixed 15-second transport timeout.
+response bytes or allocator peaks. Classification defaults to 2,048 candidates
+per slice, configurable up to a hard 8,192-entry slice maximum, and four
+concurrent raw RPC lanes, with at most eight configurable lanes. Candidate raw
+work and mempool-parent raw work have separate 256 MiB aggregate response
+estimates. The parent phase also caps at 8,192 transactions, and raw batches
+contain at most 256 requests.
+
+One slice considers at most 65,536 unique required prevouts. Confirmed prevout
+batches have a nominal 512-request cap, but the 16 MiB estimate and 64 KiB
+per-script-hex bound currently reduce that to 254. The confirmed phase has its
+own 256 MiB aggregate response estimate, permitting 4,064 worst-case calls
+under current constants. Classification batches have a 20-second transport
+timeout. Returned transaction hex is capped at 8,000,000 characters and each
+decoded JSON-RPC response envelope at 16 MiB.
+
+The minreq transport buffers and parses a complete HTTP response before that
+decoded envelope guard runs. The phase limits bound estimated planned work, not
+transport memory. The production 2 GiB memory cgroup is the hard transient
+boundary.
+
+The auxiliary output-script cache uses a 256 MiB default admission estimate
+with a 512 MiB configuration maximum. This is not a process-memory quota:
+membership responses, classifications, encoded API responses, concurrent RPC
+work, allocator overhead, and overlapping readers remain outside it. The
+complete membership path keeps the `corepc-client` 0.8 fixed 15-second
+transport timeout.
+
+The membership interval is independent of classification. Normal start-to-start
+cadence remains fixed while membership work fits inside the interval. A
+membership overrun delays the next tick instead of triggering catch-up polls.
 
 Target-host acceptance must measure peak memory and both RPC paths. Later
 multi-node collection should avoid overlapping large responses unless

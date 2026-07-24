@@ -10,6 +10,6 @@ pub use model::{
     Bip110Summary, ChainTip, MempoolEntry, MempoolObservation, MempoolSnapshot, SourceAvailability,
     SourceSnapshotResponse, SourceSummary, SourcesResponse, TransactionDetailResponse,
 };
-pub use policy::{PolicyError, PolicyLimits};
+pub use policy::{PolicyEnricher, PolicyError, PolicyLimits};
 pub use rpc::{RpcClient, RpcError};
 pub use runtime::{SourceRegistry, SourceRuntime, TransactionLookup};

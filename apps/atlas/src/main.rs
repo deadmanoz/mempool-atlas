@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use mempool_atlas::{PolicyLimits, RpcClient, SourceRegistry, SourceRuntime, router};
+use mempool_atlas::{
+    PolicyEnricher, PolicyLimits, RpcClient, SourceRegistry, SourceRuntime, router,
+};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -34,16 +36,14 @@ struct Cli {
     max_mempool_entries: NonZeroU64,
     #[arg(
         long,
-        env = "ATLAS_MAX_CLASSIFICATIONS_PER_POLL",
-        default_value = "10000"
+        env = "ATLAS_CLASSIFICATION_SLICE_ENTRIES",
+        default_value = "2048"
     )]
-    max_classifications_per_poll: NonZeroUsize,
-    #[arg(
-        long,
-        env = "ATLAS_CLASSIFICATION_BUDGET_SECONDS",
-        default_value = "45"
-    )]
-    classification_budget_seconds: NonZeroU64,
+    classification_slice_entries: NonZeroUsize,
+    #[arg(long, env = "ATLAS_CLASSIFICATION_RPC_LANES", default_value = "4")]
+    classification_rpc_lanes: NonZeroUsize,
+    #[arg(long, env = "ATLAS_CLASSIFICATION_CACHE_MIB", default_value = "256")]
+    classification_cache_mib: NonZeroUsize,
 }
 
 #[tokio::main]
@@ -65,18 +65,26 @@ async fn main() -> anyhow::Result<()> {
         SourceRuntime::new(cli.source_id.clone(), source_label, poll_interval)
             .context("validating source configuration")?,
     );
+    let auxiliary_cache_bytes = cli
+        .classification_cache_mib
+        .get()
+        .checked_mul(1024 * 1024)
+        .context("classification cache size overflows this platform")?;
+    let policy_limits = PolicyLimits::new(
+        cli.classification_slice_entries.get(),
+        cli.classification_rpc_lanes.get(),
+        auxiliary_cache_bytes,
+    )
+    .context("validating policy enrichment limits")?;
     let rpc = RpcClient::new(
         &cli.rpc_url,
-        cli.rpc_username,
-        password,
+        cli.rpc_username.clone(),
+        password.clone(),
         cli.max_mempool_entries.get(),
-        PolicyLimits::new(
-            cli.max_classifications_per_poll.get(),
-            Duration::from_secs(cli.classification_budget_seconds.get()),
-        )
-        .context("validating policy enrichment limits")?,
     )
     .context("creating Bitcoin RPC client")?;
+    let policy = PolicyEnricher::new(&cli.rpc_url, cli.rpc_username, password, policy_limits)
+        .context("creating BIP-110 policy client")?;
     let registry =
         SourceRegistry::new(vec![Arc::clone(&source)]).context("creating source registry")?;
     let listener = tokio::net::TcpListener::bind(cli.bind)
@@ -89,12 +97,13 @@ async fn main() -> anyhow::Result<()> {
         rpc_url = %cli.rpc_url,
         poll_seconds = cli.poll_seconds.get(),
         max_mempool_entries = cli.max_mempool_entries.get(),
-        max_classifications_per_poll = cli.max_classifications_per_poll.get(),
-        classification_budget_seconds = cli.classification_budget_seconds.get(),
+        classification_slice_entries = cli.classification_slice_entries.get(),
+        classification_rpc_lanes = cli.classification_rpc_lanes.get(),
+        classification_cache_mib = cli.classification_cache_mib.get(),
         "Mempool Atlas snapshot service listening"
     );
 
-    let poll_task = tokio::spawn(Arc::clone(&source).run(rpc));
+    let poll_task = tokio::spawn(Arc::clone(&source).run(rpc, policy));
     let result = axum::serve(listener, router(registry, cli.web_root))
         .with_graceful_shutdown(shutdown_signal())
         .await;
@@ -177,8 +186,9 @@ mod tests {
         assert_eq!(cli.rpc_username, "atlas");
         assert_eq!(cli.poll_seconds.get(), 300);
         assert_eq!(cli.max_mempool_entries.get(), 200_000);
-        assert_eq!(cli.max_classifications_per_poll.get(), 10_000);
-        assert_eq!(cli.classification_budget_seconds.get(), 45);
+        assert_eq!(cli.classification_slice_entries.get(), 2_048);
+        assert_eq!(cli.classification_rpc_lanes.get(), 4);
+        assert_eq!(cli.classification_cache_mib.get(), 256);
         validate_bind(cli.bind).expect("loopback bind");
     }
 

@@ -168,6 +168,7 @@ pub struct MempoolSnapshot {
     pub source_id: String,
     pub source_label: String,
     pub observed_at_ms: u64,
+    pub classification_revision: u64,
     pub chain_tip: ChainTip,
     pub transaction_count: u64,
     pub total_vsize: u64,
@@ -223,12 +224,27 @@ impl MempoolSnapshot {
             source_id,
             source_label,
             observed_at_ms,
+            classification_revision: 0,
             chain_tip,
             transaction_count,
             total_vsize,
             bip110_summary: Bip110Summary::from_transactions(&transactions),
             transactions,
         })
+    }
+
+    pub fn with_classification_revision(
+        mut self,
+        classification_revision: u64,
+    ) -> Result<Self, ModelError> {
+        if classification_revision > MAX_SAFE_JSON_INTEGER {
+            return Err(ModelError::UnsafeJsonInteger {
+                field: "classification_revision",
+                value: classification_revision,
+            });
+        }
+        self.classification_revision = classification_revision;
+        Ok(self)
     }
 }
 
@@ -268,10 +284,57 @@ pub struct MempoolObservation {
 }
 
 impl MempoolObservation {
+    /// Materializes one reader-visible observation from classification-free
+    /// membership and the exact classifications that still match it.
+    pub fn materialize(
+        membership: &MempoolSnapshot,
+        classification_revision: u64,
+        classifications: TransactionClassifications,
+    ) -> Result<Self, ModelError> {
+        let classifications = membership
+            .transactions
+            .iter()
+            .filter_map(|entry| {
+                classifications
+                    .get(&entry.txid)
+                    .filter(|classification| {
+                        classification.txid == entry.txid && classification.wtxid == entry.wtxid
+                    })
+                    .map(|classification| (entry.txid.clone(), Arc::clone(classification)))
+            })
+            .collect::<TransactionClassifications>();
+        let transactions = membership
+            .transactions
+            .iter()
+            .cloned()
+            .map(|mut entry| {
+                entry.bip110 = classifications
+                    .get(&entry.txid)
+                    .map(|classification| classification.assessment.clone());
+                entry
+            })
+            .collect();
+        let snapshot = MempoolSnapshot::new(
+            membership.source_id.clone(),
+            membership.source_label.clone(),
+            membership.observed_at_ms,
+            membership.chain_tip.clone(),
+            transactions,
+        )?
+        .with_classification_revision(classification_revision)?;
+        Self::new(snapshot, classifications)
+    }
+
     pub fn new(
         snapshot: MempoolSnapshot,
         classifications: TransactionClassifications,
     ) -> Result<Self, ModelError> {
+        if snapshot.classification_revision > MAX_SAFE_JSON_INTEGER {
+            return Err(ModelError::UnsafeJsonInteger {
+                field: "classification_revision",
+                value: snapshot.classification_revision,
+            });
+        }
         for (txid, classification) in &classifications {
             validate_classification(classification)?;
             if txid != &classification.txid {
@@ -404,6 +467,7 @@ fn validate_classification(classification: &TransactionClassification) -> Result
 pub struct TransactionDetailResponse {
     pub source_id: String,
     pub snapshot_observed_at_ms: u64,
+    pub classification_revision: u64,
     pub txid: String,
     pub wtxid: String,
     pub assessment: Bip110Assessment,
@@ -502,6 +566,31 @@ mod tests {
         MempoolEntry::new(txid.to_owned(), vsize, 100, 1_700_000_000_000).expect("entry")
     }
 
+    fn compatible_classification(txid: &str, wtxid: &str) -> Arc<TransactionClassification> {
+        Arc::new(TransactionClassification {
+            txid: txid.to_owned(),
+            wtxid: wtxid.to_owned(),
+            assessment: Bip110Assessment {
+                status: Bip110Status::Compatible,
+                primary_rule: None,
+                violated_rules: Vec::new(),
+                unknown_rules: Vec::new(),
+            },
+            rules: Bip110RuleId::ALL
+                .into_iter()
+                .map(|rule| Bip110RuleDetail {
+                    rule,
+                    number: rule.number(),
+                    verdict: Bip110RuleVerdict::Pass,
+                    evidence_count: 0,
+                    evidence: Vec::new(),
+                    missing_count: 0,
+                    missing: Vec::new(),
+                })
+                .collect(),
+        })
+    }
+
     #[test]
     fn snapshot_derives_bounded_totals() {
         let snapshot = MempoolSnapshot::new(
@@ -587,6 +676,56 @@ mod tests {
             MempoolObservation::new(snapshot, BTreeMap::new()),
             Err(ModelError::ClassificationDetailMissing(txid)) if txid == "00"
         ));
+    }
+
+    #[test]
+    fn observation_materializes_exact_current_classifications() {
+        let membership = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            1,
+            ChainTip {
+                height: 1,
+                hash: "00".repeat(32),
+            },
+            vec![
+                MempoolEntry::new_variant("00".to_owned(), "10".to_owned(), 100, 100, 1)
+                    .expect("entry"),
+                MempoolEntry::new_variant("01".to_owned(), "11".to_owned(), 100, 100, 1)
+                    .expect("entry"),
+            ],
+        )
+        .expect("membership");
+        let matching = compatible_classification("00", "10");
+        let stale_variant = compatible_classification("01", "12");
+
+        let observation = MempoolObservation::materialize(
+            &membership,
+            1,
+            BTreeMap::from([
+                ("00".to_owned(), Arc::clone(&matching)),
+                ("01".to_owned(), stale_variant),
+            ]),
+        )
+        .expect("observation");
+
+        assert_eq!(observation.snapshot.classification_revision, 1);
+        assert!(membership.transactions[0].bip110.is_none());
+        assert_eq!(
+            observation.snapshot.transactions[0].bip110.as_ref(),
+            Some(&matching.assessment)
+        );
+        assert!(observation.snapshot.transactions[1].bip110.is_none());
+        assert_eq!(observation.snapshot.bip110_summary.compatible_count, 1);
+        assert_eq!(observation.snapshot.bip110_summary.unclassified_count, 1);
+        assert_eq!(
+            observation
+                .classifications
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["00"]
+        );
     }
 
     #[test]

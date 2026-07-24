@@ -6,6 +6,7 @@ import {
   parseSourceSnapshotResponse,
   parseSourcesResponse,
   parseTransactionDetailResponse,
+  transactionDetailMatchesSnapshot,
 } from "./api";
 import type { MempoolSnapshot, TransactionDetailResponse } from "./types";
 
@@ -29,6 +30,7 @@ const snapshot = (): MempoolSnapshot => ({
   source_id: "core",
   source_label: "Bitcoin Core",
   observed_at_ms: 1_700_000_001_000,
+  classification_revision: 3,
   chain_tip: { height: 900_000, hash: BLOCK_HASH },
   transaction_count: 1,
   total_vsize: 141,
@@ -61,6 +63,7 @@ const snapshot = (): MempoolSnapshot => ({
 const transactionDetail = (): TransactionDetailResponse => ({
   source_id: "core",
   snapshot_observed_at_ms: 1_700_000_001_000,
+  classification_revision: 3,
   txid: TXID,
   wtxid: TXID,
   assessment: {
@@ -197,6 +200,15 @@ describe("parseSourceSnapshotResponse", () => {
         snapshot: { ...snapshot(), source_id: "knots" },
       }),
     ).toThrow("Source summary does not match its snapshot");
+  });
+
+  it("requires a reader-visible classification revision", () => {
+    const value = snapshot() as unknown as Record<string, unknown>;
+    delete value.classification_revision;
+
+    expect(() =>
+      parseSourceSnapshotResponse({ source: source(), snapshot: value }),
+    ).toThrow("Invalid mempool snapshot");
   });
 
   it("rejects malformed or unordered transactions", () => {
@@ -347,6 +359,58 @@ describe("parseTransactionDetailResponse", () => {
     expect(() => parseTransactionDetailResponse(value)).toThrow(
       "Classified transaction detail is missing its assessment",
     );
+  });
+
+  it("requires the matching classification revision", () => {
+    const value = transactionDetail() as unknown as Record<string, unknown>;
+    delete value.classification_revision;
+
+    expect(() => parseTransactionDetailResponse(value)).toThrow(
+      "Invalid transaction detail response",
+    );
+  });
+});
+
+describe("transactionDetailMatchesSnapshot", () => {
+  it("accepts exact and newer revisions with the same compact assessment", () => {
+    const currentSnapshot = snapshot();
+    const transaction = currentSnapshot.transactions[0]!;
+    const exact = transactionDetail();
+    const newer = {
+      ...transactionDetail(),
+      classification_revision: exact.classification_revision + 1,
+    };
+
+    expect(
+      transactionDetailMatchesSnapshot(currentSnapshot, transaction, exact),
+    ).toBe(true);
+    expect(
+      transactionDetailMatchesSnapshot(currentSnapshot, transaction, newer),
+    ).toBe(true);
+  });
+
+  it("rejects older revisions and newer changed assessments", () => {
+    const currentSnapshot = snapshot();
+    const transaction = currentSnapshot.transactions[0]!;
+    const older = {
+      ...transactionDetail(),
+      classification_revision: currentSnapshot.classification_revision - 1,
+    };
+    const changed = transactionDetail();
+    changed.classification_revision += 1;
+    changed.assessment = {
+      status: "indeterminate",
+      primary_rule: null,
+      violated_rules: [],
+      unknown_rules: ["element_size"],
+    };
+
+    expect(
+      transactionDetailMatchesSnapshot(currentSnapshot, transaction, older),
+    ).toBe(false);
+    expect(
+      transactionDetailMatchesSnapshot(currentSnapshot, transaction, changed),
+    ).toBe(false);
   });
 });
 

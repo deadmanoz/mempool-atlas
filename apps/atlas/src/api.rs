@@ -406,6 +406,7 @@ mod tests {
         assert_eq!(response["rules"][0]["missing_count"], 0);
         assert_eq!(response["source_id"], "core");
         assert_eq!(response["snapshot_observed_at_ms"], 1_700_000_000_000_u64);
+        assert_eq!(response["classification_revision"], 0);
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ import {
   fetchSources,
   fetchSourceSnapshot,
   fetchTransactionDetail,
+  transactionDetailMatchesSnapshot,
 } from "./api";
 import {
   DEFAULT_FILTERS,
@@ -272,16 +273,13 @@ const loadTransactionDetail = async (
     );
     if (
       sequence !== detailSequence ||
-      currentSnapshot?.observed_at_ms !== snapshot.observed_at_ms
+      currentSnapshot?.observed_at_ms !== snapshot.observed_at_ms ||
+      currentSnapshot.classification_revision !==
+        snapshot.classification_revision
     ) {
       return;
     }
-    if (
-      detail.source_id !== snapshot.source_id ||
-      detail.snapshot_observed_at_ms !== snapshot.observed_at_ms ||
-      detail.txid !== transaction.txid ||
-      detail.wtxid !== transaction.wtxid
-    ) {
+    if (!transactionDetailMatchesSnapshot(snapshot, transaction, detail)) {
       throw new Error("Transaction detail does not match this snapshot");
     }
     renderTransactionDetail(detail);
