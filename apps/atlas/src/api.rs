@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -10,7 +11,7 @@ use serde::Serialize;
 use tower_http::services::ServeDir;
 
 use crate::model::SourcesResponse;
-use crate::runtime::SourceRegistry;
+use crate::runtime::{SourceRegistry, TransactionLookup};
 
 pub fn router(registry: SourceRegistry, web_root: PathBuf) -> Router {
     Router::new()
@@ -18,6 +19,10 @@ pub fn router(registry: SourceRegistry, web_root: PathBuf) -> Router {
         .route("/readyz", get(readiness))
         .route("/api/v1/sources", get(sources))
         .route("/api/v1/sources/{source_id}/mempool", get(source_snapshot))
+        .route(
+            "/api/v1/sources/{source_id}/transactions/{txid}",
+            get(transaction_detail),
+        )
         .fallback_service(ServeDir::new(web_root).append_index_html_on_directories(true))
         .with_state(registry)
 }
@@ -76,6 +81,29 @@ async fn source_snapshot(
         .into_response())
 }
 
+async fn transaction_detail(
+    State(registry): State<SourceRegistry>,
+    Path((source_id, txid)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let canonical_txid = bitcoin::Txid::from_str(&txid)
+        .map_err(|_| ApiError::invalid_txid(&txid))?
+        .to_string();
+    let source = registry
+        .get(&source_id)
+        .ok_or_else(|| ApiError::source_not_found(&source_id))?;
+    match source.transaction_detail(&canonical_txid).await {
+        TransactionLookup::Ready(detail) => Ok((
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(detail),
+        )
+            .into_response()),
+        TransactionLookup::WaitingForSnapshot => Err(ApiError::snapshot_not_ready()),
+        TransactionLookup::NotPresent => Err(ApiError::transaction_not_present(&canonical_txid)),
+        TransactionLookup::Unclassified => Err(ApiError::transaction_unclassified(&canonical_txid)),
+    }
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -95,6 +123,34 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "current snapshot is temporarily unavailable".to_owned(),
+        }
+    }
+
+    fn invalid_txid(txid: &str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("invalid transaction ID {txid:?}"),
+        }
+    }
+
+    fn snapshot_not_ready() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "current snapshot is not ready".to_owned(),
+        }
+    }
+
+    fn transaction_not_present(txid: &str) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: format!("transaction {txid:?} is not in the current snapshot"),
+        }
+    }
+
+    fn transaction_unclassified(txid: &str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: format!("transaction {txid:?} is present but not yet classified"),
         }
     }
 }
@@ -119,6 +175,7 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -128,7 +185,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::model::{ChainTip, MempoolEntry, MempoolSnapshot};
+    use crate::model::{
+        Bip110Assessment, Bip110RuleDetail, Bip110RuleId, Bip110RuleVerdict, Bip110Status,
+        ChainTip, MempoolEntry, MempoolObservation, MempoolSnapshot, TransactionClassification,
+    };
     use crate::runtime::SourceRuntime;
 
     fn runtime() -> Arc<SourceRuntime> {
@@ -162,6 +222,55 @@ mod tests {
             vec![MempoolEntry::new("00".repeat(32), 141, 1_200, 1_699_999_000_000).expect("entry")],
         )
         .expect("snapshot")
+    }
+
+    fn observation() -> MempoolObservation {
+        MempoolObservation::new(snapshot(), BTreeMap::new()).expect("observation")
+    }
+
+    fn classified_observation() -> MempoolObservation {
+        let assessment = Bip110Assessment {
+            status: Bip110Status::Compatible,
+            primary_rule: None,
+            violated_rules: Vec::new(),
+            unknown_rules: Vec::new(),
+        };
+        let mut entry =
+            MempoolEntry::new("00".repeat(32), 141, 1_200, 1_699_999_000_000).expect("entry");
+        entry.bip110 = Some(assessment.clone());
+        let snapshot = MempoolSnapshot::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            1_700_000_000_000,
+            ChainTip {
+                height: 900_000,
+                hash: "00".repeat(32),
+            },
+            vec![entry],
+        )
+        .expect("snapshot");
+        let classification = Arc::new(TransactionClassification {
+            txid: "00".repeat(32),
+            wtxid: "00".repeat(32),
+            assessment,
+            rules: Bip110RuleId::ALL
+                .into_iter()
+                .map(|rule| Bip110RuleDetail {
+                    rule,
+                    number: rule.number(),
+                    verdict: Bip110RuleVerdict::Pass,
+                    evidence_count: 0,
+                    evidence: Vec::new(),
+                    missing_count: 0,
+                    missing: Vec::new(),
+                })
+                .collect(),
+        });
+        MempoolObservation::new(
+            snapshot,
+            BTreeMap::from([("00".repeat(32), classification)]),
+        )
+        .expect("observation")
     }
 
     async fn get_json(application: Router, path: &str) -> (StatusCode, Value) {
@@ -224,7 +333,7 @@ mod tests {
     async fn current_snapshot_is_served_after_atomic_publication() {
         let source = runtime();
         source
-            .record_success(snapshot())
+            .record_success(observation())
             .await
             .expect("publish snapshot");
         let application = application(source);
@@ -245,7 +354,7 @@ mod tests {
     async fn failed_poll_serves_last_good_snapshot_as_stale() {
         let source = runtime();
         source
-            .record_success(snapshot())
+            .record_success(observation())
             .await
             .expect("publish snapshot");
         source
@@ -268,5 +377,61 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(response["error"], "unknown source \"knots\"");
+    }
+
+    #[tokio::test]
+    async fn current_transaction_detail_is_served_atomically() {
+        let source = runtime();
+        source
+            .record_success(classified_observation())
+            .await
+            .expect("publish observation");
+        source
+            .record_failure("node unavailable".to_owned())
+            .await
+            .expect("retain classified observation");
+        let txid = "00".repeat(32);
+
+        let (status, response) = get_json(
+            application(source),
+            &format!("/api/v1/sources/core/transactions/{txid}"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["txid"], txid);
+        assert_eq!(response["assessment"]["status"], "compatible");
+        assert_eq!(response["rules"].as_array().map(Vec::len), Some(7));
+        assert_eq!(response["rules"][0]["evidence_count"], 0);
+        assert_eq!(response["rules"][0]["missing_count"], 0);
+        assert_eq!(response["source_id"], "core");
+        assert_eq!(response["snapshot_observed_at_ms"], 1_700_000_000_000_u64);
+    }
+
+    #[tokio::test]
+    async fn present_but_unclassified_transaction_is_explicit() {
+        let source = runtime();
+        source
+            .record_success(classified_observation())
+            .await
+            .expect("publish classified observation");
+        source
+            .record_success(observation())
+            .await
+            .expect("replace with unclassified observation");
+        let txid = "00".repeat(32);
+
+        let (status, response) = get_json(
+            application(source),
+            &format!("/api/v1/sources/core/transactions/{txid}"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("not yet classified"))
+        );
     }
 }

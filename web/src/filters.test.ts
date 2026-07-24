@@ -11,9 +11,16 @@ const transaction = (
   overrides: Partial<MempoolTransaction> = {},
 ): MempoolTransaction => ({
   txid: value.toString(16).padStart(64, "0"),
+  wtxid: value.toString(16).padStart(64, "0"),
   vsize: 200,
   fee_sats: 2_000,
   entered_at_ms: OBSERVED_AT_MS - HOUR_MS,
+  bip110: {
+    status: "compatible",
+    primary_rule: null,
+    violated_rules: [],
+    unknown_rules: [],
+  },
   ...overrides,
 });
 

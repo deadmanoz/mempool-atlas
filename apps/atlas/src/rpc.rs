@@ -1,12 +1,13 @@
 //! Bitcoin RPC access for complete, disposable mempool snapshots.
 
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bitcoin::{Amount, BlockHash, Txid};
+use bitcoin::{Amount, BlockHash, Txid, Wtxid};
 use corepc_client::client_sync::v28::Client;
 use corepc_client::client_sync::{Auth, Error as CorepcError};
 use serde::de::{IgnoredAny, MapAccess, Visitor};
@@ -14,8 +15,10 @@ use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
 use crate::model::{
-    ChainTip, MAX_SUPPORTED_MEMPOOL_ENTRIES, MempoolEntry, MempoolSnapshot, ModelError,
+    ChainTip, MAX_SUPPORTED_MEMPOOL_ENTRIES, MempoolEntry, MempoolObservation, MempoolSnapshot,
+    ModelError,
 };
+use crate::policy::{PolicyEnricher, PolicyError, PolicyLimits};
 
 thread_local! {
     /// `corepc-client::Client::call` owns deserialization and does not expose a
@@ -28,6 +31,7 @@ thread_local! {
 #[derive(Clone, Debug)]
 pub struct RpcClient {
     inner: Arc<Client>,
+    policy: PolicyEnricher,
     max_mempool_entries: u64,
 }
 
@@ -37,24 +41,39 @@ impl RpcClient {
         username: impl Into<String>,
         password: impl Into<String>,
         max_mempool_entries: u64,
+        policy_limits: PolicyLimits,
     ) -> Result<Self, RpcError> {
         validate_configured_limit(max_mempool_entries)?;
-        let inner = Client::new_with_auth(url, Auth::UserPass(username.into(), password.into()))
+        if u64::try_from(policy_limits.max_transactions_per_snapshot()).unwrap_or(u64::MAX)
+            > max_mempool_entries
+        {
+            return Err(RpcError::InvalidPolicyTransactionLimit {
+                configured: policy_limits.max_transactions_per_snapshot(),
+                maximum: max_mempool_entries,
+            });
+        }
+        let username = username.into();
+        let password = password.into();
+        let inner = Client::new_with_auth(url, Auth::UserPass(username.clone(), password.clone()))
             .map_err(RpcError::ClientInitialization)?;
+        let policy = PolicyEnricher::new(url, username, password, policy_limits)
+            .map_err(RpcError::PolicyClientInitialization)?;
         Ok(Self {
             inner: Arc::new(inner),
+            policy,
             max_mempool_entries,
         })
     }
 
     /// Fetches one complete mempool observation and binds it to the node's
     /// chain tip immediately after the verbose mempool call.
-    pub async fn get_mempool_snapshot(
+    pub async fn get_mempool_observation(
         &self,
         source_id: &str,
         source_label: &str,
-    ) -> Result<MempoolSnapshot, RpcError> {
+    ) -> Result<MempoolObservation, RpcError> {
         let client = Arc::clone(&self.inner);
+        let policy = self.policy.clone();
         let maximum = self.max_mempool_entries;
         let source_id = source_id.to_owned();
         let source_label = source_label.to_owned();
@@ -65,7 +84,7 @@ impl RpcClient {
             validate_reported_mempool_size(info.size, maximum)?;
 
             let _decode_limit = DecodeEntryLimitGuard::set(maximum);
-            let entries = client
+            let mut entries = client
                 .call::<RawMempoolWire>("getrawmempool", &[serde_json::Value::Bool(true)])
                 .map_err(RpcError::GetRawMempool)?
                 .into_entries(maximum)?;
@@ -78,7 +97,17 @@ impl RpcClient {
                 .to_string();
             let observed_at_ms = system_now_ms()?;
 
-            MempoolSnapshot::new(
+            let enrichment = policy.enrich(&mut entries);
+            tracing::info!(
+                attempted = enrichment.attempted,
+                newly_classified = enrichment.newly_classified,
+                response_failures = enrichment.response_failures,
+                batch_failures = enrichment.batch_failures,
+                deadline_reached = enrichment.deadline_reached,
+                classified = enrichment.classifications.len(),
+                "completed bounded BIP-110 enrichment"
+            );
+            let snapshot = MempoolSnapshot::new(
                 source_id,
                 source_label,
                 observed_at_ms,
@@ -88,7 +117,9 @@ impl RpcClient {
                 },
                 entries,
             )
-            .map_err(RpcError::InvalidSnapshot)
+            .map_err(RpcError::InvalidSnapshot)?;
+            MempoolObservation::new(snapshot, enrichment.classifications)
+                .map_err(RpcError::InvalidSnapshot)
         })
         .await?
     }
@@ -98,6 +129,8 @@ impl RpcClient {
 pub enum RpcError {
     #[error("failed to create Bitcoin RPC client: {0}")]
     ClientInitialization(#[source] CorepcError),
+    #[error("failed to create BIP-110 policy RPC client: {0}")]
+    PolicyClientInitialization(#[source] PolicyError),
     #[error("getmempoolinfo RPC failed or returned an invalid response: {0}")]
     GetMempoolInfo(#[source] CorepcError),
     #[error("getrawmempool RPC failed or returned an invalid response: {0}")]
@@ -108,6 +141,10 @@ pub enum RpcError {
     Task(#[from] tokio::task::JoinError),
     #[error("configured mempool entry limit {configured} exceeds the supported maximum {maximum}")]
     InvalidMempoolEntryLimit { configured: u64, maximum: u64 },
+    #[error(
+        "configured policy transaction limit {configured} exceeds the mempool entry limit {maximum}"
+    )]
+    InvalidPolicyTransactionLimit { configured: usize, maximum: u64 },
     #[error("getmempoolinfo returned negative transaction count {size}")]
     InvalidMempoolSize { size: i64 },
     #[error(
@@ -116,8 +153,12 @@ pub enum RpcError {
     SnapshotTooLarge { actual: u64, maximum: u64 },
     #[error("getrawmempool returned invalid txid {0:?}")]
     InvalidTxid(String),
+    #[error("getrawmempool returned invalid wtxid {0:?}")]
+    InvalidWtxid(String),
     #[error("getrawmempool returned duplicate canonical txid {0}")]
     DuplicateTxid(String),
+    #[error("getrawmempool returned duplicate canonical wtxid {0}")]
+    DuplicateWtxid(String),
     #[error("getrawmempool entry time {time_seconds} seconds overflows for txid {txid}")]
     EntryTimeOverflow { txid: String, time_seconds: u64 },
     #[error("getrawmempool returned invalid entry facts for txid {txid}: {source}")]
@@ -144,15 +185,20 @@ impl RpcError {
             Self::GetMempoolInfo(_) | Self::GetRawMempool(_) | Self::GetBlockchainInfo(_) => {
                 "Bitcoin node RPC is unavailable"
             }
-            Self::SnapshotTooLarge { .. } | Self::InvalidMempoolEntryLimit { .. } => {
+            Self::SnapshotTooLarge { .. }
+            | Self::InvalidMempoolEntryLimit { .. }
+            | Self::InvalidPolicyTransactionLimit { .. } => {
                 "Bitcoin node mempool exceeds the configured limit"
             }
             Self::Task(_) => "Atlas snapshot worker failed",
             Self::InvalidSystemClock | Self::SystemTimeOverflow => "Atlas system clock is invalid",
             Self::ClientInitialization(_)
+            | Self::PolicyClientInitialization(_)
             | Self::InvalidMempoolSize { .. }
             | Self::InvalidTxid(_)
+            | Self::InvalidWtxid(_)
             | Self::DuplicateTxid(_)
+            | Self::DuplicateWtxid(_)
             | Self::EntryTimeOverflow { .. }
             | Self::InvalidEntryFacts { .. }
             | Self::InvalidBestBlockHash(_)
@@ -174,6 +220,7 @@ struct BlockchainInfoWire {
 
 #[derive(Debug, Deserialize)]
 struct RawMempoolEntryWire {
+    wtxid: String,
     vsize: u64,
     time: u64,
     fees: RawMempoolFeesWire,
@@ -197,6 +244,14 @@ impl RawMempoolWire {
         entries.sort_unstable_by(|left, right| left.txid.cmp(&right.txid));
         if let Some(pair) = entries.windows(2).find(|pair| pair[0].txid == pair[1].txid) {
             return Err(RpcError::DuplicateTxid(pair[0].txid.clone()));
+        }
+        let mut wtxids = BTreeSet::new();
+        if let Some(duplicate) = entries
+            .iter()
+            .map(|entry| entry.wtxid.clone())
+            .find(|wtxid| !wtxids.insert(wtxid.clone()))
+        {
+            return Err(RpcError::DuplicateWtxid(duplicate));
         }
         Ok(entries)
     }
@@ -278,6 +333,9 @@ fn decode_entry(value: String, entry: RawMempoolEntryWire) -> Result<MempoolEntr
     let txid = Txid::from_str(&value)
         .map_err(|_| RpcError::InvalidTxid(value))?
         .to_string();
+    let wtxid = Wtxid::from_str(&entry.wtxid)
+        .map_err(|_| RpcError::InvalidWtxid(entry.wtxid))?
+        .to_string();
     let entered_at_ms =
         entry
             .time
@@ -286,8 +344,9 @@ fn decode_entry(value: String, entry: RawMempoolEntryWire) -> Result<MempoolEntr
                 txid: txid.clone(),
                 time_seconds: entry.time,
             })?;
-    MempoolEntry::new(
+    MempoolEntry::new_variant(
         txid.clone(),
+        wtxid,
         entry.vsize,
         entry.fees.base.to_sat(),
         entered_at_ms,
@@ -364,43 +423,69 @@ mod tests {
         headers: HeaderMap,
         Json(request): Json<Value>,
     ) -> Json<Value> {
-        let method = request["method"].as_str().expect("RPC method").to_owned();
-        let params = request["params"].clone();
-        let id = request["id"].clone();
-        calls.lock().await.push(ObservedRpcCall {
-            authorization: headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned),
-            method: method.clone(),
-            params,
-        });
+        let is_batch = request.is_array();
+        let requests = request.as_array().cloned().unwrap_or_else(|| vec![request]);
+        let authorization = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let mut responses = Vec::with_capacity(requests.len());
 
-        let result = match method.as_str() {
-            "getmempoolinfo" => json!({ "size": 1 }),
-            "getrawmempool" => json!({
-                TXID_A: {
-                    "vsize": 141,
-                    "time": 1_721_234_000_u64,
-                    "fees": { "base": 0.00001200 }
-                }
-            }),
-            "getblockchaininfo" => json!({
-                "blocks": 900_000,
-                "bestblockhash": TXID_B
-            }),
-            other => panic!("unexpected RPC method {other}"),
-        };
-        Json(json!({
-            "jsonrpc": "2.0",
-            "result": result,
-            "error": null,
-            "id": id
-        }))
+        for request in requests {
+            let method = request["method"].as_str().expect("RPC method").to_owned();
+            let params = request["params"].clone();
+            let id = request["id"].clone();
+            calls.lock().await.push(ObservedRpcCall {
+                authorization: authorization.clone(),
+                method: method.clone(),
+                params,
+            });
+
+            let (result, error) = match method.as_str() {
+                "getmempoolinfo" => (json!({ "size": 1 }), Value::Null),
+                "getrawmempool" => (
+                    json!({
+                        TXID_A: {
+                            "wtxid": TXID_A,
+                            "vsize": 141,
+                            "time": 1_721_234_000_u64,
+                            "fees": { "base": 0.00001200 }
+                        }
+                    }),
+                    Value::Null,
+                ),
+                "getblockchaininfo" => (
+                    json!({
+                        "blocks": 900_000,
+                        "bestblockhash": TXID_B
+                    }),
+                    Value::Null,
+                ),
+                "getrawtransaction" => (
+                    Value::Null,
+                    json!({
+                        "code": -5,
+                        "message": "transaction left the mempool"
+                    }),
+                ),
+                other => panic!("unexpected RPC method {other}"),
+            };
+            responses.push(json!({
+                "jsonrpc": "2.0",
+                "result": result,
+                "error": error,
+                "id": id
+            }));
+        }
+        Json(if is_batch {
+            Value::Array(responses)
+        } else {
+            responses.pop().expect("single response")
+        })
     }
 
     #[tokio::test]
-    async fn performs_authenticated_three_call_snapshot_sequence() {
+    async fn performs_authenticated_snapshot_and_bounded_enrichment_sequence() {
         let calls = Shared::new(AsyncMutex::new(Vec::new()));
         let application = Router::new()
             .route("/", post(rpc_fixture))
@@ -420,17 +505,20 @@ mod tests {
             "atlas",
             "secret",
             MAX_SUPPORTED_MEMPOOL_ENTRIES,
+            PolicyLimits::new(10, std::time::Duration::from_secs(5)).expect("policy limits"),
         )
         .expect("RPC client");
-        let snapshot = client
-            .get_mempool_snapshot("core", "Bitcoin Core")
+        let observation = client
+            .get_mempool_observation("core", "Bitcoin Core")
             .await
             .expect("snapshot");
         server.abort();
 
+        let snapshot = observation.snapshot;
         assert_eq!(snapshot.transaction_count, 1);
         assert_eq!(snapshot.transactions[0].fee_sats, 1_200);
         assert_eq!(snapshot.chain_tip.height, 900_000);
+        assert_eq!(snapshot.bip110_summary.unclassified_count, 1);
 
         let calls = calls.lock().await;
         assert_eq!(
@@ -438,11 +526,17 @@ mod tests {
                 .iter()
                 .map(|call| call.method.as_str())
                 .collect::<Vec<_>>(),
-            ["getmempoolinfo", "getrawmempool", "getblockchaininfo"]
+            [
+                "getmempoolinfo",
+                "getrawmempool",
+                "getblockchaininfo",
+                "getrawtransaction"
+            ]
         );
         assert_eq!(calls[0].params, json!([]));
         assert_eq!(calls[1].params, json!([true]));
         assert_eq!(calls[2].params, json!([]));
+        assert_eq!(calls[3].params, json!([TXID_A, 0]));
         assert!(
             calls
                 .iter()
@@ -469,9 +563,9 @@ mod tests {
                 "spentby": []
             },
             TXID_B: {
+                "wtxid": TXID_A,
                 "vsize": 222,
                 "time": 1_721_234_001_u64,
-                "hash": TXID_A,
                 "fees": {
                     "base": 0.00000001,
                     "modified": 0.00000001
@@ -491,8 +585,14 @@ mod tests {
     #[test]
     fn canonicalizes_and_orders_txids() {
         let entries = decode(json!({
-            TXID_B: { "vsize": 2, "time": 2, "fees": { "base": 0.00000002 } },
+            TXID_B: {
+                "wtxid": TXID_B,
+                "vsize": 2,
+                "time": 2,
+                "fees": { "base": 0.00000002 }
+            },
             TXID_A.to_ascii_uppercase(): {
+                "wtxid": TXID_A,
                 "vsize": 1,
                 "time": 1,
                 "fees": { "base": 0.00000001 }
@@ -514,6 +614,7 @@ mod tests {
         assert!(matches!(
             decode(json!({
                 "not-a-txid": {
+                    "wtxid": TXID_A,
                     "vsize": 1,
                     "time": 1,
                     "fees": { "base": 0.00000001 }
@@ -524,8 +625,14 @@ mod tests {
 
         assert!(matches!(
             decode(json!({
-                TXID_A: { "vsize": 1, "time": 1, "fees": { "base": 0.00000001 } },
+                TXID_A: {
+                    "wtxid": TXID_A,
+                    "vsize": 1,
+                    "time": 1,
+                    "fees": { "base": 0.00000001 }
+                },
                 TXID_A.to_ascii_uppercase(): {
+                    "wtxid": TXID_B,
                     "vsize": 2,
                     "time": 2,
                     "fees": { "base": 0.00000002 }
@@ -533,19 +640,85 @@ mod tests {
             })),
             Err(RpcError::DuplicateTxid(txid)) if txid == TXID_A
         ));
+
+        assert!(matches!(
+            decode(json!({
+                TXID_A: {
+                    "wtxid": TXID_B,
+                    "vsize": 1,
+                    "time": 1,
+                    "fees": { "base": 0.00000001 }
+                },
+                TXID_B: {
+                    "wtxid": TXID_B,
+                    "vsize": 2,
+                    "time": 2,
+                    "fees": { "base": 0.00000002 }
+                }
+            })),
+            Err(RpcError::DuplicateWtxid(wtxid)) if wtxid == TXID_B
+        ));
     }
 
     #[test]
     fn rejects_missing_malformed_or_unsafe_required_facts() {
         for response in [
-            json!({ TXID_A: { "time": 1, "fees": { "base": 0.00000001 } } }),
-            json!({ TXID_A: { "vsize": 1, "fees": { "base": 0.00000001 } } }),
-            json!({ TXID_A: { "vsize": 1, "time": 1 } }),
-            json!({ TXID_A: { "vsize": 0, "time": 1, "fees": { "base": 0.00000001 } } }),
-            json!({ TXID_A: { "vsize": 1.5, "time": 1, "fees": { "base": 0.00000001 } } }),
-            json!({ TXID_A: { "vsize": 1, "time": -1, "fees": { "base": 0.00000001 } } }),
-            json!({ TXID_A: { "vsize": 1, "time": 1, "fees": { "base": -0.00000001 } } }),
-            json!({ TXID_A: { "vsize": 1, "time": 1, "fees": { "base": 0.000000001 } } }),
+            json!({ TXID_A: {
+                "wtxid": TXID_A,
+                "time": 1,
+                "fees": { "base": 0.00000001 }
+            } }),
+            json!({ TXID_A: {
+                "wtxid": TXID_A,
+                "vsize": 1,
+                "fees": { "base": 0.00000001 }
+            } }),
+            json!({ TXID_A: {
+                "wtxid": TXID_A,
+                "vsize": 1,
+                "time": 1
+            } }),
+            json!({ TXID_A: {
+                "vsize": 1,
+                "time": 1,
+                "fees": { "base": 0.00000001 }
+            } }),
+            json!({ TXID_A: {
+                "wtxid": "not-a-wtxid",
+                "vsize": 1,
+                "time": 1,
+                "fees": { "base": 0.00000001 }
+            } }),
+            json!({ TXID_A: {
+                "wtxid": TXID_A,
+                "vsize": 0,
+                "time": 1,
+                "fees": { "base": 0.00000001 }
+            } }),
+            json!({ TXID_A: {
+                "wtxid": TXID_A,
+                "vsize": 1.5,
+                "time": 1,
+                "fees": { "base": 0.00000001 }
+            } }),
+            json!({ TXID_A: {
+                "wtxid": TXID_A,
+                "vsize": 1,
+                "time": -1,
+                "fees": { "base": 0.00000001 }
+            } }),
+            json!({ TXID_A: {
+                "wtxid": TXID_A,
+                "vsize": 1,
+                "time": 1,
+                "fees": { "base": -0.00000001 }
+            } }),
+            json!({ TXID_A: {
+                "wtxid": TXID_A,
+                "vsize": 1,
+                "time": 1,
+                "fees": { "base": 0.000000001 }
+            } }),
         ] {
             if let Ok(wire) = serde_json::from_value::<RawMempoolWire>(response) {
                 assert!(wire.into_entries(MAX_SUPPORTED_MEMPOOL_ENTRIES).is_err());
@@ -569,8 +742,18 @@ mod tests {
 
         let _decode_limit = DecodeEntryLimitGuard::set(1);
         let result = serde_json::from_value::<RawMempoolWire>(json!({
-            TXID_A: { "vsize": 1, "time": 1, "fees": { "base": 0.00000001 } },
-            TXID_B: { "vsize": 2, "time": 2, "fees": { "base": 0.00000002 } }
+            TXID_A: {
+                "wtxid": TXID_A,
+                "vsize": 1,
+                "time": 1,
+                "fees": { "base": 0.00000001 }
+            },
+            TXID_B: {
+                "wtxid": TXID_B,
+                "vsize": 2,
+                "time": 2,
+                "fees": { "base": 0.00000002 }
+            }
         }))
         .expect("wire response")
         .into_entries(1);

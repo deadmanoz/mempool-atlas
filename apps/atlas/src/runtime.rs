@@ -8,8 +8,9 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::model::{
-    MempoolSnapshot, ModelError, SourceAvailability, SourceSnapshotResponse, SourceSummary,
-    SourcesResponse, validate_source_id, validate_source_label,
+    MempoolObservation, MempoolSnapshot, ModelError, SourceAvailability, SourceSnapshotResponse,
+    SourceSummary, SourcesResponse, TransactionClassifications, TransactionDetailResponse,
+    validate_source_id, validate_source_label,
 };
 use crate::rpc::{RpcClient, RpcError};
 
@@ -25,6 +26,7 @@ pub struct SourceRuntime {
 struct RuntimeState {
     last_poll_started_at_ms: Option<u64>,
     latest: Option<Arc<MempoolSnapshot>>,
+    classifications: TransactionClassifications,
     last_error: Option<String>,
     cached_response: Option<Bytes>,
 }
@@ -73,13 +75,13 @@ impl SourceRuntime {
         let started_at_ms = system_now_ms()?;
         self.record_poll_started(started_at_ms).await;
         match rpc
-            .get_mempool_snapshot(&self.source_id, &self.source_label)
+            .get_mempool_observation(&self.source_id, &self.source_label)
             .await
         {
-            Ok(snapshot) => {
-                let transaction_count = snapshot.transaction_count;
-                let observed_at_ms = snapshot.observed_at_ms;
-                self.record_success(snapshot).await?;
+            Ok(observation) => {
+                let transaction_count = observation.snapshot.transaction_count;
+                let observed_at_ms = observation.snapshot.observed_at_ms;
+                self.record_success(observation).await?;
                 info!(
                     source_id = %self.source_id,
                     transaction_count,
@@ -128,8 +130,12 @@ impl SourceRuntime {
 
     pub(crate) async fn record_success(
         &self,
-        snapshot: MempoolSnapshot,
+        observation: MempoolObservation,
     ) -> Result<(), RuntimeError> {
+        let MempoolObservation {
+            snapshot,
+            classifications,
+        } = observation;
         if snapshot.source_id != self.source_id {
             return Err(RuntimeError::SnapshotSourceMismatch {
                 expected: self.source_id.clone(),
@@ -147,6 +153,7 @@ impl SourceRuntime {
 
         let mut state = self.state.write().await;
         state.latest = Some(latest);
+        state.classifications = classifications;
         state.last_error = None;
         state.cached_response = Some(cached_response);
         Ok(())
@@ -173,6 +180,39 @@ impl SourceRuntime {
         state.cached_response = Some(cached_response);
         Ok(())
     }
+
+    pub async fn transaction_detail(&self, txid: &str) -> TransactionLookup {
+        let state = self.state.read().await;
+        let Some(snapshot) = state.latest.as_ref() else {
+            return TransactionLookup::WaitingForSnapshot;
+        };
+        if snapshot
+            .transactions
+            .binary_search_by(|entry| entry.txid.as_str().cmp(txid))
+            .is_err()
+        {
+            return TransactionLookup::NotPresent;
+        }
+        let Some(classification) = state.classifications.get(txid) else {
+            return TransactionLookup::Unclassified;
+        };
+        TransactionLookup::Ready(TransactionDetailResponse {
+            source_id: self.source_id.clone(),
+            snapshot_observed_at_ms: snapshot.observed_at_ms,
+            txid: classification.txid.clone(),
+            wtxid: classification.wtxid.clone(),
+            assessment: classification.assessment.clone(),
+            rules: classification.rules.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TransactionLookup {
+    Ready(TransactionDetailResponse),
+    WaitingForSnapshot,
+    NotPresent,
+    Unclassified,
 }
 
 fn summary_from_state(runtime: &SourceRuntime, state: &RuntimeState) -> SourceSummary {
@@ -326,6 +366,10 @@ mod tests {
         .expect("snapshot")
     }
 
+    fn observation(observed_at_ms: u64) -> MempoolObservation {
+        MempoolObservation::new(snapshot(observed_at_ms), BTreeMap::new()).expect("observation")
+    }
+
     #[tokio::test]
     async fn successful_snapshot_replaces_current_state() {
         let runtime = runtime();
@@ -336,7 +380,7 @@ mod tests {
 
         runtime.record_poll_started(10).await;
         runtime
-            .record_success(snapshot(20))
+            .record_success(observation(20))
             .await
             .expect("record snapshot");
         let response = runtime.snapshot_response().await;
@@ -357,7 +401,7 @@ mod tests {
     async fn failed_poll_retains_last_good_snapshot_as_stale() {
         let runtime = runtime();
         runtime
-            .record_success(snapshot(20))
+            .record_success(observation(20))
             .await
             .expect("record snapshot");
         let before = runtime
@@ -423,7 +467,7 @@ mod tests {
         assert!(registry.get("missing").is_none());
         assert!(!registry.is_ready().await);
 
-        core.record_success(snapshot(20))
+        core.record_success(observation(20))
             .await
             .expect("record snapshot");
         assert!(registry.is_ready().await);
@@ -433,7 +477,7 @@ mod tests {
     async fn encoded_snapshot_response_is_shared_between_requests() {
         let runtime = runtime();
         runtime
-            .record_success(snapshot(20))
+            .record_success(observation(20))
             .await
             .expect("record snapshot");
 

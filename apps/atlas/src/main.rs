@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use mempool_atlas::{RpcClient, SourceRegistry, SourceRuntime, router};
+use mempool_atlas::{PolicyLimits, RpcClient, SourceRegistry, SourceRuntime, router};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -32,6 +32,18 @@ struct Cli {
     poll_seconds: NonZeroU64,
     #[arg(long, env = "ATLAS_MAX_MEMPOOL_ENTRIES", default_value = "200000")]
     max_mempool_entries: NonZeroU64,
+    #[arg(
+        long,
+        env = "ATLAS_MAX_CLASSIFICATIONS_PER_POLL",
+        default_value = "10000"
+    )]
+    max_classifications_per_poll: NonZeroUsize,
+    #[arg(
+        long,
+        env = "ATLAS_CLASSIFICATION_BUDGET_SECONDS",
+        default_value = "45"
+    )]
+    classification_budget_seconds: NonZeroU64,
 }
 
 #[tokio::main]
@@ -58,6 +70,11 @@ async fn main() -> anyhow::Result<()> {
         cli.rpc_username,
         password,
         cli.max_mempool_entries.get(),
+        PolicyLimits::new(
+            cli.max_classifications_per_poll.get(),
+            Duration::from_secs(cli.classification_budget_seconds.get()),
+        )
+        .context("validating policy enrichment limits")?,
     )
     .context("creating Bitcoin RPC client")?;
     let registry =
@@ -72,6 +89,8 @@ async fn main() -> anyhow::Result<()> {
         rpc_url = %cli.rpc_url,
         poll_seconds = cli.poll_seconds.get(),
         max_mempool_entries = cli.max_mempool_entries.get(),
+        max_classifications_per_poll = cli.max_classifications_per_poll.get(),
+        classification_budget_seconds = cli.classification_budget_seconds.get(),
         "Mempool Atlas snapshot service listening"
     );
 
@@ -158,6 +177,8 @@ mod tests {
         assert_eq!(cli.rpc_username, "atlas");
         assert_eq!(cli.poll_seconds.get(), 300);
         assert_eq!(cli.max_mempool_entries.get(), 200_000);
+        assert_eq!(cli.max_classifications_per_poll.get(), 10_000);
+        assert_eq!(cli.classification_budget_seconds.get(), 45);
         validate_bind(cli.bind).expect("loopback bind");
     }
 

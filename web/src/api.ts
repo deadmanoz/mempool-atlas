@@ -1,15 +1,33 @@
 import type {
+  Bip110Assessment,
+  Bip110Status,
+  Bip110Summary,
   ChainTip,
   MempoolSnapshot,
   MempoolTransaction,
+  RuleAssessment,
+  RuleId,
+  RuleVerdict,
   SourceAvailability,
   SourceSnapshotResponse,
   SourceSummary,
   SourcesResponse,
+  TransactionDetailResponse,
 } from "./types";
+import { RULE_IDS } from "./types";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
+
+export class AtlasRequestError extends Error {
+  readonly status: number;
+
+  constructor(status: number, detail: string) {
+    super(`Atlas request failed (${status})${detail}`);
+    this.name = "AtlasRequestError";
+    this.status = status;
+  }
+}
 
 const isNonNegativeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -61,6 +79,110 @@ const parseAvailability = (value: unknown): SourceAvailability => {
     return value;
   }
   throw new TypeError("Invalid source availability");
+};
+
+const isTxid = (value: unknown): value is string =>
+  typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+
+const parseRuleId = (value: unknown): RuleId => {
+  if (
+    typeof value === "string" &&
+    (RULE_IDS as readonly string[]).includes(value)
+  ) {
+    return value as RuleId;
+  }
+  throw new TypeError("Invalid BIP-110 rule identifier");
+};
+
+const parseRuleIds = (value: unknown, field: string): RuleId[] => {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`Invalid ${field}`);
+  }
+  const rules = value.map((rule) => parseRuleId(rule));
+  if (new Set(rules).size !== rules.length) {
+    throw new TypeError(`${field} contains duplicate rules`);
+  }
+  return rules;
+};
+
+const parseBip110Status = (value: unknown): Bip110Status => {
+  if (
+    value === "compatible" ||
+    value === "violating" ||
+    value === "indeterminate"
+  ) {
+    return value;
+  }
+  throw new TypeError("Invalid BIP-110 status");
+};
+
+export const parseBip110Assessment = (
+  value: unknown,
+): Bip110Assessment | null => {
+  if (value === null) {
+    return null;
+  }
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "status",
+      "primary_rule",
+      "violated_rules",
+      "unknown_rules",
+    ])
+  ) {
+    throw new TypeError("Invalid BIP-110 assessment");
+  }
+
+  const status = parseBip110Status(value.status);
+  const primaryRule =
+    value.primary_rule === null ? null : parseRuleId(value.primary_rule);
+  const violatedRules = parseRuleIds(value.violated_rules, "violated rules");
+  const unknownRules = parseRuleIds(value.unknown_rules, "unknown rules");
+  if (
+    (status === "compatible" &&
+      (primaryRule !== null ||
+        violatedRules.length !== 0 ||
+        unknownRules.length !== 0)) ||
+    (status === "violating" &&
+      (violatedRules.length === 0 ||
+        (primaryRule !== null && !violatedRules.includes(primaryRule)))) ||
+    (status === "indeterminate" &&
+      (primaryRule !== null ||
+        violatedRules.length !== 0 ||
+        unknownRules.length === 0))
+  ) {
+    throw new TypeError("Inconsistent BIP-110 assessment");
+  }
+
+  return value as unknown as Bip110Assessment;
+};
+
+const parseBip110Summary = (value: unknown): Bip110Summary => {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "evaluator_id",
+      "evaluator_version",
+      "scope",
+      "compatible_count",
+      "violating_count",
+      "indeterminate_count",
+      "unclassified_count",
+    ]) ||
+    typeof value.evaluator_id !== "string" ||
+    value.evaluator_id.trim().length === 0 ||
+    typeof value.evaluator_version !== "string" ||
+    value.evaluator_version.trim().length === 0 ||
+    value.scope !== "knots_mempool_policy" ||
+    !isNonNegativeInteger(value.compatible_count) ||
+    !isNonNegativeInteger(value.violating_count) ||
+    !isNonNegativeInteger(value.indeterminate_count) ||
+    !isNonNegativeInteger(value.unclassified_count)
+  ) {
+    throw new TypeError("Invalid BIP-110 summary");
+  }
+  return value as unknown as Bip110Summary;
 };
 
 export const parseSourceSummary = (value: unknown): SourceSummary => {
@@ -150,9 +272,16 @@ const parseTransaction = (
 ): MempoolTransaction => {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ["txid", "vsize", "fee_sats", "entered_at_ms"]) ||
-    typeof value.txid !== "string" ||
-    !/^[0-9a-f]{64}$/.test(value.txid) ||
+    !hasOnlyKeys(value, [
+      "txid",
+      "wtxid",
+      "vsize",
+      "fee_sats",
+      "entered_at_ms",
+      "bip110",
+    ]) ||
+    !isTxid(value.txid) ||
+    !isTxid(value.wtxid) ||
     !isNonNegativeInteger(value.vsize) ||
     value.vsize === 0 ||
     !isNonNegativeInteger(value.fee_sats) ||
@@ -160,6 +289,7 @@ const parseTransaction = (
   ) {
     throw new TypeError(`Invalid transaction at index ${index}`);
   }
+  parseBip110Assessment(value.bip110);
   return value as unknown as MempoolTransaction;
 };
 
@@ -173,6 +303,7 @@ export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
       "chain_tip",
       "transaction_count",
       "total_vsize",
+      "bip110_summary",
       "transactions",
     ]) ||
     !isSourceId(value.source_id) ||
@@ -187,8 +318,15 @@ export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
   }
 
   parseChainTip(value.chain_tip);
+  const bip110Summary = parseBip110Summary(value.bip110_summary);
   let totalVsize = 0;
   let previousTxid: string | null = null;
+  const statusCounts = {
+    compatible: 0,
+    violating: 0,
+    indeterminate: 0,
+    unclassified: 0,
+  };
   for (const [index, item] of value.transactions.entries()) {
     const transaction = parseTransaction(item, index);
     if (previousTxid !== null && transaction.txid <= previousTxid) {
@@ -199,6 +337,11 @@ export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
     if (!Number.isSafeInteger(totalVsize)) {
       throw new TypeError("Snapshot total vsize is not safely representable");
     }
+    if (transaction.bip110 === null) {
+      statusCounts.unclassified += 1;
+    } else {
+      statusCounts[transaction.bip110.status] += 1;
+    }
   }
   if (value.transaction_count !== value.transactions.length) {
     throw new TypeError("Snapshot transaction count does not match payload");
@@ -206,8 +349,111 @@ export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
   if (value.total_vsize !== totalVsize) {
     throw new TypeError("Snapshot total vsize does not match payload");
   }
+  if (
+    bip110Summary.compatible_count !== statusCounts.compatible ||
+    bip110Summary.violating_count !== statusCounts.violating ||
+    bip110Summary.indeterminate_count !== statusCounts.indeterminate ||
+    bip110Summary.unclassified_count !== statusCounts.unclassified
+  ) {
+    throw new TypeError("BIP-110 summary does not match payload");
+  }
 
   return value as unknown as MempoolSnapshot;
+};
+
+const parseRuleVerdict = (value: unknown): RuleVerdict => {
+  if (value === "pass" || value === "violate" || value === "unknown") {
+    return value;
+  }
+  throw new TypeError("Invalid rule verdict");
+};
+
+const parseRuleAssessment = (value: unknown, index: number): RuleAssessment => {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "rule",
+      "number",
+      "verdict",
+      "evidence_count",
+      "evidence",
+      "missing_count",
+      "missing",
+    ]) ||
+    value.rule !== RULE_IDS[index] ||
+    value.number !== index + 1 ||
+    !isNonNegativeInteger(value.evidence_count) ||
+    !Array.isArray(value.evidence) ||
+    !isNonNegativeInteger(value.missing_count) ||
+    !Array.isArray(value.missing) ||
+    value.evidence.length > 1 ||
+    value.missing.length > 1 ||
+    (value.evidence_count === 0) !== (value.evidence.length === 0) ||
+    (value.missing_count === 0) !== (value.missing.length === 0)
+  ) {
+    throw new TypeError(`Invalid rule assessment at index ${index}`);
+  }
+  const verdict = parseRuleVerdict(value.verdict);
+  if (
+    (verdict === "pass" &&
+      (value.evidence_count !== 0 || value.missing_count !== 0)) ||
+    (verdict === "violate" && value.evidence_count === 0) ||
+    (verdict === "unknown" &&
+      (value.evidence_count !== 0 || value.missing_count === 0))
+  ) {
+    throw new TypeError(`Inconsistent rule verdict at index ${index}`);
+  }
+  return value as unknown as RuleAssessment;
+};
+
+export const parseTransactionDetailResponse = (
+  value: unknown,
+): TransactionDetailResponse => {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "source_id",
+      "snapshot_observed_at_ms",
+      "txid",
+      "wtxid",
+      "assessment",
+      "rules",
+    ]) ||
+    !isSourceId(value.source_id) ||
+    !isNonNegativeInteger(value.snapshot_observed_at_ms) ||
+    !isTxid(value.txid) ||
+    !isTxid(value.wtxid) ||
+    !Array.isArray(value.rules) ||
+    value.rules.length !== RULE_IDS.length
+  ) {
+    throw new TypeError("Invalid transaction detail response");
+  }
+
+  const assessment = parseBip110Assessment(value.assessment);
+  if (assessment === null) {
+    throw new TypeError(
+      "Classified transaction detail is missing its assessment",
+    );
+  }
+  const rules = value.rules.map((rule, index) =>
+    parseRuleAssessment(rule, index),
+  );
+  const violatedRules = rules
+    .filter((rule) => rule.verdict === "violate")
+    .map((rule) => rule.rule);
+  const unknownRules = rules
+    .filter((rule) => rule.missing_count > 0)
+    .map((rule) => rule.rule);
+  if (
+    assessment.violated_rules.length !== violatedRules.length ||
+    assessment.unknown_rules.length !== unknownRules.length ||
+    assessment.violated_rules.some((rule) => !violatedRules.includes(rule)) ||
+    assessment.unknown_rules.some((rule) => !unknownRules.includes(rule))
+  ) {
+    throw new TypeError("Transaction detail rules do not match assessment");
+  }
+
+  return value as unknown as TransactionDetailResponse;
 };
 
 export const parseSourcesResponse = (value: unknown): SourcesResponse => {
@@ -267,7 +513,7 @@ const fetchJson = async (path: string): Promise<unknown> => {
     } catch {
       // The HTTP status remains useful when the body is not JSON.
     }
-    throw new Error(`Atlas request failed (${response.status})${detail}`);
+    throw new AtlasRequestError(response.status, detail);
   }
   return response.json();
 };
@@ -280,4 +526,14 @@ export const fetchSourceSnapshot = async (
 ): Promise<SourceSnapshotResponse> =>
   parseSourceSnapshotResponse(
     await fetchJson(`/api/v1/sources/${encodeURIComponent(sourceId)}/mempool`),
+  );
+
+export const fetchTransactionDetail = async (
+  sourceId: string,
+  txid: string,
+): Promise<TransactionDetailResponse> =>
+  parseTransactionDetailResponse(
+    await fetchJson(
+      `/api/v1/sources/${encodeURIComponent(sourceId)}/transactions/${encodeURIComponent(txid)}`,
+    ),
   );

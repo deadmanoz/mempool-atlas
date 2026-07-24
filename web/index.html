@@ -5,184 +5,304 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Explore a periodically observed Bitcoin node mempool."
+      content="Explore policy classification across one periodically observed Bitcoin node mempool."
     />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23080610'/%3E%3Ccircle cx='32' cy='32' r='18' fill='%23ff7a18'/%3E%3Cpath d='M24 18v28M36 18v28M20 24h19a7 7 0 0 1 0 14H20m3-7h18a7 7 0 0 1 0 14H20' fill='none' stroke='%23080610' stroke-width='5'/%3E%3C/svg%3E"
-    />
-    <title>Mempool Atlas</title>
+    <title>Mempool Atlas · Rule Terrain</title>
   </head>
   <body>
     <main class="shell">
-      <header class="site-header">
-        <div>
-          <p class="eyebrow">Whole-mempool explorer</p>
-          <h1>Mempool Atlas</h1>
-          <p class="lede">
-            One complete, periodically observed snapshot from one Bitcoin node.
-          </p>
+      <header class="atlas-header">
+        <div class="brand-block">
+          <span class="brand-mark" aria-hidden="true">MA</span>
+          <div>
+            <h1>Mempool Atlas</h1>
+            <p>Rule Terrain</p>
+          </div>
         </div>
-        <button id="refresh" class="primary-action" type="button">
-          Refresh snapshot
+
+        <dl class="header-facts" aria-label="Current snapshot">
+          <div>
+            <dt>Source</dt>
+            <dd>
+              <strong id="source-label">Loading</strong>
+              <code id="source-id">unknown</code>
+            </dd>
+          </div>
+          <div>
+            <dt>Snapshot</dt>
+            <dd id="observed-value">Waiting</dd>
+          </div>
+          <div>
+            <dt>Height</dt>
+            <dd id="tip-value">Unknown</dd>
+          </div>
+          <div>
+            <dt>Transactions</dt>
+            <dd>
+              <span id="transaction-count">Waiting</span>
+              <small id="total-vsize">Waiting</small>
+            </dd>
+          </div>
+        </dl>
+
+        <button id="refresh" class="refresh-button" type="button">
+          Refresh
         </button>
       </header>
 
       <section
         id="page-status"
-        class="status-panel"
+        class="status-strip"
         data-state="waiting"
         aria-live="polite"
       >
         <span class="status-light" aria-hidden="true"></span>
-        <div>
-          <strong id="status-title">Connecting to Atlas</strong>
-          <p id="status-detail">Loading the configured source.</p>
+        <strong id="status-title">Connecting to Atlas</strong>
+        <span id="status-detail">Loading the configured source.</span>
+      </section>
+
+      <section class="lens-toolbar" aria-label="View controls">
+        <div class="toolbar-group">
+          <span class="toolbar-label">Lens</span>
+          <div class="segmented" role="tablist" aria-label="Mempool lens">
+            <button
+              id="terrain-tab"
+              role="tab"
+              tabindex="0"
+              aria-selected="true"
+              aria-controls="terrain-view"
+              type="button"
+            >
+              Classification terrain
+            </button>
+            <button
+              id="fee-age-tab"
+              role="tab"
+              tabindex="-1"
+              aria-selected="false"
+              aria-controls="fee-age-view"
+              type="button"
+            >
+              Fee rate × age
+            </button>
+          </div>
+        </div>
+
+        <div class="coverage-legend" aria-label="Evaluator coverage">
+          <span class="toolbar-label">Coverage</span>
+          <span
+            ><i class="legend-dot complete" aria-hidden="true"></i>Complete
+            <strong id="coverage-complete">0</strong></span
+          >
+          <span
+            ><i class="legend-dot incomplete" aria-hidden="true"></i>Incomplete
+            <strong id="coverage-incomplete">0</strong></span
+          >
+          <span
+            ><i class="legend-dot unclassified" aria-hidden="true"></i>Not
+            classified <strong id="coverage-unclassified">0</strong></span
+          >
         </div>
       </section>
 
-      <section class="metric-grid" aria-label="Snapshot summary">
-        <article class="metric-card source-card">
-          <span class="metric-label">Source</span>
-          <strong id="source-label" class="metric-value">Loading</strong>
-          <code id="source-id" class="metric-note">unknown</code>
-        </article>
-        <article class="metric-card">
-          <span class="metric-label">Observed</span>
-          <strong id="observed-value" class="metric-value">Waiting</strong>
-          <span class="metric-note">Snapshot time</span>
-        </article>
-        <article class="metric-card">
-          <span class="metric-label">Chain tip</span>
-          <strong id="tip-value" class="metric-value">Unknown</strong>
-          <span class="metric-note">Height and block hash</span>
-        </article>
-        <article class="metric-card">
-          <span class="metric-label">Transactions</span>
-          <strong id="transaction-count" class="metric-value">Waiting</strong>
-          <span class="metric-note">Complete RPC membership</span>
-        </article>
-        <article class="metric-card">
-          <span class="metric-label">Virtual size</span>
-          <strong id="total-vsize" class="metric-value">Waiting</strong>
-          <span class="metric-note">Across this snapshot</span>
-        </article>
-      </section>
+      <div class="workspace">
+        <section class="terrain-panel" aria-label="Mempool visualisation">
+          <div id="terrain-view" role="tabpanel" aria-labelledby="terrain-tab">
+            <div class="terrain-heading">
+              <div>
+                <p class="eyebrow">Current source membership</p>
+                <h2>Classification terrain</h2>
+              </div>
+              <dl class="terrain-totals" aria-label="Classification totals">
+                <div class="compatible">
+                  <dt>Compatible</dt>
+                  <dd id="compatible-count">0</dd>
+                </div>
+                <div class="indeterminate">
+                  <dt>Indeterminate</dt>
+                  <dd id="indeterminate-count">0</dd>
+                </div>
+                <div class="violating">
+                  <dt>Would violate policy</dt>
+                  <dd id="violating-count">0</dd>
+                </div>
+              </dl>
+            </div>
 
-      <section class="panel filter-panel" aria-labelledby="filters-heading">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Explore</p>
-            <h2 id="filters-heading">Filter the snapshot</h2>
+            <p id="terrain-empty" class="empty-state">
+              The first complete mempool snapshot is being collected.
+            </p>
+            <div id="terrain-stage" class="terrain-stage" hidden>
+              <canvas
+                id="terrain-canvas"
+                tabindex="0"
+                aria-describedby="terrain-summary"
+              ></canvas>
+              <div
+                id="terrain-regions"
+                class="terrain-regions"
+                aria-label="Classification regions"
+              ></div>
+            </div>
+            <p id="terrain-summary" class="visual-summary">
+              Each transaction appears once. Select a rule territory to inspect
+              its sample.
+            </p>
           </div>
-          <p id="filter-summary" class="panel-summary">No snapshot loaded.</p>
-        </div>
 
-        <form id="filters" class="filter-grid">
-          <label>
-            <span>Minimum fee rate</span>
-            <span class="input-with-unit">
-              <input
-                id="minimum-fee-rate"
-                type="number"
-                min="0"
-                step="0.1"
-                value="0"
-              />
-              <small>sat/vB</small>
-            </span>
-          </label>
-          <label>
-            <span>Newest transactions</span>
-            <select id="maximum-age">
-              <option value="all">Any age</option>
-              <option value="600000">Last 10 minutes</option>
-              <option value="3600000">Last hour</option>
-              <option value="21600000">Last 6 hours</option>
-              <option value="86400000">Last 24 hours</option>
-              <option value="259200000">Last 3 days</option>
-            </select>
-          </label>
-          <label>
-            <span>Minimum transaction size</span>
-            <span class="input-with-unit">
-              <input
-                id="minimum-vsize"
-                type="number"
-                min="0"
-                step="1"
-                value="0"
-              />
-              <small>vB</small>
-            </span>
-          </label>
-          <div class="filter-actions">
-            <button class="primary-action" type="submit">Apply filters</button>
-            <button id="reset-filters" type="button">Reset</button>
+          <div
+            id="fee-age-view"
+            role="tabpanel"
+            aria-labelledby="fee-age-tab"
+            hidden
+          >
+            <div class="terrain-heading">
+              <div>
+                <p class="eyebrow">Secondary lens</p>
+                <h2>Fee rate × age</h2>
+              </div>
+              <p id="filter-summary" class="panel-summary">
+                No snapshot loaded.
+              </p>
+            </div>
+
+            <form id="filters" class="filter-grid">
+              <label>
+                <span>Minimum fee rate</span>
+                <span class="input-with-unit">
+                  <input
+                    id="minimum-fee-rate"
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value="0"
+                  />
+                  <small>sat/vB</small>
+                </span>
+              </label>
+              <label>
+                <span>Newest transactions</span>
+                <select id="maximum-age">
+                  <option value="all">Any age</option>
+                  <option value="600000">Last 10 minutes</option>
+                  <option value="3600000">Last hour</option>
+                  <option value="21600000">Last 6 hours</option>
+                  <option value="86400000">Last 24 hours</option>
+                  <option value="259200000">Last 3 days</option>
+                </select>
+              </label>
+              <label>
+                <span>Minimum transaction size</span>
+                <span class="input-with-unit">
+                  <input
+                    id="minimum-vsize"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value="0"
+                  />
+                  <small>vB</small>
+                </span>
+              </label>
+              <div class="filter-actions">
+                <button class="primary-action" type="submit">Apply</button>
+                <button id="reset-filters" type="button">Reset</button>
+              </div>
+            </form>
+
+            <p id="fee-age-empty" class="empty-state">
+              The first complete mempool snapshot is being collected.
+            </p>
+            <div id="fee-age-stage" class="canvas-wrap" hidden>
+              <canvas id="mempool-canvas" role="img"></canvas>
+            </div>
+            <p id="visual-summary" class="visual-summary"></p>
           </div>
-        </form>
-      </section>
+        </section>
 
-      <section class="panel visual-panel" aria-labelledby="visual-heading">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Swimming in the mempool</p>
-            <h2 id="visual-heading">Fee rate × age</h2>
+        <aside class="inspector-panel" aria-labelledby="rule-name">
+          <div class="inspector-heading">
+            <div>
+              <p id="rule-number" class="eyebrow">Rule 2</p>
+              <h2 id="rule-name">Serialized element size</h2>
+            </div>
+            <span class="policy-badge">Mempool policy</span>
           </div>
-          <p class="panel-summary">Square area represents virtual size.</p>
-        </div>
 
-        <p id="empty" class="empty-state">
-          The first complete mempool snapshot is being collected.
-        </p>
-        <div id="visual-wrap" class="canvas-wrap" hidden>
-          <canvas id="mempool-canvas" role="img"></canvas>
-        </div>
-        <p id="visual-summary" class="visual-summary"></p>
-      </section>
+          <p id="rule-description" class="rule-description">
+            Select a rule territory to inspect its population.
+          </p>
+          <p class="policy-note">
+            This describes compatibility with rules applied by Bitcoin Knots as
+            mempool policy. It does not show that this source rejected a
+            transaction, or that a transaction is consensus-invalid.
+          </p>
 
-      <details id="inspector" class="panel inspector" hidden>
-        <summary>
-          <span>
-            <span class="eyebrow">Inspector</span>
-            <strong>Find a transaction</strong>
-          </span>
-          <span class="summary-hint">Search the filtered snapshot by txid</span>
-        </summary>
-
-        <form id="txid-search-form" class="search-form">
-          <label for="txid-search">Transaction ID prefix</label>
-          <div class="search-row">
-            <input
-              id="txid-search"
-              type="search"
-              spellcheck="false"
-              autocomplete="off"
-              placeholder="Enter a txid prefix"
-            />
-            <button type="submit">Search</button>
+          <div class="mode-row">
+            <span class="toolbar-label">Transaction tiles</span>
+            <div
+              class="segmented compact"
+              aria-label="Transaction tile area metric"
+            >
+              <button id="mode-count" type="button" aria-pressed="true">
+                Count
+              </button>
+              <button id="mode-vsize" type="button" aria-pressed="false">
+                vsize
+              </button>
+            </div>
           </div>
-        </form>
 
-        <p id="table-summary" class="panel-summary">No snapshot loaded.</p>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Transaction ID</th>
-                <th scope="col">Fee rate (sat/vB)</th>
-                <th scope="col">vsize (vB)</th>
-                <th scope="col">Age at observation</th>
-              </tr>
-            </thead>
-            <tbody id="transactions"></tbody>
-          </table>
-        </div>
-        <div class="pagination">
-          <button id="previous-page" type="button">Previous</button>
-          <button id="next-page" type="button">Next</button>
-        </div>
-      </details>
+          <dl class="population-metrics">
+            <div>
+              <dt>Transactions</dt>
+              <dd id="rule-count">0</dd>
+            </div>
+            <div>
+              <dt>Virtual size</dt>
+              <dd id="rule-vsize">0 vB</dd>
+            </div>
+            <div>
+              <dt>Snapshot share</dt>
+              <dd id="rule-share">0%</dd>
+            </div>
+          </dl>
+
+          <nav
+            id="rule-list"
+            class="rule-list"
+            aria-label="BIP-110 classification groups"
+          ></nav>
+
+          <section class="sample-section" aria-labelledby="sample-heading">
+            <div class="section-heading">
+              <h3 id="sample-heading">Sample transactions</h3>
+              <span id="sample-summary">No matches</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Transaction</th>
+                    <th scope="col">vsize</th>
+                    <th scope="col">Fee rate</th>
+                  </tr>
+                </thead>
+                <tbody id="rule-transactions"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="detail-section" aria-labelledby="detail-heading">
+            <div class="section-heading">
+              <h3 id="detail-heading">Selected transaction</h3>
+              <span id="detail-status">Choose a sample</span>
+            </div>
+            <div id="detail-transaction" class="detail-transaction"></div>
+            <ol id="detail-rules" class="detail-rules"></ol>
+          </section>
+        </aside>
+      </div>
     </main>
 
     <script type="module" src="/src/main.ts"></script>

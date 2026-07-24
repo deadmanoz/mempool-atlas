@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "apps/atlas",
+    "crates/rdts-rules",
 ]
 default-members = ["apps/atlas"]
 
@@ -17,6 +18,8 @@ bitcoin = { version = "0.32.7", features = ["serde"] }
 bytes = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 corepc-client = { version = "0.8", features = ["client-sync"] }
+jsonrpc = { version = "0.18", features = ["minreq_http"] }
+rdts-rules = { path = "crates/rdts-rules" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
