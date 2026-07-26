@@ -48,10 +48,10 @@
 //! prove ordinary script validity. It is intended to classify transactions
 //! already admitted to a Bitcoin Core mempool, where P2WSH commitments,
 //! P2WPKH witness shape, control-block form, and earlier script checks have
-//! already succeeded. It does not recompute the Taproot commitment and does
-//! not yet model P2SH-wrapped spends. P2SH spends yield an explicit `Unknown`
-//! rather than a guess. Callers evaluating arbitrary, unvalidated transactions
-//! must supply an equivalent validity boundary before relying on attribution.
+//! already succeeded. It does not recompute the Taproot commitment or
+//! independently validate P2SH and witness commitments. Callers evaluating
+//! arbitrary, unvalidated transactions must supply an equivalent validity
+//! boundary before relying on attribution.
 
 pub mod context;
 pub mod prevout;

@@ -6,7 +6,7 @@
 //! OP_IF executed vs pushed-as-data, empty vs non-empty P2A witness, plus
 //! grandfathering, coinbase, inactive-context, and the `Unknown` paths.
 
-use bitcoin::hashes::Hash;
+use bitcoin::hashes::{Hash, hash160};
 use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute,
     transaction,
@@ -58,11 +58,46 @@ fn p2a_spk() -> ScriptBuf {
     ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73])
 }
 
-fn p2sh_spk() -> ScriptBuf {
+fn p2sh_spk(redeem_script: &[u8]) -> ScriptBuf {
     let mut v = vec![0xa9u8, 0x14]; // OP_HASH160 push20
-    v.extend(std::iter::repeat_n(0x11u8, 20));
+    v.extend(hash160::Hash::hash(redeem_script).to_byte_array());
     v.push(0x87); // OP_EQUAL
     ScriptBuf::from_bytes(v)
+}
+
+fn push_data(data: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(data.len() + 5);
+    match data.len() {
+        len if len < 0x4c => encoded.push(len as u8),
+        len if len <= u8::MAX as usize => encoded.extend([0x4c, len as u8]),
+        len if len <= u16::MAX as usize => {
+            encoded.extend([0x4d, len as u8, (len >> 8) as u8]);
+        }
+        len => encoded.extend([
+            0x4e,
+            len as u8,
+            (len >> 8) as u8,
+            (len >> 16) as u8,
+            (len >> 24) as u8,
+        ]),
+    }
+    encoded.extend_from_slice(data);
+    encoded
+}
+
+fn p2sh_tx(
+    redeem_script: &[u8],
+    script_sig_arguments: &[Vec<u8>],
+    witness_items: &[Vec<u8>],
+) -> (Transaction, ScriptBuf) {
+    let mut tx = make_tx(witness_items, vec![spk_of_len_nonopreturn(1)]);
+    let mut script_sig = Vec::new();
+    for argument in script_sig_arguments {
+        script_sig.extend(push_data(argument));
+    }
+    script_sig.extend(push_data(redeem_script));
+    tx.input[0].script_sig = ScriptBuf::from_bytes(script_sig);
+    (tx, p2sh_spk(redeem_script))
 }
 
 /// A control block of the given Merkle depth and leaf version:
@@ -758,31 +793,83 @@ fn legacy_scriptsig_push_over_256_violates_rule2() {
 }
 
 #[test]
-fn p2sh_spend_is_unsupported_not_guessed() {
-    // A P2SH input yields Unknown(UnsupportedSpend) for the input-scoped rules.
-    let spk = p2sh_spk();
-    let tx = make_tx(&[vec![0x42u8; 257]], vec![spk_of_len_nonopreturn(1)]);
+fn p2sh_non_redeem_item_boundaries_256_257() {
+    // redeemScript = OP_DROP OP_TRUE. The preceding scriptSig item is checked
+    // after the final redeemScript item is popped from the P2SH stack.
+    let redeem_script = [0x75, 0x51];
+    for (len, expect_pass) in [(256, true), (257, false)] {
+        let (tx, spk) = p2sh_tx(&redeem_script, &[vec![0x42; len]], &[]);
+        let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
+        let ev = evaluate_mempool_policy(&tx, &prevouts);
+        assert_eq!(
+            verdict(&ev, RuleId::ElementSize).is_pass(),
+            expect_pass,
+            "P2SH scriptSig argument of {len} bytes"
+        );
+        assert!(!ev.any_unknown());
+    }
+
+    let (tx, spk) = p2sh_tx(&redeem_script, &[vec![0x42; 257]], &[]);
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
-    let ev = evaluate(
-        &tx,
-        &EvaluationContext::new(Some(ACTIVATION), SPEND),
-        &prevouts,
-    );
+    let ev = evaluate_mempool_policy(&tx, &prevouts);
     match verdict(&ev, RuleId::ElementSize) {
-        RuleVerdict::Unknown { missing } => {
-            assert!(matches!(
-                missing[0],
-                Missing::UnsupportedSpend { input: 0, .. }
-            ));
-        }
-        other => panic!("expected Unknown(UnsupportedSpend), got {other:?}"),
+        RuleVerdict::Violate { evidence, .. } => assert!(matches!(
+            evidence[0],
+            Violation::PushTooLarge {
+                input: 0,
+                script: rdts_rules::ScriptKind::ScriptSig,
+                opcode_pos: 0,
+                len: 257,
+                limit: 256,
+            }
+        )),
+        other => panic!("expected P2SH scriptSig violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn p2sh_redeemscript_blob_is_exempt_but_its_internal_push_is_not() {
+    // This otherwise-valid redeemScript is larger than 256 bytes as a whole,
+    // but every push inside it is within the reduced limit:
+    // <256 bytes> DROP <32 bytes> DROP TRUE.
+    let mut allowed_redeem = push_data(&vec![0x42; 256]);
+    allowed_redeem.push(0x75);
+    allowed_redeem.extend(push_data(&[0x24; 32]));
+    allowed_redeem.extend([0x75, 0x51]);
+    assert!(allowed_redeem.len() > 256);
+
+    let (tx, spk) = p2sh_tx(&allowed_redeem, &[], &[]);
+    let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
+    let ev = evaluate_mempool_policy(&tx, &prevouts);
+    assert!(verdict(&ev, RuleId::ElementSize).is_pass());
+    assert!(!ev.any_unknown());
+
+    // The same outer exemption does not exempt a 257-byte push decoded while
+    // executing the redeemScript.
+    let mut violating_redeem = push_data(&vec![0x42; 257]);
+    violating_redeem.extend([0x75, 0x51]);
+    let (tx, spk) = p2sh_tx(&violating_redeem, &[], &[]);
+    let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
+    let ev = evaluate_mempool_policy(&tx, &prevouts);
+    match verdict(&ev, RuleId::ElementSize) {
+        RuleVerdict::Violate { evidence, .. } => assert!(matches!(
+            evidence[0],
+            Violation::PushTooLarge {
+                input: 0,
+                script: rdts_rules::ScriptKind::RedeemScript,
+                opcode_pos: 0,
+                len: 257,
+                limit: 256,
+            }
+        )),
+        other => panic!("expected redeemScript violation, got {other:?}"),
     }
 }
 
 #[test]
 fn grandfathered_p2sh_spend_is_exempt_from_consensus_input_rules() {
-    let spk = p2sh_spk();
-    let tx = make_tx(&[vec![0x42u8; 257]], vec![spk_of_len_nonopreturn(1)]);
+    let redeem_script = [0x75, 0x51]; // OP_DROP OP_TRUE
+    let (tx, spk) = p2sh_tx(&redeem_script, &[vec![0x42; 257]], &[]);
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(PRE)))]);
 
     let ev = evaluate(
@@ -801,36 +888,80 @@ fn grandfathered_p2sh_spend_is_exempt_from_consensus_input_rules() {
     ] {
         assert!(
             verdict(&ev, rule).is_pass(),
-            "grandfathering must exempt unsupported input rule {rule:?}"
+            "grandfathering must exempt P2SH input rule {rule:?}"
         );
     }
     assert!(!ev.any_unknown());
 }
 
 #[test]
-fn p2sh_spend_is_also_explicitly_unknown_under_mempool_policy() {
-    let spk = p2sh_spk();
-    let tx = make_tx(&[vec![0x42u8; 257]], vec![spk_of_len_nonopreturn(1)]);
+fn current_p2sh_spend_is_evaluated_under_consensus_rules() {
+    let redeem_script = [0x75, 0x51]; // OP_DROP OP_TRUE
+    let (tx, spk) = p2sh_tx(&redeem_script, &[vec![0x42; 257]], &[]);
+    let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
+
+    let ev = evaluate(
+        &tx,
+        &EvaluationContext::new(Some(ACTIVATION), SPEND),
+        &prevouts,
+    );
+
+    assert!(verdict(&ev, RuleId::ElementSize).is_violate());
+    assert!(!ev.any_unknown());
+    assert_eq!(
+        ev.primary_violation.as_ref().map(|primary| primary.rule),
+        Some(RuleId::ElementSize)
+    );
+}
+
+#[test]
+fn p2sh_spend_is_fully_evaluated_under_mempool_policy() {
+    let redeem_script = [0x75, 0x51]; // OP_DROP OP_TRUE
+    let (tx, spk) = p2sh_tx(&redeem_script, &[vec![0x42; 257]], &[]);
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(PRE)))]);
 
     let ev = evaluate_mempool_policy(&tx, &prevouts);
 
-    match verdict(&ev, RuleId::ElementSize) {
-        RuleVerdict::Unknown { missing } => {
-            assert!(matches!(
-                missing[0],
-                Missing::UnsupportedSpend {
-                    input: 0,
-                    reason: "p2sh_wrapped_spend_not_modeled"
-                }
-            ));
-        }
-        other => panic!("expected Unknown(UnsupportedSpend), got {other:?}"),
-    }
-    assert!(
-        ev.primary_violation.is_none(),
-        "unsupported first input makes the primary rejection indeterminate"
+    assert!(verdict(&ev, RuleId::ElementSize).is_violate());
+    assert!(!ev.any_unknown());
+    assert_eq!(
+        ev.primary_violation.as_ref().map(|primary| primary.rule),
+        Some(RuleId::ElementSize)
     );
+}
+
+#[test]
+fn p2sh_wrapped_rule3_respects_consensus_grandfathering() {
+    let wrapped_programs = [
+        {
+            let mut script = vec![0x51, 0x20]; // OP_1 push32
+            script.extend([0x33; 32]);
+            script
+        },
+        {
+            let mut script = vec![0x52, 0x20]; // OP_2 push32
+            script.extend([0x44; 32]);
+            script
+        },
+    ];
+
+    for redeem_script in wrapped_programs {
+        let (tx, spk) = p2sh_tx(&redeem_script, &[], &[]);
+
+        let pre = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk.clone(), Some(PRE)))]);
+        let grandfathered = evaluate(&tx, &EvaluationContext::new(Some(ACTIVATION), SPEND), &pre);
+        assert!(
+            verdict(&grandfathered, RuleId::UndefinedVersion).is_pass(),
+            "pre-activation P2SH-wrapped witness program must be grandfathered"
+        );
+
+        let post = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
+        let current = evaluate(&tx, &EvaluationContext::new(Some(ACTIVATION), SPEND), &post);
+        assert!(
+            verdict(&current, RuleId::UndefinedVersion).is_violate(),
+            "current P2SH-wrapped witness program must receive Rule 3"
+        );
+    }
 }
 
 #[test]

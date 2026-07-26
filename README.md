@@ -17,7 +17,7 @@ flowchart TB
     node["Bitcoin node host"] -->|"existing private WireGuard RPC"| atlas["Mempool Atlas<br/>presentation host"]
     atlas --> membership["Complete membership generation"]
     membership -->|"publish immediately<br/>with exact surviving classifications"| current["Current snapshot, classification revision,<br/>and rule evidence in memory"]
-    membership -->|"wake bounded slices"| policy["Current-generation classification"]
+    membership -->|"wake bounded candidate windows"| policy["Pending transaction and fact waves"]
     policy -->|"generation and revision guard"| current
     current --> api["Current-snapshot API"]
     current --> web["Exact rule-combination terrain"]
@@ -39,27 +39,46 @@ publishes each validated membership generation immediately, including any
 classification whose exact `txid` and `wtxid` survived from the prior
 generation. Fresh membership therefore never waits for new policy RPC work.
 
-A second loop drains bounded classification slices for the current generation.
-`getrawtransaction` supplies exact transaction bytes, and
+A second loop drains bounded candidate windows and fact waves for the current
+generation. `getrawtransaction` supplies exact transaction bytes, and
 `gettxout(txid, vout, false)` supplies confirmed prevout scripts while ignoring
 mempool spends. Unconfirmed parents are read from their raw mempool
-transactions. Atlas verifies both `txid` and `wtxid` before attaching any
-result. Each slice prefers entries without any classification before retrying
-carried partial results, and each witness variant is attempted at most once in
-one membership generation. The next successful membership makes unresolved
-current variants eligible again.
+transactions. Atlas verifies both `txid` and `wtxid` before retaining a raw
+candidate. That candidate remains pending in the same generation while fair,
+bounded waves resolve its scripts from exact current-parent outputs, a bounded
+positive prevout cache, or the node. Crossing a wave boundary does not refetch
+the candidate transaction.
 
 Incomplete enrichment never invalidates fresh membership. Entries not reached
 yet, or whose raw transaction cannot be verified, remain explicitly
-unclassified. A transaction with only some prevouts available keeps its proven
-results and exposes typed unknowns for the gaps. Successful slices publish
-progressive current-snapshot replacements. If a newer generation arrives while
-work is in flight, the classifier stops scheduling new waves for the old
-generation and both the policy coordinator and runtime reject its stale result.
-Already buffered requests can still finish. If a slice makes no classification
-progress and reports a systemic batch or all-response failure, Atlas pauses the
-rest of that generation until the next successful membership instead of
-rapidly repeating the failure.
+unclassified. Capacity deferral, unscheduled work, RPC failure, malformed or
+oversized data, and absent response envelopes remain collection state and leave
+`bip110` as `null`. A successful null-shaped `gettxout` response from the
+trusted Bitcoin Core endpoint is a genuine missing script fact only for an
+outpoint known not to be a current mempool parent. A null fallback after
+parent-raw failure is ambiguous and remains operationally unresolved until its
+bounded attempts are exhausted. Atlas evaluates a candidate only after every
+required script is present or has a genuine terminal result.
+
+Fact-only progress continues without publishing a new snapshot revision.
+Completed assessments publish progressive current-snapshot replacements. The
+drain explicitly reports continue, complete, paused, or stale: eligible work
+continues unless a systemic circuit breaker fires; a candidate that exhausts
+two attempts for one fact source in its bounded pending window is deferred for
+the rest of that generation so later candidates can continue; no eligible work
+completes the generation; a systemic RPC failure pauses it; and replacement
+membership stops stale work.
+Deferred candidates remain unclassified and become eligible again after the
+next successful membership observation. Already buffered stale requests may
+finish, but their results cannot update current state or the shared positive
+cache.
+
+The evaluator models P2SH directly. The final scriptSig item is the exempt
+redeemScript blob, while earlier scriptSig items and pushes within the
+redeemScript remain subject to rule 2. Exact P2SH-P2WPKH and P2SH-P2WSH forms
+dispatch through nested witness evaluation. P2SH-wrapped witness versions 1
+through 16 follow rule 3 because the deployed policy enables Taproot and P2A
+only for native witness programs.
 
 Each published snapshot includes a membership-local
 `classification_revision`, beginning at zero and advancing with progressive
@@ -77,7 +96,9 @@ application data to migrate or recover.
 See [docs/architecture.md](docs/architecture.md) and
 [ADR 0003](docs/adr/0003-periodic-in-memory-snapshots.md) for the system
 boundary. [ADR 0004](docs/adr/0004-exact-rule-combination-buckets.md) records
-the terrain's grouping semantics.
+the terrain's grouping semantics. [ADR 0005](docs/adr/0005-resolve-policy-facts-before-evaluation.md)
+supersedes ADR 0003's attempt-once classification details with the pending fact
+resolver and P2SH semantics.
 
 ## Website
 
@@ -133,9 +154,9 @@ host's existing web proxy.
 | `ATLAS_RPC_PASSWORD_FILE` | yes | none | One-line RPC password credential |
 | `ATLAS_POLL_SECONDS` | no | `300` | Scheduled complete-membership interval |
 | `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `200000` | Preflight and decode entry limit |
-| `ATLAS_CLASSIFICATION_SLICE_ENTRIES` | no | `2048` | Maximum witness variants attempted in one slice; range 1 to 8192 |
+| `ATLAS_CLASSIFICATION_SLICE_ENTRIES` | no | `2048` | Maximum witness variants admitted into one pending candidate window; range 1 to 8192 |
 | `ATLAS_CLASSIFICATION_RPC_LANES` | no | `4` | Concurrent raw-transaction RPC batches; range 1 to 8 |
-| `ATLAS_CLASSIFICATION_CACHE_MIB` | no | `256` | Auxiliary output-script cache admission; range 1 to 512 MiB |
+| `ATLAS_CLASSIFICATION_CACHE_MIB` | no | `256` | Combined current-output and positive confirmed-script cache admission; range 1 to 512 MiB |
 | `ATLAS_BIND` | no | `127.0.0.1:3101` | Loopback API and website listener |
 | `ATLAS_WEB_ROOT` | no | `web/dist` | Built website directory |
 
@@ -194,18 +215,49 @@ transport has already buffered and parsed that response, so these are admission
 guards rather than complete peak-memory limits. The deployment's 2 GiB memory
 cgroup is the hard boundary for transient response buffering.
 
-The default four raw RPC lanes are reduced to two lanes for confirmed prevout
-batches. A slice defaults to 2,048 candidates and is capped at 8,192. Candidate
-raw responses are admitted against a 256 MiB aggregate estimate. Mempool-parent
-raw work has its own 8,192-transaction and 256 MiB estimated phase cap. Atlas
-considers at most 65,536 unique required prevouts per slice. Confirmed-prevout
-requests have a separate 256 MiB estimated aggregate cap, which permits 4,064
-worst-case calls under the current 64 KiB plus 512-byte per-response estimate.
-These phase estimates bound planned work, not transport allocation.
+The current `jsonrpc` 0.18 response model represents both a literal
+`result: null` and an omitted `result` member as the same decoded value. Atlas
+therefore relies on the trusted Bitcoin Core endpoint emitting a valid result
+member, as it normally does. Bead `atlas-wgx` tracks preserving that distinction
+at the wire boundary so a malformed omission can never masquerade as a terminal
+missing fact.
 
-Classification drains slices until the current generation has been attempted,
-is paused after systemic no-progress failure, or is replaced by newer
-membership. It does not lengthen an otherwise on-schedule membership interval.
+The default four raw RPC lanes are reduced to two lanes for confirmed prevout
+batches. A pending candidate window defaults to 2,048 variants and is capped at
+8,192. Candidate raw responses are admitted against a 256 MiB aggregate
+estimate. Mempool-parent raw work has its own 8,192-transaction and 256 MiB
+estimated wave cap. Atlas uses 65,536 unique required prevouts as the target per
+pending window, but admits one candidate when that transaction alone exceeds
+the count target; its raw and retained-script byte bounds still apply. Each
+confirmed-prevout fact wave has a separate 256 MiB estimated aggregate cap,
+which permits 4,064 worst-case calls under the current 64 KiB plus 512-byte
+per-response estimate. Facts postponed by wave bounds remain pending and
+continue fairly within the same membership generation. A candidate whose fact
+cannot be admitted under a hard retained-script bound is eventually deferred
+for that generation rather than exposed as an evaluator unknown or allowed to
+block later candidates. Capacity recovery is bounded by the pending candidate
+count and yields between relief passes while preserving facts already fetched
+in the current call. These estimates bound planned work, not transport
+allocation.
+
+The configured auxiliary cache bound covers exact current-transaction outputs
+and positive confirmed `OutPoint` scripts. Positive confirmed facts may survive
+membership generations and are evicted when necessary; nulls and failures are
+never cached. Retained pending scripts have a separate 256 MiB ceiling.
+Unresolved fact indexes, pending raw transactions, decoded RPC responses,
+classifications, the encoded snapshot, allocator overhead, and overlapping
+readers remain outside both bounds.
+
+Classification drains according to an explicit continue, complete, paused, or
+stale disposition. Fact-only progress continues without publishing a snapshot
+revision, locally exhausted candidates are counted and deferred, systemic RPC
+failure pauses the generation, and replacement membership stops stale work.
+Classification does not lengthen an otherwise on-schedule membership interval.
+Logs expose `fact_requests`, `facts_resolved`, `facts_missing`,
+`capacity_deferred`, `deferred_candidates`, `response_failures`,
+`systemic_response_failures`, `missing_responses`, `batch_failures`, and
+`response_bytes` separately.
+
 The first deployed membership-only slice accepted complete
 28,520 to 33,381 entry snapshots over WireGuard in 6.9 to 15.4 seconds
 end-to-end. Peak service memory after collection and a full browser load stayed

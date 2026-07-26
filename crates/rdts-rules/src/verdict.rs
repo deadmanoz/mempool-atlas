@@ -72,6 +72,8 @@ pub enum ScriptKind {
     Tapscript,
     /// A legacy scriptSig (bare or the non-redeemScript part of P2SH).
     ScriptSig,
+    /// A BIP16 P2SH redeemScript after its exempt scriptSig push is removed.
+    RedeemScript,
     /// A legacy (bare) prevout scriptPubKey executed as a script.
     ScriptPubKey,
 }
@@ -119,8 +121,12 @@ pub enum Violation {
     UndefinedWitnessVersion {
         /// Input index.
         input: usize,
-        /// The witness version number (2-16, or 1 for a non-empty-witness P2A).
+        /// The witness version number (2-16, or an unrecognized v1 form).
         version: u8,
+        /// Whether the witness program was wrapped in P2SH. The client does
+        /// not recognize Taproot or P2A through P2SH, so every wrapped v1
+        /// program is undefined.
+        p2sh_wrapped: bool,
         /// Whether this is the non-empty-witness P2A case that falls through to
         /// the upgradable-witness rejection.
         p2a_non_empty_witness: bool,
@@ -187,10 +193,8 @@ pub enum Missing {
         /// Input index.
         input: usize,
     },
-    /// The spend form is recognized but not modeled by this evaluator (today:
-    /// P2SH-wrapped spends, whose nested redeemScript / witness dispatch is a
-    /// `VERIFY(client)` open item). The evaluator refuses to guess rather than
-    /// emit a possibly-wrong verdict.
+    /// The spend form is recognized but not modeled by this evaluator. The
+    /// evaluator refuses to guess rather than emit a possibly-wrong verdict.
     UnsupportedSpend {
         /// Input index.
         input: usize,

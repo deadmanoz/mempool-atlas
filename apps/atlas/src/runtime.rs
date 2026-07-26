@@ -12,7 +12,7 @@ use crate::model::{
     SourceSummary, SourcesResponse, TransactionClassifications, TransactionDetailResponse,
     validate_source_id, validate_source_label,
 };
-use crate::policy::{PolicyEnricher, PolicyError, PolicyPublication};
+use crate::policy::{PolicyDrain, PolicyEnricher, PolicyError, PolicyPublication};
 use crate::rpc::{RpcClient, RpcError};
 
 #[derive(Debug)]
@@ -112,7 +112,14 @@ impl SourceRuntime {
                     generation = report.generation,
                     attempted = report.attempted,
                     newly_classified = report.newly_classified,
+                    fact_requests = report.fact_requests,
+                    facts_resolved = report.facts_resolved,
+                    facts_missing = report.facts_missing,
+                    capacity_deferred = report.capacity_deferred,
+                    deferred_candidates = report.deferred_candidates,
                     response_failures = report.response_failures,
+                    systemic_response_failures = report.systemic_response_failures,
+                    missing_responses = report.missing_responses,
                     batch_failures = report.batch_failures,
                     response_bytes = report.response_bytes,
                     elapsed_ms = slice_started_at.elapsed().as_millis(),
@@ -136,24 +143,23 @@ impl SourceRuntime {
                         }
                     }
                 }
-                if report.stale {
-                    break;
-                }
-                let no_progress_failure = report.newly_classified == 0
-                    && (report.batch_failures > 0
-                        || (report.attempted > 0 && report.response_failures >= report.attempted));
-                if no_progress_failure {
-                    warn!(
-                        source_id = %self.source_id,
-                        generation = report.generation,
-                        response_failures = report.response_failures,
-                        batch_failures = report.batch_failures,
-                        "pausing BIP-110 classification until the next membership generation"
-                    );
-                    break;
-                }
-                if report.complete {
-                    break;
+                match report.disposition {
+                    PolicyDrain::Continue => {}
+                    PolicyDrain::Complete | PolicyDrain::Stale => break,
+                    PolicyDrain::Paused => {
+                        warn!(
+                            source_id = %self.source_id,
+                            generation = report.generation,
+                            response_failures = report.response_failures,
+                            systemic_response_failures = report.systemic_response_failures,
+                            missing_responses = report.missing_responses,
+                            batch_failures = report.batch_failures,
+                            capacity_deferred = report.capacity_deferred,
+                            deferred_candidates = report.deferred_candidates,
+                            "pausing BIP-110 classification until the next membership generation"
+                        );
+                        break;
+                    }
                 }
                 tokio::task::yield_now().await;
             }
@@ -1192,7 +1198,7 @@ mod tests {
             )
             .await
             .is_err(),
-            "a no-progress policy failure must not drain the remaining generation"
+            "a systemic policy failure must not drain the remaining generation"
         );
         let snapshot = runtime
             .snapshot_response()

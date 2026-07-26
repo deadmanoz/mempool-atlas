@@ -11,11 +11,11 @@ website. Comparison and archival are separate future products.
 
 - `apps/atlas/src/rpc.rs` owns the complete membership observation:
   `getmempoolinfo`, verbose `getrawmempool`, and `getblockchaininfo`.
-- `apps/atlas/src/policy.rs` owns continuous, bounded classification slices
-  through concurrent batched `getrawtransaction` and
-  `gettxout(txid, vout, false)`. It owns current in-memory generations, exact
-  surviving `wtxid` classification reuse, auxiliary script caches, and stale
-  result rejection.
+- `apps/atlas/src/policy.rs` owns continuous, bounded classification through
+  concurrent batched `getrawtransaction` and `gettxout(txid, vout, false)`.
+  It owns current in-memory generations, same-generation pending fact waves,
+  exact surviving `wtxid` classification reuse, bounded positive script
+  caches, and stale result rejection.
 - `crates/rdts-rules/` is the pure, evidence-carrying evaluator for all seven
   rules. Production uses its Knots mempool-policy mode, not its separate
   consensus mode.
@@ -23,8 +23,8 @@ website. Comparison and archival are separate future products.
   and typed transaction-detail contracts.
 - `apps/atlas/src/runtime.rs` runs fixed-interval membership independently from
   current-generation classification. It publishes complete membership first,
-  then atomically publishes strictly newer matching detail revisions as slices
-  complete.
+  then atomically publishes strictly newer matching detail revisions as
+  assessments complete.
 - `apps/atlas/src/api.rs` exposes health, readiness, source discovery, current
   membership, current transaction detail, and the built website.
 - `apps/atlas/src/main.rs` configures one source, reads the RPC password from a
@@ -83,29 +83,45 @@ Use `just` targets whenever one exists:
 - Publish the structured snapshot, its matching current-generation detail map,
   and its shared encoded response as one observation.
 - Set reader-visible `classification_revision` to zero for each new membership
-  generation and advance it with every published classification slice. Return
+  generation and advance it with every published assessment batch. Return
   the same revision with transaction detail.
 - A failed poll keeps the prior snapshot visible as stale.
-- Classification is best effort. Missing raw transaction data leaves an entry
-  explicitly unclassified without invalidating fresh membership.
-- Missing prevouts produce typed unknowns. Those partial classifications remain
-  visible and become retryable in later membership generations while the
-  witness variant is current.
-- Select unclassified variants before retryable partial results. Attempt each
-  exact witness variant at most once per membership generation, then reset
-  eligibility with the next successful membership.
+- Classification is best effort. Missing or invalid raw transaction data leaves
+  an entry explicitly unclassified without invalidating fresh membership.
+- Keep a successfully verified raw transaction in a bounded same-generation
+  pending window while its required input scripts are resolved. Advance that
+  work through fair bounded fact waves without refetching the candidate merely
+  because its facts crossed a wave boundary.
+- Evaluate a candidate only after every required script is present or has a
+  genuine terminal lookup result. A successful null-shaped `gettxout` response
+  from the trusted Bitcoin Core endpoint is terminal only for an outpoint known
+  not to be a current mempool parent. A null fallback after parent-raw failure
+  is ambiguous and remains collection state.
+- Capacity deferral, unscheduled work, batch or transport failure, malformed or
+  oversized responses, and missing response envelopes remain collection state.
+  They leave public `bip110` as `null` rather than manufacturing an
+  indeterminate assessment.
+- Treat drain state explicitly: continue while eligible work remains and no
+  systemic circuit breaker fired, defer a candidate for the rest of the
+  generation after two attempts for one fact source in its bounded pending
+  window are exhausted, complete when no eligible work remains, pause only for
+  a systemic RPC failure, and stop stale work after replacement. Deferred
+  candidates remain unclassified and become eligible again with the next
+  successful membership generation.
 - Merge policy results only while their in-memory generation is current, and
   publish them only when their generation matches runtime state and their
   revision strictly advances.
 - Stop scheduling new RPC waves as soon as a generation is superseded. Discard
   results from already in-flight stale work.
-- When a slice produces no classifications and has a batch failure or
-  all-response failure, pause that generation until the next membership
-  installation.
 - Cache classifications by the source-bound `wtxid`, verify both `txid` and
   `wtxid`, and carry only exact survivors into the next generation. Reuse
-  current-transaction output scripts only for the same exact variant and within
-  auxiliary-cache admission.
+  current-transaction output scripts only for the same exact variant. Retain
+  positive confirmed `OutPoint` script facts across generations under bounded
+  eviction, but never cache nulls or failures.
+- Evaluate P2SH, P2SH-P2WPKH, and P2SH-P2WSH according to deployed Knots policy.
+  Exempt the final scriptSig redeemScript blob, check earlier scriptSig items
+  and pushes inside the redeemScript for rule 2, and treat P2SH-wrapped witness
+  versions 1 through 16 as rule 3 rather than native Taproot or P2A.
 - Retain at most one evidence exemplar and one missing-fact exemplar per rule,
   alongside exact evidence and missing counts.
 - In the browser, place each complete violating assessment in one canonical
@@ -158,29 +174,49 @@ Use `just` targets whenever one exists:
   large-snapshot path stays inside it before adding sources or relying on a
   materially larger mempool, or replace the transport. The first deployed
   single-source slice succeeded with 28,520 to 33,381 entries.
-- Classification defaults to 2,048 witness variants per slice and four
-  concurrent raw RPC lanes. It drains slices until the current generation is
-  attempted or replaced. Raw transaction and mempool-parent batches contain at
-  most 256 requests. Confirmed prevout batches have a nominal 512-request cap,
-  but the 16 MiB estimate and 64 KiB per-script-hex bound currently reduce that
-  to 254. Each enrichment batch has a 20-second transport timeout. RPC lanes
-  accept one through eight, and slice size accepts one through 8,192.
+- Classification admits up to 2,048 witness variants per pending window by
+  default and uses four concurrent raw RPC lanes. It drains bounded candidate
+  windows and fact waves until the policy report says continue, complete,
+  paused, or stale. Raw transaction and mempool-parent batches contain at most
+  256 requests. Confirmed prevout batches have a nominal 512-request cap, but
+  the 16 MiB estimate and 64 KiB per-script-hex bound currently reduce that to
+  254. Each enrichment batch has a 20-second transport timeout. RPC lanes accept
+  one through eight, and candidate admission accepts one through 8,192.
   Confirmed prevout work uses half the configured lanes rounded up.
 - Candidate raw work and mempool-parent raw work each have an independent
-  256 MiB aggregate response estimate per slice. The parent phase also caps at
-  8,192 transactions.
-- Consider at most 65,536 unique required prevouts per slice. Confirmed-prevout
-  requests have a separate 256 MiB estimated aggregate ceiling, currently
-  4,064 worst-case calls under the 64 KiB plus 512-byte per-response estimate.
-  Facts beyond these planning bounds remain typed as missing.
+  256 MiB aggregate response estimate per candidate window or parent fact wave.
+  The parent wave also caps at 8,192 transactions.
+- Use 65,536 unique required prevouts as the target per pending window. Always
+  admit one candidate even when that transaction alone exceeds the count
+  target; its raw and retained-script byte bounds still apply.
+  Confirmed-prevout requests have a separate 256 MiB estimated aggregate
+  ceiling per fact wave, currently 4,064 worst-case calls under the 64 KiB plus
+  512-byte per-response estimate. Work beyond a wave bound remains pending for
+  fair continuation. A locally exhausted or capacity-blocked candidate is
+  deferred only for the current generation; neither condition becomes a typed
+  missing evaluator fact. Capacity recovery is bounded by the pending candidate
+  count, yields and checks staleness between relief passes, and does not discard
+  a positive fact already fetched in the current call while one of its
+  dependents survives.
 - Returned transaction hex is capped at 8,000,000 characters and each decoded
   JSON-RPC response envelope at 16 MiB. The minreq transport buffers and parses
   a response before the envelope check, so it is not a peak-memory limit. The
   production 2 GiB memory cgroup is the hard transient boundary.
-- `ATLAS_CLASSIFICATION_CACHE_MIB` bounds estimated auxiliary output-script
-  admission at 256 MiB by default and 512 MiB maximum. It does not bound
-  classifications, RPC buffers, encoded snapshots, allocator overhead, or
-  reader overlap.
+- `jsonrpc` 0.18 maps both a literal `result: null` and an omitted `result`
+  member to `Response.result == None`. The trusted Bitcoin Core endpoint emits
+  the member correctly, but policy code cannot independently prove its wire
+  presence. Bead `atlas-wgx` tracks a transport-level distinction.
+- `ATLAS_CLASSIFICATION_CACHE_MIB` bounds the combined estimated admission of
+  exact current-transaction outputs and cross-generation positive confirmed
+  scripts at 256 MiB by default and 512 MiB maximum. Positive confirmed facts
+  use bounded eviction. The pending resolver has a separate 256 MiB retained
+  script-byte ceiling. Neither bound covers unresolved fact indexes, pending raw
+  transactions, classifications, RPC buffers, encoded snapshots, allocator
+  overhead, or reader overlap.
+- Policy logs expose `fact_requests`, `facts_resolved`, `facts_missing`,
+  `capacity_deferred`, `deferred_candidates`, `response_failures`,
+  `systemic_response_failures`, `missing_responses`, `batch_failures`, and
+  `response_bytes` separately.
 - A proven violation and unresolved inputs can coexist for one rule. Preserve
   both its exact evidence and missing counts instead of collapsing it to a
   single boolean.
@@ -216,6 +252,9 @@ Use `just` targets whenever one exists:
 - `docs/adr/0003-periodic-in-memory-snapshots.md` records the attempt #3 reset.
 - `docs/adr/0004-exact-rule-combination-buckets.md` records the terrain's
   classification grouping semantics.
+- `docs/adr/0005-resolve-policy-facts-before-evaluation.md` records the pending
+  fact resolver, explicit-null semantics, positive prevout cache, and P2SH
+  evaluation. It supersedes ADR 0003's attempt-once classification details.
 
 `agent_docs/.docs-ref` stores the commit against which references were last
 validated. After architectural changes, run

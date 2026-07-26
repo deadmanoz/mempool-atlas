@@ -6,6 +6,11 @@ loopback HTTP listener on the presentation host. The current snapshot,
 classification state, auxiliary script cache, and transaction-detail map are
 memory only. The process stores no application data on disk.
 
+[ADR 0005](../docs/adr/0005-resolve-policy-facts-before-evaluation.md) is the
+authoritative decision for the pending fact resolver, explicit-null semantics,
+positive prevout cache, and P2SH evaluation. It supersedes ADR 0003's
+attempt-once classification details.
+
 ## Startup
 
 `main.rs` parses one source configuration, rejects a non-loopback bind, reads a
@@ -48,8 +53,10 @@ Every successful membership snapshot becomes a new in-memory policy generation:
    by canonical `txid`.
 2. Copy only classifications whose exact `txid` and `wtxid` still match.
 3. Copy cached current-transaction outputs only when that exact witness variant
-   survives and the new generation's auxiliary-cache admission permits them.
-   Confirmed prevout scripts do not survive a membership generation boundary.
+   survives and auxiliary-cache admission permits them. Retain validated
+   positive confirmed `OutPoint` scripts across generation boundaries under the
+   same configured auxiliary bound and eviction policy. Never cache null or
+   failed lookups.
 4. Materialize and validate the complete membership with those exact surviving
    classifications.
 5. Encode and publish the membership as revision 0, then wake the separate
@@ -62,37 +69,50 @@ same-`txid` witness result is attached.
 
 ## Continuous bounded classification
 
-One wake-up drains bounded slices for the installed generation until there is
-no eligible work, an RPC slice fails, a systemic no-progress result pauses the
-generation, or a newer generation supersedes it:
+One wake-up drains bounded candidate and script-fact waves for the installed
+generation. The generation owns verified pending raw transactions and their
+unresolved facts, so crossing a wave boundary does not restart work or refetch
+a successfully admitted candidate:
 
-1. Select up to `ATLAS_CLASSIFICATION_SLICE_ENTRIES` candidates, 2,048 by
-   default. Configuration accepts one through the hard 8,192-entry slice
-   maximum. Candidate selection also stops at a 256 MiB aggregate raw-response
-   estimate.
-2. Select currently unclassified variants first, then carried classifications
-   with missing prevouts that are retryable. Mark every selection attempted so
-   a witness variant is tried at most once in one membership generation.
-3. Fetch and verify raw transactions with `getrawtransaction(txid, 0)`. Raw
-   candidate batches have at most 256 requests and are split using reported
-   `vsize` to target no more than 16 MiB per response.
-4. Reuse exact current-parent output scripts where available. Fetch remaining
-   unconfirmed parents through the same raw batching path. This second raw
-   phase independently caps at 8,192 parents and a 256 MiB aggregate response
-   estimate.
-5. Consider at most 65,536 unique required prevouts from candidate
-   transactions. Resolve confirmed prevout scripts through
-   `gettxout(txid, vout, false)`. The nominal 512-request cap is reduced by the
-   16 MiB response estimate and 64 KiB per-script-hex bound, making the current
-   effective batch maximum 254. Passing `false` avoids the mempool overlay
-   hiding an otherwise unspent confirmed output.
-   Confirmed-prevout planning has a separate 256 MiB aggregate estimate, which
-   permits 4,064 worst-case calls with the current per-response estimate.
-6. Evaluate all seven rules and reduce the result into the compact snapshot
-   assessment plus typed current transaction detail.
-7. Merge results only if the generation is still current. Publish each slice
-   that produced classifications as a strictly increasing generation revision,
-   then yield and continue with the next bounded slice.
+1. Admit up to `ATLAS_CLASSIFICATION_SLICE_ENTRIES` current witness variants,
+   2,048 by default. Configuration accepts one through the hard 8,192-entry
+   candidate-window maximum. Admission also stops at a 256 MiB aggregate
+   candidate-raw response estimate.
+2. Fetch candidates with `getrawtransaction(txid, 0)`. Raw candidate batches
+   have at most 256 requests and are split using reported `vsize` to target no
+   more than 16 MiB per response. Retain a returned transaction only after its
+   decoded `txid` and `wtxid` exactly match current membership.
+3. Resolve required input scripts from exact current-parent outputs or the
+   bounded positive script cache. Fetch remaining unconfirmed parents through
+   the same raw batching path. A parent fact wave independently caps at 8,192
+   transactions and a 256 MiB aggregate response estimate.
+4. Use 65,536 unique required prevouts as the target for one pending window,
+   with a separate 256 MiB retained-script ceiling. Always admit one candidate
+   when that transaction alone exceeds the count target; its raw and
+   retained-script byte bounds still apply. Resolve remaining confirmed scripts
+   through `gettxout(txid, vout, false)`. The nominal 512-request batch cap is
+   reduced by the 16 MiB response estimate and 64 KiB per-script-hex bound,
+   making the current effective maximum 254. Passing `false` avoids the mempool
+   overlay hiding an otherwise unspent confirmed output. Each confirmed-prevout
+   fact wave has a separate 256 MiB aggregate estimate, which permits 4,064
+   worst-case calls with the current per-response estimate. Facts postponed by
+   a wave bound remain pending, and later waves advance fairly instead of
+   restarting at the same sorted outpoint prefix.
+5. Evaluate all seven rules only after every required script is present or has
+   a genuine terminal lookup result. Reduce completed results into the compact
+   snapshot assessment and typed current transaction detail.
+6. Merge results and positive confirmed script facts only if the generation is
+   still current. Publish a strictly increasing generation revision when a wave
+   adds assessments. A wave that only resolves facts continues without
+   publishing a revision.
+7. Give each unresolved fact two attempts for its current source within one
+   bounded pending window. If a candidate exhausts those attempts, or cannot
+   admit a known script under the pending-script ceiling, defer that candidate
+   for the rest of the generation. Bound recovery by the pending candidate
+   count, yield and check staleness between relief passes, and preserve positive
+   facts already fetched in the current call while a dependent survives. Then
+   continue with queued and later candidate windows. Pause the generation only
+   for a systemic RPC failure.
 
 `ATLAS_CLASSIFICATION_RPC_LANES` controls raw transaction and mempool-parent
 batch concurrency. It defaults to four and accepts one through eight. Confirmed
@@ -110,29 +130,61 @@ mempool-parent raw, and confirmed-prevout aggregate estimates bound planned
 work, not transport allocation. The deployed 2 GiB memory cgroup is the hard
 transient boundary.
 
-A missing or invalid raw transaction response leaves that member
-unclassified. It creates no classification and is eligible again after the next
-successful membership installation. A missing prevout is passed to the
-evaluator as an explicit gap. The resulting typed unknowns remain visible,
-while independently decidable output rules and proven input rules are
-preserved. The cache marks that result retryable for the next membership
-generation. Fresh unclassified work is selected before these retryable partial
-results.
+A successful null-shaped `gettxout` response from the trusted Bitcoin Core
+endpoint becomes a typed missing script fact only when the outpoint is known
+not to be a current mempool parent. After a current-parent raw lookup fails, a
+null fallback probe is ambiguous and remains operationally unresolved until its
+bounded attempts are exhausted. Capacity deferral, unscheduled work, batch or
+transport failure, malformed or oversized responses, and missing response
+envelopes likewise remain pending, deferred, or failed operational state. They
+leave the transaction's public `bip110` value `null`; they do not manufacture
+an indeterminate assessment. Operationally unresolved facts receive bounded
+local attempts; an exhausted candidate remains unclassified until the next
+membership generation rather than blocking later candidates. A completed
+assessment with a genuine terminal missing script can still preserve
+independently decidable violations.
 
-Classification is best effort. Batch and per-response failures increment the
-enrichment report and are logged, but they do not invalidate complete fresh
-membership. Departed witness variants are pruned at the next installation and
-the process retains no history. When a slice adds no classifications and
-reports any batch failure, or response failures at least equal its attempted
-candidate count, the runtime pauses the generation until the next membership
-installation. This prevents a systemic RPC failure from rapidly draining every
-remaining slice. A direct slice error also stops that drain.
+`jsonrpc` 0.18 deserializes both literal `result: null` and an omitted `result`
+member as `Response.result == None`. The trusted Bitcoin Core endpoint emits
+the member correctly, but this transport cannot preserve the wire-level
+distinction for policy code. Bead `atlas-wgx` tracks correcting that boundary.
+
+A missing or invalid raw transaction response likewise leaves that membership
+entry unclassified. It creates no assessment and can be reconsidered after a
+later successful membership installation. None of these best-effort policy
+failures invalidates complete fresh membership. Departed witness variants are
+pruned at the next installation and the process retains no history.
+
+Each resolver call returns an explicit `PolicyDrain` disposition:
+
+- `Continue` means eligible work remains and no systemic circuit breaker fired.
+  The runtime yields and runs another bounded wave. Fact-only progress does not
+  publish a new revision.
+- `Complete` means no eligible work remains for the current generation. The
+  classification loop waits for the next membership wake-up.
+- `Paused` means a systemic RPC failure tripped the generation circuit breaker.
+  The loop waits for replacement membership instead of spinning on the same
+  failure.
+- `Stale` means a newer membership generation superseded the work. In-flight
+  calls may finish, but their results cannot update current state or the shared
+  positive script cache.
+
+Progress logs separately report `fact_requests`, `facts_resolved`,
+`facts_missing`, `capacity_deferred`, `deferred_candidates`,
+`response_failures`, `systemic_response_failures`, `missing_responses`,
+`batch_failures`, and `response_bytes`.
 
 The production evaluator uses Knots mempool-policy mode, which applies all
 seven rules without activation gating or UTXO grandfathering. Its verdicts do
 not prove that the source rejected a transaction and do not claim consensus
-invalidity. Missing prevouts and unsupported spend forms become typed unknowns
-rather than guesses.
+invalidity.
+
+P2SH evaluation matches that deployed policy. The final scriptSig item is the
+redeemScript blob and is exempt from Rule 2, while preceding scriptSig items and
+pushes within the redeemScript remain subject to it. Exact P2SH-P2WPKH and
+P2SH-P2WSH programs dispatch through nested witness evaluation. P2SH-wrapped
+witness versions 1 through 16 use Rule 3 because Taproot and P2A are native
+only.
 
 Each classified transaction retains seven rule outcomes. For every rule, the
 detail includes the exact number of proven violations and missing facts, with
@@ -148,22 +200,24 @@ without holding the reader-visible runtime lock, then replace the
 `Arc<MempoolSnapshot>`, detail map, and shared encoded response under one short
 write lock.
 
-Policy ordering has two guards. `PolicyEnricher` merges a completed RPC slice
+Policy ordering has two guards. `PolicyEnricher` merges completed resolver work
 only when its generation object is still the coordinator's current generation.
 `SourceRuntime` separately accepts policy publication only when its generation
 matches the published membership and its revision strictly advances the
-runtime's current revision. An old in-flight slice is therefore discarded even
-if membership changes between policy installation and runtime publication. A
-stale classification loop stops draining and waits for the new membership
-wake-up. Raw and confirmed-prevout schedulers check generation identity before
-each replacement wave, so superseded work can finish already in-flight requests
-but cannot schedule further batches or downstream phases.
+runtime's current revision. Old in-flight work is therefore discarded even if
+membership changes between policy installation and runtime publication. A stale
+classification loop stops draining and waits for the new membership wake-up.
+Raw and confirmed-prevout schedulers check generation identity before each
+replacement wave, so superseded work can finish already in-flight requests but
+cannot schedule further batches or downstream phases. Stale work cannot admit
+positive scripts into the cross-generation cache.
 
 Every new membership publishes `classification_revision` 0, including any exact
-classifications reused from the prior membership. Each slice that adds
-classifications increments this membership-local revision. Runtime rejects a
-publication when its snapshot revision and policy revision differ, then stores
-the snapshot, detail map, policy revision, and encoded response together.
+classifications reused from the prior membership. Each wave that publishes new
+assessments increments this membership-local revision; a fact-only wave does
+not. Runtime rejects a publication when its snapshot revision and policy
+revision differ, then stores the snapshot, detail map, policy revision, and
+encoded response together.
 
 If any complete-membership call or validation fails, `record_failure` keeps the
 current snapshot and matching detail map, then stores a stable public error.
@@ -232,17 +286,20 @@ window.
 
 The classification minreq transport likewise buffers and parses complete HTTP
 response bodies before Atlas can measure the decoded JSON-RPC envelope against
-its 16 MiB batch guard. Phase estimates limit scheduling, but the production
+its 16 MiB batch guard. Wave estimates limit scheduling, but the production
 2 GiB memory cgroup is the hard transient response boundary.
 
 `ATLAS_CLASSIFICATION_CACHE_MIB` is an auxiliary script-cache admission budget,
 not a total process-memory cap. It defaults to 256 MiB and accepts at most
 512 MiB. The implementation estimates each cached current-transaction output
 set or confirmed prevout script as its script bytes plus fixed bookkeeping,
-then declines entries that would exceed the budget. Classifications and the
-reader detail map are bounded by current membership count rather than this byte
-budget. Concurrent RPC responses, the membership buffer, serialized response,
-allocator overhead, and briefly overlapping reader state remain outside it.
+then declines or evicts entries to remain within the budget. Positive confirmed
+scripts may survive generation replacement, while null and failed lookups are
+never cached. Retained pending scripts have a separate 256 MiB ceiling.
+Unresolved fact indexes, pending raw transactions, classifications, the reader
+detail map, concurrent RPC responses, the membership buffer, serialized
+response, allocator overhead, and briefly overlapping reader state remain
+outside these budgets.
 
 The process always caps the `corepc` log target at debug even when a broader
 `RUST_LOG` enables trace, because the dependency's trace record contains the
@@ -259,7 +316,7 @@ complete verbose mempool response.
 | `ATLAS_RPC_PASSWORD_FILE` | yes | none | One-line credential file |
 | `ATLAS_POLL_SECONDS` | no | `300` | Nonzero membership interval |
 | `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `200000` | At most `200000` |
-| `ATLAS_CLASSIFICATION_SLICE_ENTRIES` | no | `2048` | 1 through `8192` |
+| `ATLAS_CLASSIFICATION_SLICE_ENTRIES` | no | `2048` | 1 through `8192` pending candidates |
 | `ATLAS_CLASSIFICATION_RPC_LANES` | no | `4` | 1 through `8` |
 | `ATLAS_CLASSIFICATION_CACHE_MIB` | no | `256` | 1 through `512` MiB |
 | `ATLAS_BIND` | no | `127.0.0.1:3101` | Loopback only |

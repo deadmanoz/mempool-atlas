@@ -10,7 +10,6 @@ use crate::verdict::{
     Violation,
 };
 use bitcoin::Transaction;
-use script_rules::InputEval;
 
 /// The six input-scoped rules, in report order.
 const INPUT_SCOPED: [RuleId; 6] = [
@@ -110,46 +109,36 @@ fn evaluate_applied(
                     {
                         continue;
                     }
-                    match script_rules::evaluate_input(i, txin, facts.script_pubkey.as_script()) {
-                        InputEval::Unsupported(reason) => {
-                            push_unknown_all(
-                                &mut unknowns,
-                                Missing::UnsupportedSpend { input: i, reason },
-                            );
-                            if primary_violation.is_none() {
-                                primary_blocked = true;
-                            }
-                        }
-                        InputEval::Evaluated(matches) => match applicability {
-                            Applicability::MempoolPolicy => record_matches(
+                    let matches =
+                        script_rules::evaluate_input(i, txin, facts.script_pubkey.as_script());
+                    match applicability {
+                        Applicability::MempoolPolicy => record_matches(
+                            matches,
+                            &mut violations,
+                            &mut primary_violation,
+                            primary_blocked,
+                        ),
+                        Applicability::Consensus(_) => match facts.creation_height {
+                            Some(_) => record_matches(
                                 matches,
                                 &mut violations,
                                 &mut primary_violation,
                                 primary_blocked,
                             ),
-                            Applicability::Consensus(_) => match facts.creation_height {
-                                Some(_) => record_matches(
-                                    matches,
-                                    &mut violations,
-                                    &mut primary_violation,
-                                    primary_blocked,
-                                ),
-                                None => {
-                                    if !matches.is_empty() && primary_violation.is_none() {
-                                        primary_blocked = true;
-                                    }
-                                    let mut affected_rules = [false; 6];
-                                    for rule_match in matches {
-                                        affected_rules[rule_slot(rule_match.rule)] = true;
-                                    }
-                                    for (slot, affected) in affected_rules.into_iter().enumerate() {
-                                        if affected {
-                                            unknowns[slot]
-                                                .push(Missing::CreationHeight { input: i });
-                                        }
+                            None => {
+                                if !matches.is_empty() && primary_violation.is_none() {
+                                    primary_blocked = true;
+                                }
+                                let mut affected_rules = [false; 6];
+                                for rule_match in matches {
+                                    affected_rules[rule_slot(rule_match.rule)] = true;
+                                }
+                                for (slot, affected) in affected_rules.into_iter().enumerate() {
+                                    if affected {
+                                        unknowns[slot].push(Missing::CreationHeight { input: i });
                                     }
                                 }
-                            },
+                            }
                         },
                     }
                 }
