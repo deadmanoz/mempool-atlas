@@ -30,8 +30,9 @@ website. Comparison and archival are separate future products.
 - `apps/atlas/src/main.rs` configures one source, reads the RPC password from a
   credential file, binds to loopback, and owns process lifecycle.
 - `web/` discovers the source, validates one complete snapshot, and renders the
-  classification terrain, the secondary fee-rate-by-age lens, health state,
-  rule navigation, and bounded transaction-detail inspector.
+  exact rule-combination terrain, the secondary fee-rate-by-age lens, health
+  state, overlapping marginal rule filters, and bounded transaction-detail
+  inspector.
 
 Production reuses the existing WireGuard-only node RPC proxy. No Atlas process,
 agent, database, queue, retained history, ZMQ subscriber, container, or new
@@ -107,6 +108,15 @@ Use `just` targets whenever one exists:
   auxiliary-cache admission.
 - Retain at most one evidence exemplar and one missing-fact exemplar per rule,
   alongside exact evidence and missing counts.
+- In the browser, place each complete violating assessment in one canonical
+  exact `violated_rules` bucket. Keep assessments with any `unknown_rules` in
+  separate partial buckets keyed by both proven and unknown rule sets.
+- Place each transaction once in the terrain. Rule filters are marginal and
+  overlap, while `primary_rule` remains detail metadata and never chooses a
+  terrain bucket.
+- Preserve a positive glyph area for every populated terrain region, including
+  rare status and partial buckets. Reuse geometry for selection-only paints and
+  invalidate it when snapshot membership, size mode, or viewport changes.
 - Enforce `ATLAS_MAX_MEMPOOL_ENTRIES` before and during verbose decoding.
 - Keep every integer exactly representable by browser JSON numbers.
 - Treat received, present, rejected, and classified as independent claims.
@@ -204,6 +214,8 @@ Use `just` targets whenever one exists:
 - `agent_docs/agent-runtime.md` is the implementation-backed runtime reference.
 - `docs/architecture.md` explains the current end-to-end design.
 - `docs/adr/0003-periodic-in-memory-snapshots.md` records the attempt #3 reset.
+- `docs/adr/0004-exact-rule-combination-buckets.md` records the terrain's
+  classification grouping semantics.
 
 `agent_docs/.docs-ref` stores the commit against which references were last
 validated. After architectural changes, run

@@ -16,16 +16,24 @@ import {
   TERRAIN_RULES,
   classificationTotals,
   hitTestTerrain,
+  rulePopulation,
   renderTerrain,
-  selectedRulePopulation,
+  signatureLabel,
+  signaturePopulation,
+  statusPopulation,
   terrainRule,
-  unresolvedPrimaryPopulation,
+  unknownRulesLabel,
   type TerrainLayout,
   type TerrainMode,
   type TerrainRegionKey,
+  type TerrainSelection,
+  type StatusRegionKey,
+  type ViolationSignature,
+  type ViolationSignatureKey,
 } from "./terrain";
 import "./styles.css";
 import type {
+  Bip110Assessment,
   MempoolSnapshot,
   MempoolTransaction,
   RuleId,
@@ -71,9 +79,11 @@ const terrainEmpty = requiredElement<HTMLElement>("terrain-empty");
 const terrainSummary = requiredElement<HTMLElement>("terrain-summary");
 const modeCount = requiredElement<HTMLButtonElement>("mode-count");
 const modeVsize = requiredElement<HTMLButtonElement>("mode-vsize");
-const ruleNumber = requiredElement<HTMLElement>("rule-number");
-const ruleName = requiredElement<HTMLElement>("rule-name");
-const ruleDescription = requiredElement<HTMLElement>("rule-description");
+const inspectorEyebrow = requiredElement<HTMLElement>("inspector-eyebrow");
+const inspectorName = requiredElement<HTMLElement>("inspector-name");
+const inspectorDescription = requiredElement<HTMLElement>(
+  "inspector-description",
+);
 const ruleCount = requiredElement<HTMLElement>("rule-count");
 const ruleVsize = requiredElement<HTMLElement>("rule-vsize");
 const ruleShare = requiredElement<HTMLElement>("rule-share");
@@ -105,14 +115,17 @@ const percentageFormat = new Intl.NumberFormat(undefined, {
 });
 
 type Lens = "terrain" | "fee-age";
-type InspectorKey = RuleId | "violating_unresolved";
+type InspectorSelection = TerrainSelection;
 
 let selectedSourceId: string | null = null;
 let currentSnapshot: MempoolSnapshot | null = null;
 let transactionById = new Map<string, MempoolTransaction>();
 let filteredTransactions: MempoolTransaction[] = [];
 let selectedLens: Lens = "terrain";
-let selectedInspector: InspectorKey = "element_size";
+let selectedInspector: InspectorSelection = {
+  kind: "rule",
+  rule: "element_size",
+};
 let terrainMode: TerrainMode = "count";
 let terrainLayout: TerrainLayout | null = null;
 let pendingTerrainFrame: number | null = null;
@@ -153,16 +166,25 @@ const formatSnapshotFreshness = (observedAtMs: number): string => {
   return `${formatMembershipAge(ageMs)} ago`;
 };
 
-const isRuleId = (key: TerrainRegionKey): key is RuleId =>
-  TERRAIN_RULES.some(({ id }) => id === key);
+const inspectorRules = (): RuleId[] => TERRAIN_RULES.map(({ id }) => id);
 
-const isInspectorKey = (key: TerrainRegionKey): key is InspectorKey =>
-  key === "violating_unresolved" || isRuleId(key);
+const isViolationSignatureKey = (
+  key: TerrainRegionKey,
+): key is ViolationSignatureKey =>
+  key.startsWith("exact:") || key.startsWith("partial:");
 
-const inspectorKeys = (): InspectorKey[] => [
-  ...TERRAIN_RULES.map(({ id }) => id),
-  "violating_unresolved",
-];
+const isStatusRegionKey = (key: string): key is StatusRegionKey =>
+  key === "compatible" || key === "indeterminate" || key === "unclassified";
+
+const selectionsMatch = (
+  left: InspectorSelection,
+  right: InspectorSelection,
+): boolean =>
+  left.kind === right.kind &&
+  (left.kind === "rule"
+    ? left.rule === (right as { kind: "rule"; rule: RuleId }).rule
+    : left.regionKey ===
+      (right as { kind: "region"; regionKey: TerrainRegionKey }).regionKey);
 
 const readFilters = (): MempoolFilters => {
   const feeRate = Number.parseFloat(minimumFeeRate.value);
@@ -236,6 +258,64 @@ const renderRuleDetail = (rule: RuleAssessment): HTMLLIElement => {
   return item;
 };
 
+const ruleSetText = (rules: readonly RuleId[]): string =>
+  TERRAIN_RULES.filter(({ id }) => rules.includes(id))
+    .map(({ number }) => `R${number}`)
+    .join(" + ");
+
+const firstRejectionText = (
+  status: Bip110Assessment["status"],
+  rule: RuleId | null,
+): string => {
+  if (rule !== null) {
+    return `R${terrainRule(rule).number} · ${terrainRule(rule).shortLabel}`;
+  }
+  if (status === "compatible") {
+    return "None";
+  }
+  return status === "indeterminate" ? "Not established" : "Unresolved";
+};
+
+const createRuleChip = (
+  rule: RuleId,
+  state: "violated" | "unknown",
+): HTMLElement => {
+  const chip = document.createElement("span");
+  chip.className = `rule-chip ${state}`;
+  chip.style.setProperty("--rule-color", terrainRule(rule).color);
+  chip.textContent = `R${terrainRule(rule).number}${state === "unknown" ? "?" : ""}`;
+  chip.title = `${terrainRule(rule).label}${state === "unknown" ? " unresolved" : " violated"}`;
+  return chip;
+};
+
+const transactionRuleChips = (transaction: MempoolTransaction): HTMLElement => {
+  const wrapper = document.createElement("span");
+  wrapper.className = "rule-chips";
+  const assessment = transaction.bip110;
+  if (assessment === null) {
+    const empty = document.createElement("span");
+    empty.className = "rule-chip unclassified";
+    empty.textContent = "Pending";
+    wrapper.append(empty);
+    return wrapper;
+  }
+  for (const { id } of TERRAIN_RULES) {
+    if (assessment.violated_rules.includes(id)) {
+      wrapper.append(createRuleChip(id, "violated"));
+    }
+    if (assessment.unknown_rules.includes(id)) {
+      wrapper.append(createRuleChip(id, "unknown"));
+    }
+  }
+  if (wrapper.childElementCount === 0) {
+    const empty = document.createElement("span");
+    empty.className = "rule-chip compatible";
+    empty.textContent = "Pass";
+    wrapper.append(empty);
+  }
+  return wrapper;
+};
+
 const renderTransactionDetail = (detail: TransactionDetailResponse): void => {
   detailStatus.textContent =
     detail.assessment.status === "violating"
@@ -246,6 +326,17 @@ const renderTransactionDetail = (detail: TransactionDetailResponse): void => {
   detailTransaction.replaceChildren(
     detailValue("txid", detail.txid),
     detailValue("wtxid", detail.wtxid),
+    detailValue(
+      "Violated rules",
+      ruleSetText(detail.assessment.violated_rules) || "None",
+    ),
+    detailValue(
+      "First rejection",
+      firstRejectionText(
+        detail.assessment.status,
+        detail.assessment.primary_rule,
+      ),
+    ),
   );
   detailRules.replaceChildren(...detail.rules.map(renderRuleDetail));
 };
@@ -307,20 +398,38 @@ const loadTransactionDetail = async (
   }
 };
 
+const populationForSelection = (
+  snapshot: MempoolSnapshot,
+  selection: InspectorSelection,
+) => {
+  if (selection.kind === "rule") {
+    return rulePopulation(snapshot.transactions, selection.rule);
+  }
+  return isViolationSignatureKey(selection.regionKey)
+    ? signaturePopulation(snapshot.transactions, selection.regionKey)
+    : statusPopulation(snapshot.transactions, selection.regionKey);
+};
+
+const signatureForSelection = (
+  snapshot: MempoolSnapshot,
+  selection: InspectorSelection,
+): ViolationSignature | null =>
+  selection.kind === "region" && isViolationSignatureKey(selection.regionKey)
+    ? (signaturePopulation(snapshot.transactions, selection.regionKey)
+        ?.signature ?? null)
+    : null;
+
 const renderSampleTable = (): void => {
   if (currentSnapshot === null) {
     ruleTransactions.replaceChildren();
     sampleSummary.textContent = "No snapshot";
     return;
   }
-  const population =
-    selectedInspector === "violating_unresolved"
-      ? unresolvedPrimaryPopulation(currentSnapshot.transactions)
-      : selectedRulePopulation(currentSnapshot.transactions, selectedInspector);
-  const sample = population.transactions.slice(0, 8);
+  const population = populationForSelection(currentSnapshot, selectedInspector);
+  const sample = population?.transactions.slice(0, 8) ?? [];
   sampleSummary.textContent =
-    population.count === 0
-      ? "No primary matches"
+    population === null || population.count === 0
+      ? "No matches"
       : `Largest ${countFormat.format(sample.length)} of ${countFormat.format(population.count)}`;
 
   const rows = sample.map((transaction) => {
@@ -343,13 +452,15 @@ const renderSampleTable = (): void => {
     });
     transactionCell.append(button);
 
+    const rulesCell = document.createElement("td");
+    rulesCell.append(transactionRuleChips(transaction));
     const sizeCell = document.createElement("td");
     sizeCell.textContent = countFormat.format(transaction.vsize);
     const feeCell = document.createElement("td");
     feeCell.textContent = decimalFormat.format(
       transaction.fee_sats / transaction.vsize,
     );
-    row.append(transactionCell, sizeCell, feeCell);
+    row.append(transactionCell, rulesCell, sizeCell, feeCell);
     return row;
   });
   ruleTransactions.replaceChildren(...rows);
@@ -360,64 +471,96 @@ const renderRuleNavigation = (): void => {
     ruleList.replaceChildren();
     return;
   }
+  const selectedSignature = signatureForSelection(
+    currentSnapshot,
+    selectedInspector,
+  );
+  const navigationTabRule =
+    selectedInspector.kind === "rule"
+      ? selectedInspector.rule
+      : (selectedSignature?.foundationRule ?? TERRAIN_RULES[0]?.id);
   const buttons = TERRAIN_RULES.map((rule) => {
-    const population = selectedRulePopulation(
+    const population = rulePopulation(
       currentSnapshot?.transactions ?? [],
       rule.id,
     );
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.rule = rule.id;
-    button.dataset.inspector = rule.id;
-    button.setAttribute("aria-pressed", String(rule.id === selectedInspector));
-    button.tabIndex = rule.id === selectedInspector ? 0 : -1;
+    button.dataset.member = String(
+      selectedSignature?.violatedRules.includes(rule.id) ?? false,
+    );
+    button.setAttribute(
+      "aria-pressed",
+      String(
+        selectedInspector.kind === "rule" && rule.id === selectedInspector.rule,
+      ),
+    );
+    button.tabIndex = rule.id === navigationTabRule ? 0 : -1;
+    button.setAttribute(
+      "aria-label",
+      `${rule.label}: ${countFormat.format(population.count)} transactions violate this rule. Rule totals overlap.`,
+    );
     button.innerHTML = `<span>R${rule.number}</span><strong>${rule.shortLabel}</strong><small>${countFormat.format(population.count)}</small>`;
     button.addEventListener("click", () => {
-      selectInspector(rule.id, true);
+      selectInspector({ kind: "rule", rule: rule.id }, true);
     });
     return button;
   });
-  const unresolved = unresolvedPrimaryPopulation(currentSnapshot.transactions);
-  const unresolvedButton = document.createElement("button");
-  unresolvedButton.type = "button";
-  unresolvedButton.dataset.inspector = "violating_unresolved";
-  unresolvedButton.setAttribute(
-    "aria-pressed",
-    String(selectedInspector === "violating_unresolved"),
-  );
-  unresolvedButton.tabIndex =
-    selectedInspector === "violating_unresolved" ? 0 : -1;
-  unresolvedButton.innerHTML = `<span>?</span><strong>First rule unresolved</strong><small>${countFormat.format(unresolved.count)}</small>`;
-  unresolvedButton.addEventListener("click", () => {
-    selectInspector("violating_unresolved", true);
-  });
-  ruleList.replaceChildren(...buttons, unresolvedButton);
+  ruleList.replaceChildren(...buttons);
 };
 
 const renderInspector = (): void => {
-  if (selectedInspector === "violating_unresolved") {
-    ruleNumber.textContent = "Status";
-    ruleName.textContent = "First rule unresolved";
-    ruleDescription.textContent =
-      "A later BIP-110 rule is definitely violated, but missing facts for an earlier input prevent Atlas from naming the first rejecting rule.";
+  const population =
+    currentSnapshot === null
+      ? null
+      : populationForSelection(currentSnapshot, selectedInspector);
+  if (selectedInspector.kind === "rule") {
+    const rule = terrainRule(selectedInspector.rule);
+    inspectorEyebrow.textContent = `Rule ${rule.number}`;
+    inspectorName.textContent = rule.label;
+    inspectorDescription.textContent = `${rule.description} The population includes every transaction with a proven violation of this rule.`;
+  } else if (isStatusRegionKey(selectedInspector.regionKey)) {
+    inspectorEyebrow.textContent = "Status bucket";
+    if (selectedInspector.regionKey === "compatible") {
+      inspectorName.textContent = "Compatible";
+      inspectorDescription.textContent =
+        "Complete assessments with no proven violation of the deployed BIP-110 mempool policy.";
+    } else if (selectedInspector.regionKey === "indeterminate") {
+      inspectorName.textContent = "Indeterminate";
+      inspectorDescription.textContent =
+        "Assessments with unresolved facts and no proven policy violation.";
+    } else {
+      inspectorName.textContent = "Not classified";
+      inspectorDescription.textContent =
+        "Transactions present in this mempool snapshot without a policy assessment yet.";
+    }
   } else {
-    const rule = terrainRule(selectedInspector);
-    ruleNumber.textContent = `Rule ${rule.number}`;
-    ruleName.textContent = rule.label;
-    ruleDescription.textContent = rule.description;
+    const signature =
+      currentSnapshot === null
+        ? null
+        : signatureForSelection(currentSnapshot, selectedInspector);
+    if (signature === null) {
+      inspectorEyebrow.textContent = "Rule bucket";
+      inspectorName.textContent = "Bucket no longer present";
+      inspectorDescription.textContent =
+        "The selected combination is not present in this snapshot.";
+    } else if (signature.completeness === "exact") {
+      inspectorEyebrow.textContent = "Exact rule bucket";
+      inspectorName.textContent = signatureLabel(signature);
+      inspectorDescription.textContent = `Complete assessments that violate exactly ${ruleSetText(signature.violatedRules)}. First rejection remains secondary transaction metadata.`;
+    } else {
+      const unknown = unknownRulesLabel(signature);
+      inspectorEyebrow.textContent = "Incomplete rule bucket";
+      inspectorName.textContent = signatureLabel(signature);
+      inspectorDescription.textContent = `Confirmed ${ruleSetText(signature.violatedRules)}; ${unknown || "other checks"} remain unresolved. This is not an exact rule set.`;
+    }
   }
-  if (currentSnapshot === null) {
+  if (population === null) {
     ruleCount.textContent = "0";
     ruleVsize.textContent = "0 vB";
     ruleShare.textContent = "0%";
   } else {
-    const population =
-      selectedInspector === "violating_unresolved"
-        ? unresolvedPrimaryPopulation(currentSnapshot.transactions)
-        : selectedRulePopulation(
-            currentSnapshot.transactions,
-            selectedInspector,
-          );
     ruleCount.textContent = countFormat.format(population.count);
     ruleVsize.textContent = formatVsize(population.vsize);
     ruleShare.textContent = percentageFormat.format(population.totalShare);
@@ -426,65 +569,179 @@ const renderInspector = (): void => {
   renderSampleTable();
 };
 
-const regionLabel = (key: TerrainRegionKey): string => {
+const sectionLabel = (
+  key: TerrainLayout["sections"][number]["key"],
+): string => {
   if (key === "compatible") {
     return "Compatible";
   }
   if (key === "indeterminate") {
     return "Indeterminate";
   }
-  if (key === "violating_unresolved") {
-    return "Violating / first rule unresolved";
+  if (key === "violating_exact") {
+    return "Would violate policy · exact sets";
   }
-  if (key === "unclassified") {
-    return "Not classified";
+  if (key === "violating_incomplete") {
+    return "Confirmed violations · unresolved checks";
   }
-  return `R${terrainRule(key).number} · ${terrainRule(key).shortLabel}`;
+  return "Not classified";
+};
+
+const terrainTabStopKey = (layout: TerrainLayout): TerrainRegionKey | null => {
+  const selectableRegions = layout.regions;
+  const selection = selectedInspector;
+  if (selection.kind === "region") {
+    const selectedKey = selection.regionKey;
+    return selectableRegions.some(({ key }) => key === selectedKey)
+      ? selectedKey
+      : (selectableRegions[0]?.key ?? null);
+  }
+  const selectedRule = selection.rule;
+  return (
+    selectableRegions.find(({ signature }) =>
+      signature?.violatedRules.includes(selectedRule),
+    )?.key ??
+    selectableRegions.find(({ signature }) => signature !== null)?.key ??
+    selectableRegions[0]?.key ??
+    null
+  );
 };
 
 const renderTerrainRegions = (layout: TerrainLayout): void => {
-  const preserveFocus = terrainRegions.contains(document.activeElement);
-  const labels = layout.regions.map((region) => {
-    const selectable = isInspectorKey(region.key);
-    const isRule = isRuleId(region.key);
-    const label = document.createElement(selectable ? "button" : "div");
-    label.className = `terrain-region-label ${selectable ? "rule-region" : "status-region"}`;
-    label.style.left = `${(region.rect.x / layout.width) * 100}%`;
-    label.style.top = `${(region.rect.y / layout.height) * 100}%`;
-    label.style.width = `${(region.rect.width / layout.width) * 100}%`;
-    label.style.height = `${Math.min(
-      48,
-      Math.max(18, region.rect.height * 0.28),
-    )}px`;
-    const compact = region.rect.width < 112 || region.rect.height < 72;
-    const title = regionLabel(region.key);
-    label.innerHTML = `<strong>${compact && isRule ? `R${terrainRule(region.key as RuleId).number}` : title}</strong><span>${countFormat.format(region.transactionCount)}</span>`;
-    label.title = `${title}: ${countFormat.format(region.transactionCount)} transactions, ${formatVsize(region.totalVsize)}`;
-
-    if (label instanceof HTMLButtonElement && selectable) {
+  const focusedRegion = terrainRegions.contains(document.activeElement)
+    ? (document.activeElement as HTMLElement).dataset.region
+    : undefined;
+  const tabStopKey = terrainTabStopKey(layout);
+  const sectionLabels = layout.sections.map((section) => {
+    const statusKey = isStatusRegionKey(section.key) ? section.key : null;
+    const label = document.createElement(statusKey === null ? "div" : "button");
+    if (label instanceof HTMLButtonElement && statusKey !== null) {
       label.type = "button";
-      label.dataset.inspector = region.key;
+      label.className = `terrain-section-label ${section.key} status-region`;
+      label.dataset.region = statusKey;
       label.setAttribute(
         "aria-pressed",
-        String(region.key === selectedInspector),
+        String(
+          selectedInspector.kind === "region" &&
+            selectedInspector.regionKey === section.key,
+        ),
       );
-      label.tabIndex = region.key === selectedInspector ? 0 : -1;
-      label.setAttribute(
-        "aria-label",
-        `${title}, ${countFormat.format(region.transactionCount)} transactions`,
-      );
+      label.tabIndex = statusKey === tabStopKey ? 0 : -1;
       label.addEventListener("click", () => {
-        selectInspector(region.key as InspectorKey, true);
+        if (statusKey !== null) {
+          selectInspector({ kind: "region", regionKey: statusKey }, true);
+        }
       });
+    } else {
+      label.className = `terrain-section-label ${section.key}`;
+    }
+    label.style.left = `${(section.rect.x / layout.width) * 100}%`;
+    label.style.top = `${(section.rect.y / layout.height) * 100}%`;
+    label.style.width = `${(section.rect.width / layout.width) * 100}%`;
+    label.style.height = `${section.labelHeight}px`;
+    const name = document.createElement("strong");
+    name.textContent = sectionLabel(section.key);
+    const count = document.createElement("span");
+    count.textContent = countFormat.format(section.transactionCount);
+    label.append(name, count);
+    label.title = `${sectionLabel(section.key)}: ${countFormat.format(section.transactionCount)} transactions, ${formatVsize(section.totalVsize)}`;
+    if (label instanceof HTMLButtonElement) {
+      label.setAttribute("aria-label", label.title);
     }
     return label;
   });
-  terrainRegions.replaceChildren(...labels);
-  if (preserveFocus) {
+  const bucketLabels = layout.regions.flatMap((region) => {
+    const signature = region.signature;
+    if (signature === null) {
+      return [];
+    }
+    const label = document.createElement("button");
+    label.type = "button";
+    label.className = "terrain-region-label combination-region";
+    label.dataset.region = signature.key;
+    label.dataset.completeness = signature.completeness;
+    label.dataset.matchesRule = String(
+      selectedInspector.kind === "rule" &&
+        signature.violatedRules.includes(selectedInspector.rule),
+    );
+    label.style.left = `${(region.rect.x / layout.width) * 100}%`;
+    label.style.top = `${(region.rect.y / layout.height) * 100}%`;
+    label.style.width = `${(region.rect.width / layout.width) * 100}%`;
+    label.style.height = `${region.labelHeight}px`;
+    const foundation = signature.foundationRule;
+    const extraRules = signature.violatedRules.filter(
+      (rule) => rule !== foundation,
+    );
+    const accentRule = extraRules[0] ?? foundation;
+    if (foundation !== null) {
+      label.style.setProperty(
+        "--foundation-color",
+        terrainRule(foundation).color,
+      );
+    }
+    label.style.setProperty(
+      "--signature-accent",
+      signature.completeness === "partial"
+        ? "#e1aa4b"
+        : accentRule === null
+          ? "#f46f93"
+          : terrainRule(accentRule).color,
+    );
+
+    const identity = document.createElement("span");
+    identity.className = "signature-identity";
+    const name = document.createElement("strong");
+    name.textContent = signatureLabel(signature);
+    identity.append(name);
+    if (extraRules.length > 0) {
+      const marker = document.createElement("span");
+      marker.className = "signature-marker";
+      marker.textContent = extraRules
+        .map((rule) => `+R${terrainRule(rule).number}`)
+        .join(" ");
+      identity.append(marker);
+    }
+    if (signature.completeness === "partial") {
+      const unresolved = document.createElement("span");
+      unresolved.className = "signature-unresolved";
+      unresolved.textContent = `? ${unknownRulesLabel(signature)}`;
+      identity.append(unresolved);
+    }
+    const count = document.createElement("span");
+    count.className = "signature-count";
+    count.textContent = countFormat.format(region.transactionCount);
+    label.append(identity, count);
+    const completeness =
+      signature.completeness === "exact"
+        ? "complete rule set"
+        : `confirmed violations with ${unknownRulesLabel(signature)} unresolved`;
+    label.title = `${signatureLabel(signature)}: ${countFormat.format(region.transactionCount)} transactions, ${formatVsize(region.totalVsize)}; ${completeness}`;
+    label.setAttribute(
+      "aria-label",
+      `${signatureLabel(signature)}, ${countFormat.format(region.transactionCount)} transactions, ${formatVsize(region.totalVsize)}. ${completeness}.`,
+    );
+    label.setAttribute(
+      "aria-pressed",
+      String(
+        selectedInspector.kind === "region" &&
+          selectedInspector.regionKey === signature.key,
+      ),
+    );
+    label.tabIndex = signature.key === tabStopKey ? 0 : -1;
+    label.addEventListener("click", () => {
+      selectInspector({ kind: "region", regionKey: signature.key }, true);
+    });
+    return [label];
+  });
+  const overlayElements = [...sectionLabels, ...bucketLabels].sort(
+    (left, right) =>
+      Number.parseFloat(left.style.top) - Number.parseFloat(right.style.top) ||
+      Number.parseFloat(left.style.left) - Number.parseFloat(right.style.left),
+  );
+  terrainRegions.replaceChildren(...overlayElements);
+  if (focusedRegion !== undefined) {
     terrainRegions
-      .querySelector<HTMLButtonElement>(
-        `[data-inspector="${selectedInspector}"]`,
-      )
+      .querySelector<HTMLButtonElement>(`[data-region="${focusedRegion}"]`)
       ?.focus();
   }
 };
@@ -503,11 +760,12 @@ const renderTerrainFrame = (): void => {
     currentSnapshot.transactions,
     terrainMode,
     selectedInspector,
+    terrainLayout,
   );
   renderTerrainRegions(terrainLayout);
   terrainCanvas.setAttribute(
     "aria-label",
-    `Classification terrain for ${countFormat.format(currentSnapshot.transaction_count)} transactions. Transaction area represents ${terrainMode === "count" ? "one equal membership" : "virtual size"}. Use the rule buttons to inspect a territory.`,
+    `Rule-combination terrain for ${countFormat.format(currentSnapshot.transaction_count)} transactions. Complete violations appear once in their exact rule-set bucket; incomplete violations are separate. Transaction area represents ${terrainMode === "count" ? "one equal membership" : "virtual size"}.`,
   );
 };
 
@@ -595,7 +853,7 @@ const chooseInitialRule = (snapshot: MempoolSnapshot): RuleId => {
   let chosen: RuleId = "element_size";
   let maximum = -1;
   for (const rule of TERRAIN_RULES) {
-    const count = selectedRulePopulation(snapshot.transactions, rule.id).count;
+    const count = rulePopulation(snapshot.transactions, rule.id).count;
     if (count > maximum) {
       chosen = rule.id;
       maximum = count;
@@ -605,10 +863,10 @@ const chooseInitialRule = (snapshot: MempoolSnapshot): RuleId => {
 };
 
 const selectInspector = (
-  inspector: InspectorKey,
+  inspector: InspectorSelection,
   loadSample: boolean,
 ): void => {
-  const changed = selectedInspector !== inspector;
+  const changed = !selectionsMatch(selectedInspector, inspector);
   selectedInspector = inspector;
   if (changed) {
     clearDetail("Choose a sample");
@@ -616,14 +874,8 @@ const selectInspector = (
   renderInspector();
   scheduleTerrainRender();
   if (loadSample && currentSnapshot !== null) {
-    const first =
-      selectedInspector === "violating_unresolved"
-        ? unresolvedPrimaryPopulation(currentSnapshot.transactions)
-            .transactions[0]
-        : selectedRulePopulation(
-            currentSnapshot.transactions,
-            selectedInspector,
-          ).transactions[0];
+    const first = populationForSelection(currentSnapshot, selectedInspector)
+      ?.transactions[0];
     if (first !== undefined) {
       void loadTransactionDetail(first);
     }
@@ -646,7 +898,7 @@ const renderClassification = (snapshot: MempoolSnapshot): void => {
   coverageUnclassified.textContent = countFormat.format(
     totals.unclassified.count,
   );
-  terrainSummary.textContent = `${snapshot.bip110_summary.evaluator_id} ${snapshot.bip110_summary.evaluator_version} classified this source snapshot. Each transaction appears once, under its overall status or primary policy rule.`;
+  terrainSummary.textContent = `${snapshot.bip110_summary.evaluator_id} ${snapshot.bip110_summary.evaluator_version} classified this source snapshot. Each transaction appears once. Complete violations use exact rule-combination buckets; proven violations with unresolved checks remain separate. Bucket frames preserve readability, while tile area uses the selected metric.`;
 };
 
 const renderResponse = (response: SourceSnapshotResponse): void => {
@@ -693,6 +945,7 @@ const renderResponse = (response: SourceSnapshotResponse): void => {
   }
 
   currentSnapshot = snapshot;
+  terrainLayout = null;
   transactionById = new Map(
     snapshot.transactions.map((transaction) => [transaction.txid, transaction]),
   );
@@ -706,7 +959,7 @@ const renderResponse = (response: SourceSnapshotResponse): void => {
   terrainEmpty.hidden = snapshot.transaction_count !== 0;
   terrainEmpty.textContent = "This snapshot contains an empty mempool.";
   const initialRule = chooseInitialRule(snapshot);
-  selectedInspector = initialRule;
+  selectedInspector = { kind: "rule", rule: initialRule };
   clearDetail("Choose a sample");
   renderClassification(snapshot);
   renderInspector();
@@ -721,7 +974,7 @@ const renderResponse = (response: SourceSnapshotResponse): void => {
   }
   scheduleTerrainRender();
 
-  const first = selectedRulePopulation(snapshot.transactions, initialRule)
+  const first = rulePopulation(snapshot.transactions, initialRule)
     .transactions[0];
   if (first !== undefined) {
     void loadTransactionDetail(first);
@@ -790,6 +1043,7 @@ for (const tab of [terrainTab, feeAgeTab]) {
 
 modeCount.addEventListener("click", () => {
   terrainMode = "count";
+  terrainLayout = null;
   modeCount.setAttribute("aria-pressed", "true");
   modeVsize.setAttribute("aria-pressed", "false");
   scheduleTerrainRender();
@@ -797,15 +1051,13 @@ modeCount.addEventListener("click", () => {
 
 modeVsize.addEventListener("click", () => {
   terrainMode = "vsize";
+  terrainLayout = null;
   modeCount.setAttribute("aria-pressed", "false");
   modeVsize.setAttribute("aria-pressed", "true");
   scheduleTerrainRender();
 });
 
-const moveInspectorFocus = (
-  event: KeyboardEvent,
-  container: HTMLElement,
-): void => {
+const moveRuleFocus = (event: KeyboardEvent, container: HTMLElement): void => {
   if (
     event.key !== "ArrowLeft" &&
     event.key !== "ArrowRight" &&
@@ -817,8 +1069,18 @@ const moveInspectorFocus = (
     return;
   }
   event.preventDefault();
-  const keys = inspectorKeys();
-  const current = keys.indexOf(selectedInspector);
+  const keys = inspectorRules();
+  const activeRule = (document.activeElement as HTMLElement | null)?.dataset
+    .rule as RuleId | undefined;
+  const current = Math.max(
+    0,
+    keys.indexOf(
+      activeRule ??
+        (selectedInspector.kind === "rule"
+          ? selectedInspector.rule
+          : (keys[0] ?? "output_size")),
+    ),
+  );
   const nextIndex =
     event.key === "Home"
       ? 0
@@ -828,21 +1090,58 @@ const moveInspectorFocus = (
             (event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1) +
             keys.length) %
           keys.length;
-  const inspector = keys[nextIndex];
-  if (inspector !== undefined) {
-    selectInspector(inspector, false);
+  const rule = keys[nextIndex];
+  if (rule !== undefined) {
+    selectInspector({ kind: "rule", rule }, false);
     container
-      .querySelector<HTMLButtonElement>(`[data-inspector="${inspector}"]`)
+      .querySelector<HTMLButtonElement>(`[data-rule="${rule}"]`)
       ?.focus();
   }
 };
 
 ruleList.addEventListener("keydown", (event) => {
-  moveInspectorFocus(event, ruleList);
+  moveRuleFocus(event, ruleList);
 });
 
 terrainRegions.addEventListener("keydown", (event) => {
-  moveInspectorFocus(event, terrainRegions);
+  if (
+    event.key !== "ArrowLeft" &&
+    event.key !== "ArrowRight" &&
+    event.key !== "ArrowUp" &&
+    event.key !== "ArrowDown" &&
+    event.key !== "Home" &&
+    event.key !== "End"
+  ) {
+    return;
+  }
+  const buttons = [
+    ...terrainRegions.querySelectorAll<HTMLButtonElement>(
+      "button[data-region]",
+    ),
+  ];
+  if (buttons.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  const activeIndex = Math.max(
+    0,
+    buttons.indexOf(document.activeElement as HTMLButtonElement),
+  );
+  const nextIndex =
+    event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? buttons.length - 1
+        : (activeIndex +
+            (event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1) +
+            buttons.length) %
+          buttons.length;
+  const next = buttons[nextIndex];
+  const regionKey = next?.dataset.region as TerrainRegionKey | undefined;
+  if (next !== undefined && regionKey !== undefined) {
+    selectInspector({ kind: "region", regionKey }, false);
+    next.focus();
+  }
 });
 
 terrainCanvas.addEventListener("click", (event) => {
@@ -855,14 +1154,12 @@ terrainCanvas.addEventListener("click", (event) => {
     event.clientX - bounds.left,
     event.clientY - bounds.top,
   );
-  if (hit?.kind === "region" && isInspectorKey(hit.region.key)) {
-    selectInspector(hit.region.key, true);
+  if (hit?.kind === "region") {
+    selectInspector({ kind: "region", regionKey: hit.region.key }, true);
     return;
   }
   if (hit?.kind === "transaction") {
-    if (isInspectorKey(hit.glyph.regionKey)) {
-      selectInspector(hit.glyph.regionKey, false);
-    }
+    selectInspector({ kind: "region", regionKey: hit.glyph.regionKey }, false);
     const transaction = transactionById.get(hit.glyph.txid);
     if (transaction !== undefined) {
       void loadTransactionDetail(transaction);
@@ -873,11 +1170,13 @@ terrainCanvas.addEventListener("click", (event) => {
 terrainCanvas.addEventListener("keydown", (event) => {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
-    terrainRegions
-      .querySelector<HTMLButtonElement>(
-        `[data-inspector="${selectedInspector}"]`,
-      )
-      ?.focus();
+    const tabStop =
+      terrainLayout === null ? null : terrainTabStopKey(terrainLayout);
+    if (tabStop !== null) {
+      terrainRegions
+        .querySelector<HTMLButtonElement>(`[data-region="${tabStop}"]`)
+        ?.focus();
+    }
   }
 });
 

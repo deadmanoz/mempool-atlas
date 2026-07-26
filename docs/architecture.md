@@ -106,7 +106,7 @@ The production classification is compatibility with the RDTS/BIP-110 rules
 enforced as standard mempool policy by the deployed Bitcoin Knots client. It is
 not proof that the observed source rejected a transaction, and it is not a
 claim that a transaction is consensus-invalid. The evaluator reports these
-seven exact rule categories:
+seven rule checks:
 
 | Rule | Public ID | Check |
 | --- | --- | --- |
@@ -298,10 +298,34 @@ source, fetches one complete snapshot, validates it, and renders:
 
 - a health and freshness summary;
 - a primary Canvas classification terrain with compatible, indeterminate,
-  unclassified, unresolved-primary, and seven exact rule territories;
-- count and virtual-size transaction-tile modes;
-- rule navigation, representative transactions, and on-demand typed detail;
+  unclassified, complete violating, and incomplete violating sections;
+- canonical exact buckets for complete violating assessments, plus separate
+  partial buckets keyed by both proven and unresolved rule sets;
+- count and virtual-size transaction-tile modes with readability weighting for
+  section and bucket frames;
+- overlapping marginal rule filters, status- and combination-bucket selection,
+  representative transactions, and on-demand typed detail;
 - a fee-rate-by-age Canvas as a secondary lens with client-side filters.
+
+The browser derives each violating bucket from the compact assessment already
+present in the snapshot. It converts the seven canonical rule IDs into a
+violated-rule mask and an unknown-rule mask. A zero unknown-rule mask produces
+an exact bucket keyed only by the violated set. Any unknown rule produces a
+separate partial bucket keyed by both sets, even when that same rule also has a
+proven violation. Only combinations observed in the current snapshot allocate
+regions.
+
+Every transaction appears once in the terrain. Selecting a rule is a marginal
+filter across exact and partial buckets, so rule totals overlap and are not
+additive. The deterministic first rejection remains visible in transaction
+detail but does not determine terrain placement. These are browser-derived
+views of the existing compact assessment; the snapshot schema, API, collector,
+and runtime publication model are unchanged.
+
+Selection-only redraws reuse the current snapshot's terrain geometry and map
+region metadata by key before painting transaction glyphs. Snapshot, size-mode,
+or viewport changes invalidate that geometry. Adaptive label and inset space
+keeps a positive glyph area even for rare observed buckets.
 
 The UI performs no automatic full-snapshot polling. Manual refresh fetches the
 current server copy and does not initiate node collection.

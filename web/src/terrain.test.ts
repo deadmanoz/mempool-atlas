@@ -4,8 +4,14 @@ import {
   classificationTotals,
   createTerrainLayout,
   hitTestTerrain,
-  selectedRulePopulation,
-  unresolvedPrimaryPopulation,
+  incompleteViolationPopulation,
+  ruleMask,
+  rulePopulation,
+  rulesForMask,
+  signatureLabel,
+  signaturePopulations,
+  statusPopulation,
+  violationSignature,
 } from "./terrain";
 import type { Bip110Assessment, MempoolTransaction, RuleId } from "./types";
 
@@ -16,12 +22,27 @@ const compatible: Bip110Assessment = {
   unknown_rules: [],
 };
 
-const violating = (rule: RuleId): Bip110Assessment => ({
-  status: "violating",
-  primary_rule: rule,
-  violated_rules: [rule],
-  unknown_rules: [],
-});
+const violating = (
+  rules: RuleId | RuleId[],
+  options: {
+    primary?: RuleId | null;
+    unknown?: RuleId[];
+  } = {},
+): Bip110Assessment => {
+  const violatedRules = Array.isArray(rules) ? rules : [rules];
+  const hasExplicitPrimary = Object.prototype.hasOwnProperty.call(
+    options,
+    "primary",
+  );
+  return {
+    status: "violating",
+    primary_rule: hasExplicitPrimary
+      ? (options.primary ?? null)
+      : (violatedRules[0] ?? null),
+    violated_rules: violatedRules,
+    unknown_rules: options.unknown ?? [],
+  };
+};
 
 const transaction = (
   value: number,
@@ -40,14 +61,14 @@ describe("classificationTotals", () => {
   it("keeps status and coverage as independent claims", () => {
     const transactions = [
       transaction(1),
-      transaction(2, { bip110: violating("element_size"), vsize: 400 }),
+      transaction(2, {
+        bip110: violating("element_size"),
+        vsize: 400,
+      }),
       transaction(3, {
-        bip110: {
-          status: "violating",
-          primary_rule: "op_success",
-          violated_rules: ["op_success"],
-          unknown_rules: ["taproot_annex"],
-        },
+        bip110: violating("op_success", {
+          unknown: ["taproot_annex"],
+        }),
         vsize: 300,
       }),
       transaction(4, {
@@ -72,8 +93,60 @@ describe("classificationTotals", () => {
   });
 });
 
-describe("selectedRulePopulation", () => {
-  it("uses the primary rule once and sorts samples by virtual size", () => {
+describe("rule signatures", () => {
+  it("uses canonical seven-bit identity independent of API rule order", () => {
+    const forward = violationSignature(
+      violating(["element_size", "tapscript_op_if"], {
+        primary: "tapscript_op_if",
+      }),
+    );
+    const reverse = violationSignature(
+      violating(["tapscript_op_if", "element_size"], {
+        primary: "element_size",
+      }),
+    );
+    const unresolvedPrimary = violationSignature(
+      violating(["element_size", "tapscript_op_if"], { primary: null }),
+    );
+
+    expect(forward).toMatchObject({
+      key: "exact:42",
+      violatedRules: ["element_size", "tapscript_op_if"],
+      foundationRule: "tapscript_op_if",
+    });
+    expect(reverse).toEqual(forward);
+    expect(unresolvedPrimary).toEqual(forward);
+    expect(signatureLabel(forward!)).toBe("R2 + R7");
+  });
+
+  it("keeps proven and unresolved facts for the same rule", () => {
+    expect(
+      violationSignature(
+        violating("element_size", { unknown: ["element_size"] }),
+      ),
+    ).toMatchObject({
+      key: "partial:02:02",
+      completeness: "partial",
+      violatedRules: ["element_size"],
+      unknownRules: ["element_size"],
+    });
+  });
+
+  it("round-trips every non-empty rule mask without collisions", () => {
+    const keys = new Set<string>();
+    for (let mask = 1; mask < 1 << 7; mask += 1) {
+      const rules = rulesForMask(mask);
+      expect(ruleMask(rules)).toBe(mask);
+      const signature = violationSignature(violating(rules));
+      expect(signature).not.toBeNull();
+      keys.add(signature?.key ?? "");
+    }
+    expect(keys).toHaveLength(127);
+  });
+});
+
+describe("rulePopulation", () => {
+  it("counts every proven rule occurrence and sorts samples by vsize", () => {
     const transactions = [
       transaction(1, {
         vsize: 220,
@@ -81,60 +154,124 @@ describe("selectedRulePopulation", () => {
       }),
       transaction(2, {
         vsize: 520,
-        bip110: {
-          status: "violating",
-          primary_rule: "element_size",
-          violated_rules: ["element_size", "op_success"],
-          unknown_rules: [],
-        },
+        bip110: violating(["element_size", "tapscript_op_if"], {
+          primary: "tapscript_op_if",
+        }),
       }),
-      transaction(3, { bip110: violating("op_success") }),
+      transaction(3, { bip110: violating("tapscript_op_if") }),
     ];
 
-    const population = selectedRulePopulation(transactions, "element_size");
+    const r2 = rulePopulation(transactions, "element_size");
+    const r7 = rulePopulation(transactions, "tapscript_op_if");
 
-    expect(population.count).toBe(2);
-    expect(population.vsize).toBe(740);
-    expect(population.totalShare).toBeCloseTo(2 / 3);
-    expect(population.transactions.map(({ txid }) => txid)).toEqual([
+    expect(r2).toMatchObject({ count: 2, vsize: 740 });
+    expect(r2.totalShare).toBeCloseTo(2 / 3);
+    expect(r2.transactions.map(({ txid }) => txid)).toEqual([
       transaction(2).txid,
       transaction(1).txid,
     ]);
+    expect(r7).toMatchObject({ count: 2, vsize: 720 });
   });
 });
 
-describe("unresolvedPrimaryPopulation", () => {
-  it("keeps definite violations whose first rejecting rule is unresolved", () => {
-    const unresolved = transaction(1, {
-      vsize: 420,
-      bip110: {
-        status: "violating",
-        primary_rule: null,
-        violated_rules: ["op_success"],
-        unknown_rules: ["element_size"],
-      },
-    });
+describe("statusPopulation", () => {
+  it("partitions selectable non-violating status buckets", () => {
+    const indeterminate: Bip110Assessment = {
+      status: "indeterminate",
+      primary_rule: null,
+      violated_rules: [],
+      unknown_rules: ["taproot_annex"],
+    };
+    const transactions = [
+      transaction(1, { vsize: 100 }),
+      transaction(2, { bip110: indeterminate, vsize: 200 }),
+      transaction(3, { bip110: null, vsize: 300 }),
+    ];
 
-    expect(
-      unresolvedPrimaryPopulation([
-        transaction(2),
-        unresolved,
-        transaction(3, { bip110: violating("op_success") }),
-      ]),
-    ).toMatchObject({
-      transactions: [unresolved],
+    expect(statusPopulation(transactions, "compatible")).toMatchObject({
       count: 1,
-      vsize: 420,
+      vsize: 100,
+      totalShare: 1 / 3,
+    });
+    expect(statusPopulation(transactions, "indeterminate")).toMatchObject({
+      count: 1,
+      vsize: 200,
+      totalShare: 1 / 3,
+    });
+    expect(statusPopulation(transactions, "unclassified")).toMatchObject({
+      count: 1,
+      vsize: 300,
       totalShare: 1 / 3,
     });
   });
 });
 
+describe("signaturePopulations", () => {
+  it("co-buckets equal rule sets despite different first rejections", () => {
+    const transactions = [
+      transaction(1, {
+        vsize: 300,
+        bip110: violating(["element_size", "tapscript_op_if"], {
+          primary: "tapscript_op_if",
+        }),
+      }),
+      transaction(2, {
+        vsize: 700,
+        bip110: violating(["tapscript_op_if", "element_size"], {
+          primary: "element_size",
+        }),
+      }),
+      transaction(3, {
+        bip110: violating("tapscript_op_if"),
+      }),
+    ];
+
+    const populations = signaturePopulations(transactions);
+    const overlap = populations.find(
+      ({ signature }) => signature.key === "exact:42",
+    );
+
+    expect(populations).toHaveLength(2);
+    expect(overlap).toMatchObject({ count: 2, vsize: 1_000 });
+    expect(overlap?.transactions.map(({ txid }) => txid)).toEqual([
+      transaction(2).txid,
+      transaction(1).txid,
+    ]);
+  });
+
+  it("keeps partial violations outside exact buckets", () => {
+    const exact = transaction(1, {
+      bip110: violating(["element_size", "tapscript_op_if"]),
+    });
+    const partial = transaction(2, {
+      bip110: violating(["element_size", "tapscript_op_if"], {
+        unknown: ["undefined_version"],
+      }),
+    });
+    const populations = signaturePopulations([exact, partial]);
+
+    expect(populations.map(({ signature }) => signature.key)).toEqual([
+      "exact:42",
+      "partial:42:04",
+    ]);
+    expect(incompleteViolationPopulation([exact, partial])).toMatchObject({
+      transactions: [partial],
+      count: 1,
+      vsize: 200,
+      totalShare: 0.5,
+    });
+  });
+});
+
 describe("createTerrainLayout", () => {
-  it("lays every transaction inside its source-scoped classification region", () => {
+  it("lays every transaction once inside its dynamic status or signature bucket", () => {
     const transactions = [
       transaction(1),
-      transaction(2, { bip110: violating("element_size") }),
+      transaction(2, {
+        bip110: violating(["element_size", "tapscript_op_if"], {
+          primary: "tapscript_op_if",
+        }),
+      }),
       transaction(3, {
         bip110: {
           status: "indeterminate",
@@ -145,17 +282,32 @@ describe("createTerrainLayout", () => {
       }),
       transaction(4, { bip110: null }),
       transaction(5, {
-        bip110: {
-          status: "violating",
-          primary_rule: null,
-          violated_rules: ["op_success"],
-          unknown_rules: ["element_size"],
-        },
+        bip110: violating("op_success", {
+          primary: null,
+          unknown: ["element_size"],
+        }),
       }),
     ];
     const layout = createTerrainLayout(transactions, 1_000, 640, "count");
 
     expect(layout.glyphs).toHaveLength(transactions.length);
+    expect(new Set(layout.glyphs.map(({ txid }) => txid))).toHaveLength(
+      transactions.length,
+    );
+    expect(layout.regions.map(({ key }) => key)).toEqual([
+      "compatible",
+      "indeterminate",
+      "exact:42",
+      "partial:20:02",
+      "unclassified",
+    ]);
+    expect(layout.sections.map(({ key }) => key)).toEqual([
+      "compatible",
+      "indeterminate",
+      "violating_exact",
+      "violating_incomplete",
+      "unclassified",
+    ]);
     for (const glyph of layout.glyphs) {
       const region = layout.regions.find(({ key }) => key === glyph.regionKey);
       expect(region).toBeDefined();
@@ -168,15 +320,37 @@ describe("createTerrainLayout", () => {
         (region?.contentRect.y ?? 0) + (region?.contentRect.height ?? 0),
       );
     }
-    expect(
-      layout.glyphs.find(({ txid }) => txid === transaction(5).txid)?.regionKey,
-    ).toBe("violating_unresolved");
+  });
+
+  it("orders observed exact buckets by stable rule-set similarity", () => {
+    const transactions = [
+      transaction(1, { bip110: violating("tapscript_op_if") }),
+      transaction(2, {
+        bip110: violating(["element_size", "tapscript_op_if"]),
+      }),
+      transaction(3, { bip110: violating("output_size") }),
+    ];
+    const countLayout = createTerrainLayout(transactions, 1_000, 640, "count");
+    const vsizeLayout = createTerrainLayout(transactions, 1_200, 720, "vsize");
+    const keys = (layout: ReturnType<typeof createTerrainLayout>): string[] =>
+      layout.regions
+        .filter(({ signature }) => signature?.completeness === "exact")
+        .map(({ key }) => key);
+
+    expect(keys(countLayout)).toEqual(["exact:01", "exact:42", "exact:40"]);
+    expect(keys(vsizeLayout)).toEqual(keys(countLayout));
   });
 
   it("switches transaction area between count and virtual-size modes", () => {
     const transactions = [
-      transaction(1, { vsize: 100 }),
-      transaction(2, { vsize: 900 }),
+      transaction(1, {
+        vsize: 100,
+        bip110: violating(["element_size", "tapscript_op_if"]),
+      }),
+      transaction(2, {
+        vsize: 900,
+        bip110: violating(["element_size", "tapscript_op_if"]),
+      }),
     ];
     const countLayout = createTerrainLayout(transactions, 1_000, 640, "count");
     const vsizeLayout = createTerrainLayout(transactions, 1_000, 640, "vsize");
@@ -197,9 +371,13 @@ describe("createTerrainLayout", () => {
     );
   });
 
-  it("hit-tests transaction glyphs and empty region space", () => {
+  it("hit-tests exact-combination glyphs and bucket headers", () => {
     const layout = createTerrainLayout(
-      [transaction(1, { bip110: violating("element_size") })],
+      [
+        transaction(1, {
+          bip110: violating(["element_size", "tapscript_op_if"]),
+        }),
+      ],
       900,
       600,
       "count",
@@ -209,45 +387,104 @@ describe("createTerrainLayout", () => {
     if (glyph === undefined) {
       return;
     }
-    const glyphHit = hitTestTerrain(
-      layout,
-      glyph.rect.x + glyph.rect.width / 2,
-      glyph.rect.y + glyph.rect.height / 2,
-    );
-    expect(glyphHit).toMatchObject({
+    expect(
+      hitTestTerrain(
+        layout,
+        glyph.rect.x + glyph.rect.width / 2,
+        glyph.rect.y + glyph.rect.height / 2,
+      ),
+    ).toMatchObject({
       kind: "transaction",
-      glyph: { txid: transaction(1).txid },
+      glyph: { txid: transaction(1).txid, regionKey: "exact:42" },
     });
 
-    const region = layout.regions.find(({ key }) => key === "element_size");
+    const region = layout.regions.find(({ key }) => key === "exact:42");
     expect(region).toBeDefined();
-    const regionHit = hitTestTerrain(
-      layout,
-      (region?.rect.x ?? 0) + 2,
-      (region?.rect.y ?? 0) + 2,
-    );
-    expect(regionHit).toMatchObject({
+    expect(
+      hitTestTerrain(
+        layout,
+        (region?.rect.x ?? 0) + 2,
+        (region?.rect.y ?? 0) + 2,
+      ),
+    ).toMatchObject({
       kind: "region",
-      region: { key: "element_size" },
+      region: { key: "exact:42" },
     });
   });
 
-  it("keeps one Canvas glyph per entry at the supported snapshot cap", () => {
+  it("keeps one Canvas glyph per entry without theoretical bucket allocation", () => {
     const transactions = Array.from({ length: 200_000 }, (_, index) =>
       transaction(index + 1, {
         vsize: 120 + (index % 4_000),
         bip110:
-          index % 10 === 0
-            ? violating("element_size")
-            : index % 17 === 0
-              ? null
-              : compatible,
+          index % 31 === 0
+            ? violating(["element_size", "tapscript_op_if"])
+            : index % 23 === 0
+              ? violating("op_success", { unknown: ["tapscript_op_if"] })
+              : index % 17 === 0
+                ? null
+                : index % 10 === 0
+                  ? violating("element_size")
+                  : compatible,
       }),
     );
 
     const layout = createTerrainLayout(transactions, 1_200, 720, "vsize");
 
     expect(layout.glyphs).toHaveLength(200_000);
-    expect(layout.regions).toHaveLength(11);
+    expect(layout.regions.map(({ key }) => key)).toEqual([
+      "compatible",
+      "exact:02",
+      "exact:42",
+      "partial:20:40",
+      "unclassified",
+    ]);
+    expect(layout.regions).toHaveLength(5);
+  });
+
+  it("preserves glyphs for singleton status and signature buckets under heavy skew", () => {
+    const common = Array.from({ length: 20_000 }, (_, index) =>
+      transaction(index + 1),
+    );
+    const exact = Array.from({ length: 127 }, (_, index) => {
+      const rules = rulesForMask(index + 1);
+      return transaction(30_000 + index, {
+        bip110: violating(rules, {
+          primary: index % 2 === 0 ? null : (rules[0] ?? null),
+        }),
+      });
+    });
+    const rare = [
+      transaction(40_001, {
+        bip110: {
+          status: "indeterminate",
+          primary_rule: null,
+          violated_rules: [],
+          unknown_rules: ["undefined_version"],
+        },
+      }),
+      transaction(40_002, {
+        bip110: violating("output_size", { unknown: ["element_size"] }),
+      }),
+      transaction(40_003, { bip110: null }),
+    ];
+    const transactions = [...common, ...exact, ...rare];
+
+    const layout = createTerrainLayout(transactions, 1_200, 720, "count");
+
+    expect(layout.glyphs).toHaveLength(transactions.length);
+    expect(layout.regions).toHaveLength(131);
+    for (const region of layout.regions) {
+      const glyphs = layout.glyphs.filter(
+        ({ regionKey }) => regionKey === region.key,
+      );
+      expect(glyphs.length).toBe(region.transactionCount);
+      expect(region.contentRect.width).toBeGreaterThan(0);
+      expect(region.contentRect.height).toBeGreaterThan(0);
+      for (const glyph of glyphs) {
+        expect(glyph.rect.width).toBeGreaterThan(0);
+        expect(glyph.rect.height).toBeGreaterThan(0);
+      }
+    }
   });
 });

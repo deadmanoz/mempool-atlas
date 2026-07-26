@@ -20,7 +20,7 @@ flowchart TB
     membership -->|"wake bounded slices"| policy["Current-generation classification"]
     policy -->|"generation and revision guard"| current
     current --> api["Current-snapshot API"]
-    current --> web["Classification terrain"]
+    current --> web["Exact rule-combination terrain"]
     browser["Browser"] --> web
     browser --> api
 ```
@@ -75,21 +75,30 @@ it stale. A process restart simply waits for the next poll; there is no
 application data to migrate or recover.
 
 See [docs/architecture.md](docs/architecture.md) and
-[ADR 0003](docs/adr/0003-periodic-in-memory-snapshots.md) for the design
-boundary.
+[ADR 0003](docs/adr/0003-periodic-in-memory-snapshots.md) for the system
+boundary. [ADR 0004](docs/adr/0004-exact-rule-combination-buckets.md) records
+the terrain's grouping semantics.
 
 ## Website
 
 The primary website is a classification terrain:
 
-- compatible, indeterminate, unclassified, unresolved-first-rule violating,
-  and rule-level territories partition the current source;
-- rule territories use the evaluator's deterministic first rejection, while
-  transaction detail retains every independently proven violation;
-- count and virtual-size modes change transaction-tile area within each
-  territory;
+- compatible, indeterminate, unclassified, complete violating, and incomplete
+  violating sections partition the current source;
+- complete violating assessments are bucketed by their canonical exact set of
+  proven rules, while assessments with unresolved checks remain in separate
+  partial buckets keyed by both proven and unknown rules;
+- each transaction appears in exactly one terrain bucket, including
+  transactions that violate more than one rule;
+- rule filters are marginal and overlap, highlighting every bucket that
+  contains the selected rule;
+- count and virtual-size modes select the layout metric and transaction-tile
+  area, while section and bucket frames retain readability weighting;
 - coverage makes incomplete enrichment and evaluator unknowns visible;
-- selecting a rule opens representative transactions and typed evidence;
+- selecting a rule or any terrain bucket opens representative transactions
+  and typed evidence;
+- first rejection remains transaction-detail metadata and never chooses the
+  transaction's terrain bucket;
 - the original fee-rate by age view remains available as a secondary lens.
 
 The browser never contacts the Bitcoin node and its refresh button does not

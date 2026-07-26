@@ -14,9 +14,11 @@ All notable changes to Mempool Atlas will be documented in this file.
 - Restore the single-node Canvas swim view with fee-rate, age, and virtual-size
   filters plus a bounded transaction inspector.
 - Make the BIP-110 classification terrain the primary view, with count and
-  virtual-size modes, explicit coverage, seven first-reject rule territories,
-  and per-transaction rule evidence. Retain fee-rate by age as a secondary
-  lens.
+  virtual-size modes, explicit coverage, canonical exact buckets for complete
+  violating assessments, separate partial buckets for proven violations with
+  unresolved checks, overlapping marginal rule filters, and per-transaction
+  rule evidence. Retain fee-rate by age as a secondary lens and first rejection
+  as transaction-detail metadata.
 - Add a pure seven-rule RDTS evaluator with separate consensus and deployed
   Knots mempool-policy modes, deterministic primary rejection, all proven
   violations, and typed unknown facts.

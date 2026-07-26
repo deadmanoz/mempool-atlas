@@ -73,7 +73,7 @@
               aria-controls="terrain-view"
               type="button"
             >
-              Classification terrain
+              Rule buckets
             </button>
             <button
               id="fee-age-tab"
@@ -111,7 +111,7 @@
             <div class="terrain-heading">
               <div>
                 <p class="eyebrow">Current source membership</p>
-                <h2>Classification terrain</h2>
+                <h2>Rule-combination terrain</h2>
               </div>
               <dl class="terrain-totals" aria-label="Classification totals">
                 <div class="compatible">
@@ -145,8 +145,8 @@
               ></div>
             </div>
             <p id="terrain-summary" class="visual-summary">
-              Each transaction appears once. Select a rule territory to inspect
-              its sample.
+              Each transaction appears once. Complete violations are bucketed by
+              their exact rule combination.
             </p>
           </div>
 
@@ -220,17 +220,17 @@
           </div>
         </section>
 
-        <aside class="inspector-panel" aria-labelledby="rule-name">
+        <aside class="inspector-panel" aria-labelledby="inspector-name">
           <div class="inspector-heading">
             <div>
-              <p id="rule-number" class="eyebrow">Rule 2</p>
-              <h2 id="rule-name">Serialized element size</h2>
+              <p id="inspector-eyebrow" class="eyebrow">Rule 2</p>
+              <h2 id="inspector-name">Serialized element size</h2>
             </div>
             <span class="policy-badge">Mempool policy</span>
           </div>
 
-          <p id="rule-description" class="rule-description">
-            Select a rule territory to inspect its population.
+          <p id="inspector-description" class="rule-description">
+            Select a rule or terrain bucket to inspect its population.
           </p>
           <p class="policy-note">
             This describes compatibility with rules applied by Bitcoin Knots as
@@ -271,8 +271,12 @@
           <nav
             id="rule-list"
             class="rule-list"
-            aria-label="BIP-110 classification groups"
+            aria-label="BIP-110 rule filters"
           ></nav>
+          <p class="rule-overlap-note">
+            Rule totals overlap. A transaction is counted under every rule it
+            violates.
+          </p>
 
           <section class="sample-section" aria-labelledby="sample-heading">
             <div class="section-heading">
@@ -284,6 +288,7 @@
                 <thead>
                   <tr>
                     <th scope="col">Transaction</th>
+                    <th scope="col">Rules</th>
                     <th scope="col">vsize</th>
                     <th scope="col">Fee rate</th>
                   </tr>
