@@ -9,7 +9,8 @@ memory only. The process stores no application data on disk.
 [ADR 0005](../docs/adr/0005-resolve-policy-facts-before-evaluation.md) is the
 authoritative decision for the pending fact resolver, explicit-null semantics,
 positive prevout cache, and P2SH evaluation. It supersedes ADR 0003's
-attempt-once classification details.
+attempt-once classification details. [ADR 0006](../docs/adr/0006-own-policy-json-rpc-wire-boundary.md)
+defines the classification transport and HTTP framing contract.
 
 ## Startup
 
@@ -17,6 +18,8 @@ attempt-once classification details.
 one-line RPC password file, constructs separate membership and classification
 RPC clients plus `SourceRuntime`, then starts the runtime task and Axum server.
 Both RPC clients use the same configured URL and dedicated credential.
+`rpc.rs` owns the `corepc-client` membership path. `policy_rpc.rs` owns the
+separate bounded classification wire path.
 
 The process can serve `/healthz` and static files before a snapshot exists.
 `/readyz` returns unavailable until the first complete poll succeeds.
@@ -121,14 +124,23 @@ Every classification batch has a 20-second transport timeout.
 
 Each returned raw transaction is rejected unless its decoded `txid` and
 `wtxid` exactly match current membership. Transaction hex may contain at most
-8,000,000 characters, and confirmed script hex may contain at most 64 KiB. A
-raw or confirmed-prevout batch is rejected if its decoded JSON-RPC response
-envelope exceeds 16 MiB. The minreq transport has already buffered and parsed
-the response before this application check, so the guard limits admission into
-current state rather than complete transient memory. Candidate raw,
+8,000,000 characters, and confirmed script hex may contain at most 64 KiB. The
+Atlas-owned policy client uses lazy `minreq` reads and caps each HTTP body at
+16 MiB before JSON parsing. It rejects `Transfer-Encoding`, rejects an
+oversized declared length immediately, and requires the received bytes to
+exactly match any declaration. A close-delimited body aborts on the first byte
+beyond the cap and must decode as one complete JSON batch. Candidate raw,
 mempool-parent raw, and confirmed-prevout aggregate estimates bound planned
-work, not transport allocation. The deployed 2 GiB memory cgroup is the hard
-transient boundary.
+work rather than total process allocation. The deployed 2 GiB memory cgroup
+remains the hard boundary for concurrent responses, the separately buffered
+membership path, and all other state.
+
+The classification client refuses redirects, requires HTTP 200 and the Bitcoin
+Core JSON-RPC 2.0 envelope shape, allocates unique numeric IDs across concurrent
+lanes, and restores out-of-order responses to request order. Duplicate or
+unexpected IDs and excess responses reject the whole batch. Logs count
+`response_bytes` as the exact JSON body bytes, including whitespace, for each
+successfully decoded and reconciled batch.
 
 A successful null-shaped `gettxout` response from the trusted Bitcoin Core
 endpoint becomes a typed missing script fact only when the outpoint is known
@@ -144,10 +156,15 @@ membership generation rather than blocking later candidates. A completed
 assessment with a genuine terminal missing script can still preserve
 independently decidable violations.
 
-`jsonrpc` 0.18 deserializes both literal `result: null` and an omitted `result`
-member as `Response.result == None`. The trusted Bitcoin Core endpoint emits
-the member correctly, but this transport cannot preserve the wire-level
-distinction for policy code. Bead `atlas-wgx` tracks correcting that boundary.
+The owned envelope keeps a missing `result`, present JSON null, and present
+value distinct. It also preserves `error` presence. A valid error takes
+precedence over any simultaneous result. In an otherwise decodable v2 item,
+explicit `error: null`, an omitted result, a malformed error object, and an
+ordinary non-systemic RPC error are response-local collection failures. A
+missing or wrong JSON-RPC version and configured protocol or warm-up error
+codes are systemic. Invalid batch framing, HTTP failure, and body-bound failure
+pause the generation through the batch-failure path. Only a valid null-shaped
+`gettxout` success can become the terminal fact described above.
 
 A missing or invalid raw transaction response likewise leaves that membership
 entry unclassified. It creates no assessment and can be reconsidered after a
@@ -284,10 +301,10 @@ The version 0.8 membership transport timeout is fixed at 15 seconds, so
 acceptance must also verify large real responses finish reliably within that
 window.
 
-The classification minreq transport likewise buffers and parses complete HTTP
-response bodies before Atlas can measure the decoded JSON-RPC envelope against
-its 16 MiB batch guard. Wave estimates limit scheduling, but the production
-2 GiB memory cgroup is the hard transient response boundary.
+The classification transport bounds each HTTP body at 16 MiB before parsing.
+Wave estimates limit scheduling, while the production 2 GiB memory cgroup
+remains the hard boundary for concurrent classification bodies, the membership
+buffer, and total process memory.
 
 `ATLAS_CLASSIFICATION_CACHE_MIB` is an auxiliary script-cache admission budget,
 not a total process-memory cap. It defaults to 256 MiB and accepts at most

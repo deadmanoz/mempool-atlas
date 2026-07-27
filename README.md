@@ -55,10 +55,12 @@ unclassified. Capacity deferral, unscheduled work, RPC failure, malformed or
 oversized data, and absent response envelopes remain collection state and leave
 `bip110` as `null`. A successful null-shaped `gettxout` response from the
 trusted Bitcoin Core endpoint is a genuine missing script fact only for an
-outpoint known not to be a current mempool parent. A null fallback after
-parent-raw failure is ambiguous and remains operationally unresolved until its
-bounded attempts are exhausted. Atlas evaluates a candidate only after every
-required script is present or has a genuine terminal result.
+outpoint known not to be a current mempool parent. The JSON-RPC `result` member
+must be present for that null to be authoritative; an omitted member is failed
+collection work. A null fallback after parent-raw failure is ambiguous and
+remains operationally unresolved until its bounded attempts are exhausted.
+Atlas evaluates a candidate only after every required script is present or has
+a genuine terminal result.
 
 Fact-only progress continues without publishing a new snapshot revision.
 Completed assessments publish progressive current-snapshot replacements. The
@@ -98,7 +100,8 @@ See [docs/architecture.md](docs/architecture.md) and
 boundary. [ADR 0004](docs/adr/0004-exact-rule-combination-buckets.md) records
 the terrain's grouping semantics. [ADR 0005](docs/adr/0005-resolve-policy-facts-before-evaluation.md)
 supersedes ADR 0003's attempt-once classification details with the pending fact
-resolver and P2SH semantics.
+resolver and P2SH semantics. [ADR 0006](docs/adr/0006-own-policy-json-rpc-wire-boundary.md)
+records the bounded, presence-preserving classification transport.
 
 ## Website
 
@@ -201,26 +204,31 @@ must apply a server-side RPC whitelist containing exactly
 and `gettxout` for the Atlas user.
 The existing private nginx path must stream the verbose response without
 proxy-temp spill and use timeouts compatible with the validated collection
-window.
+window. Classification responses must not use `Transfer-Encoding`; the current
+proxy deliberately uses close-delimited responses, which Atlas bounds while
+reading.
 
 `corepc-client` 0.8 buffers the verbose membership response and has a fixed
-15-second transport timeout. Classification uses the `jsonrpc` crate's minreq
-transport with a 20-second per-batch timeout. Raw transaction and mempool-parent
-batches contain at most 256 requests and are split by an estimated 16 MiB
-response target. Confirmed prevout batches have a nominal 512-request cap, but
-the 16 MiB estimate and 64 KiB per-script-hex bound currently limit them to 254
-requests. Returned transaction hex is limited to 8,000,000 characters. A batch
-is rejected if its decoded JSON-RPC response envelope exceeds 16 MiB. The
-transport has already buffered and parsed that response, so these are admission
-guards rather than complete peak-memory limits. The deployment's 2 GiB memory
-cgroup is the hard boundary for transient response buffering.
+15-second transport timeout. Classification uses an Atlas-owned `minreq`
+transport with a 20-second per-batch timeout and disabled redirects. It
+requires HTTP 200 and the Bitcoin Core JSON-RPC 2.0 envelope shape, preserves
+the presence of both `result` and `error`, and restores out-of-order responses
+by globally unique numeric request ID. Duplicate or unexpected IDs and excess
+responses reject the batch. A valid error takes precedence over any
+simultaneous result. Literal `result: null`, omitted `result`, and a present
+value therefore remain three different outcomes.
 
-The current `jsonrpc` 0.18 response model represents both a literal
-`result: null` and an omitted `result` member as the same decoded value. Atlas
-therefore relies on the trusted Bitcoin Core endpoint emitting a valid result
-member, as it normally does. Bead `atlas-wgx` tracks preserving that distinction
-at the wire boundary so a malformed omission can never masquerade as a terminal
-missing fact.
+Raw transaction and mempool-parent batches contain at most 256 requests and are
+split by an estimated 16 MiB response target. Confirmed prevout batches have a
+nominal 512-request cap, but the 16 MiB estimate and 64 KiB per-script-hex bound
+currently limit them to 254 requests. Returned transaction hex is limited to
+8,000,000 characters. Classification responses reject `Transfer-Encoding` and
+are capped at 16 MiB before JSON parsing. Atlas rejects a declared length above
+the cap before reading the body and rejects premature EOF against a declaration.
+A close-delimited body aborts on the first byte beyond 16 MiB and must then
+decode as one complete JSON batch. The deployment's 2 GiB memory cgroup remains
+the boundary for concurrent responses, the separately buffered membership
+path, and total process memory.
 
 The default four raw RPC lanes are reduced to two lanes for confirmed prevout
 batches. A pending candidate window defaults to 2,048 variants and is capped at
@@ -244,9 +252,10 @@ The configured auxiliary cache bound covers exact current-transaction outputs
 and positive confirmed `OutPoint` scripts. Positive confirmed facts may survive
 membership generations and are evicted when necessary; nulls and failures are
 never cached. Retained pending scripts have a separate 256 MiB ceiling.
-Unresolved fact indexes, pending raw transactions, decoded RPC responses,
-classifications, the encoded snapshot, allocator overhead, and overlapping
-readers remain outside both bounds.
+Unresolved fact indexes, pending raw transactions, bounded policy response
+bodies, the separately buffered membership response, classifications, the
+encoded snapshot, allocator overhead, and overlapping readers remain outside
+both bounds.
 
 Classification drains according to an explicit continue, complete, paused, or
 stale disposition. Fact-only progress continues without publishing a snapshot

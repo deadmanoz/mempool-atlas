@@ -572,11 +572,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.21.7",
  "bitcoin",
  "bytes",
  "clap",
  "corepc-client",
- "jsonrpc",
+ "minreq",
  "rdts-rules",
  "serde",
  "serde_json",

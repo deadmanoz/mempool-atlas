@@ -111,11 +111,15 @@ cgroup remains the hard transient limit. Positive script reuse reduces repeated
 node work but is not a persistence or recovery path; all state disappears on
 process restart.
 
-The current `jsonrpc` 0.18 response model collapses literal `result: null` and
-an omitted `result` member before policy code sees the response. The trusted
-Bitcoin Core endpoint emits the member correctly, but a later transport change
-must preserve its wire presence to enforce the decision against malformed
-servers. Bead `atlas-wgx` records that follow-up.
+The Atlas-owned classification transport preserves literal `result: null`, an
+omitted `result`, and a present value as separate wire outcomes. It also
+preserves `error` presence, gives a valid error precedence over any simultaneous
+result, requires the Bitcoin Core JSON-RPC 2.0 envelope shape, and reconciles
+concurrent batch responses by unique request ID. The transport caps the HTTP
+body and verifies its declared framing before JSON parsing. A malformed
+omission can therefore never become a terminal missing fact.
+[ADR 0006](0006-own-policy-json-rpc-wire-boundary.md) records the transport
+decision and its alternatives.
 
 P2SH classification becomes deterministic from facts Atlas already collects.
 Tests must match the exact deployed-client behavior, including element-size

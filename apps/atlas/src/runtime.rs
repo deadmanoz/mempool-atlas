@@ -656,7 +656,6 @@ mod tests {
                 json!({
                     "jsonrpc": "2.0",
                     "result": result,
-                    "error": null,
                     "id": request["id"]
                 })
             })
@@ -719,7 +718,6 @@ mod tests {
                     .map(|request| {
                         json!({
                             "jsonrpc": "2.0",
-                            "result": null,
                             "error": {
                                 "code": -32601,
                                 "message": "classification method unavailable"

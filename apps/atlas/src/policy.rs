@@ -11,8 +11,6 @@ use std::time::Duration;
 
 use bitcoin::consensus::encode::deserialize_hex;
 use bitcoin::{OutPoint, ScriptBuf, Transaction, Txid};
-use jsonrpc::Client as JsonRpcClient;
-use jsonrpc::minreq_http::MinreqHttpTransport;
 use rdts_rules::{
     PrevoutFacts, PrevoutSet, RuleId, RuleVerdict, TxEvidence, evaluate_mempool_policy,
 };
@@ -28,6 +26,7 @@ use crate::model::{
     MAX_BIP110_DETAIL_EXEMPLARS_PER_RULE, MempoolObservation, MempoolSnapshot, ModelError,
     TransactionClassification, TransactionClassifications,
 };
+use crate::policy_rpc::{PolicyRpcClient, PolicyRpcError, PolicyRpcOutcome};
 
 const RAW_TRANSACTION_BATCH_SIZE: usize = 256;
 const MAX_GETTXOUT_BATCH_SIZE: usize = 512;
@@ -110,7 +109,7 @@ impl ResolverLimits {
 
 #[derive(Clone, Debug)]
 pub struct PolicyEnricher {
-    client: Arc<JsonRpcClient>,
+    client: Arc<PolicyRpcClient>,
     coordinator: Arc<Mutex<PolicyCoordinator>>,
     limits: PolicyLimits,
     resolver_limits: ResolverLimits,
@@ -123,14 +122,14 @@ impl PolicyEnricher {
         password: String,
         limits: PolicyLimits,
     ) -> Result<Self, PolicyError> {
-        let transport = MinreqHttpTransport::builder()
-            .timeout(RPC_BATCH_TIMEOUT)
-            .url(url)
-            .map_err(PolicyError::ClientInitialization)?
-            .basic_auth(username, Some(password))
-            .build();
         Ok(Self {
-            client: Arc::new(JsonRpcClient::with_transport(transport)),
+            client: Arc::new(PolicyRpcClient::new(
+                url,
+                username,
+                password,
+                RPC_BATCH_TIMEOUT,
+                MAX_BATCH_RESPONSE_BYTES,
+            )),
             coordinator: Arc::new(Mutex::new(PolicyCoordinator::new(
                 limits.max_auxiliary_cache_bytes,
             ))),
@@ -920,41 +919,34 @@ impl PolicyEnricher {
         }
         let parameters = expected
             .iter()
-            .map(|variant| jsonrpc::try_arg(json!([variant.txid, 0])))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(PolicyError::EncodeParameters)?;
-        let requests = parameters
-            .iter()
-            .map(|parameters| {
-                self.client
-                    .build_request("getrawtransaction", Some(parameters))
-            })
+            .map(|variant| json!([variant.txid, 0]))
             .collect::<Vec<_>>();
-        let responses = self
+        let batch = self
             .client
-            .send_batch(&requests)
-            .map_err(PolicyError::Batch)?;
-        let response_bytes = validated_decoded_response_bytes(&responses)?;
+            .send_batch("getrawtransaction", &parameters)
+            .map_err(map_policy_rpc_error)?;
+        let response_bytes = batch.response_bytes;
 
         let mut response_failures = 0;
         let mut systemic_response_failures = 0;
         let mut missing_responses = 0;
         let values = expected
             .iter()
-            .zip(responses)
+            .zip(batch.responses)
             .map(|(expected, response)| {
                 let Some(response) = response else {
                     response_failures += 1;
                     missing_responses += 1;
                     return RpcValue::RetryableFailure;
                 };
-                if is_systemic_rpc_response_failure(&response) {
-                    systemic_response_failures += 1;
-                    response_failures += 1;
-                    return RpcValue::SystemicFailure;
-                }
-                let transaction = valid_rpc_result(&response)
-                    .and_then(|result| {
+                let transaction = match response.outcome() {
+                    PolicyRpcOutcome::ProtocolFailure
+                    | PolicyRpcOutcome::RpcError(-32700..=-32600 | -28) => {
+                        systemic_response_failures += 1;
+                        response_failures += 1;
+                        return RpcValue::SystemicFailure;
+                    }
+                    PolicyRpcOutcome::Value(result) => (|| {
                         if result.get().len() > MAX_TRANSACTION_HEX_CHARACTERS + 2 {
                             return Err(());
                         }
@@ -963,15 +955,19 @@ impl PolicyEnricher {
                             return Err(());
                         }
                         deserialize_hex::<Transaction>(hex).map_err(|_| ())
-                    })
-                    .and_then(|transaction| {
-                        if transaction.compute_txid().to_string() != expected.txid
-                            || transaction.compute_wtxid().to_string() != expected.wtxid
-                        {
-                            return Err(());
-                        }
-                        Ok(transaction)
-                    });
+                    })(),
+                    PolicyRpcOutcome::Null
+                    | PolicyRpcOutcome::RpcError(_)
+                    | PolicyRpcOutcome::Malformed => Err(()),
+                }
+                .and_then(|transaction| {
+                    if transaction.compute_txid().to_string() != expected.txid
+                        || transaction.compute_wtxid().to_string() != expected.wtxid
+                    {
+                        return Err(());
+                    }
+                    Ok(transaction)
+                });
                 match transaction {
                     Ok(transaction) => RpcValue::Found(transaction),
                     Err(()) => {
@@ -1005,25 +1001,19 @@ impl PolicyEnricher {
         }
         let parameters = outpoints
             .iter()
-            .map(|outpoint| {
-                jsonrpc::try_arg(json!([outpoint.txid.to_string(), outpoint.vout, false]))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(PolicyError::EncodeParameters)?;
-        let requests = parameters
-            .iter()
-            .map(|parameters| self.client.build_request("gettxout", Some(parameters)))
+            .map(|outpoint| json!([outpoint.txid.to_string(), outpoint.vout, false]))
             .collect::<Vec<_>>();
-        let responses = self
+        let batch = self
             .client
-            .send_batch(&requests)
-            .map_err(PolicyError::Batch)?;
-        let response_bytes = validated_decoded_response_bytes(&responses)?;
+            .send_batch("gettxout", &parameters)
+            .map_err(map_policy_rpc_error)?;
+        let response_bytes = batch.response_bytes;
 
         let mut response_failures = 0;
         let mut systemic_response_failures = 0;
         let mut missing_responses = 0;
-        let values = responses
+        let values = batch
+            .responses
             .into_iter()
             .map(|response| {
                 let Some(response) = response else {
@@ -1031,36 +1021,26 @@ impl PolicyEnricher {
                     missing_responses += 1;
                     return RpcValue::RetryableFailure;
                 };
-                if is_systemic_rpc_response_failure(&response) {
-                    systemic_response_failures += 1;
-                    response_failures += 1;
-                    return RpcValue::SystemicFailure;
-                }
-                if response.error.is_none()
-                    && response
-                        .jsonrpc
-                        .as_deref()
-                        .is_none_or(|version| version == "2.0")
-                    && response.result.is_none()
-                {
-                    // Bitcoin Core uses a literal JSON null for an absent
-                    // gettxout. jsonrpc 0.18 maps that to `None`, but also loses
-                    // the distinction between null and an omitted result member.
-                    // The valid-envelope check rejects errors, while preserving
-                    // member presence would require a different transport model.
-                    return RpcValue::ExplicitNull;
-                }
-                let Ok(result) = valid_rpc_result(&response) else {
-                    response_failures += 1;
-                    return RpcValue::RetryableFailure;
+                let result = match response.outcome() {
+                    PolicyRpcOutcome::ProtocolFailure
+                    | PolicyRpcOutcome::RpcError(-32700..=-32600 | -28) => {
+                        systemic_response_failures += 1;
+                        response_failures += 1;
+                        return RpcValue::SystemicFailure;
+                    }
+                    PolicyRpcOutcome::Null => return RpcValue::ExplicitNull,
+                    PolicyRpcOutcome::Value(result) => result,
+                    PolicyRpcOutcome::RpcError(_) | PolicyRpcOutcome::Malformed => {
+                        response_failures += 1;
+                        return RpcValue::RetryableFailure;
+                    }
                 };
                 if result.get().len() > ESTIMATED_GETTXOUT_RESPONSE_BYTES {
                     response_failures += 1;
                     return RpcValue::RetryableFailure;
                 }
-                let wire = match serde_json::from_str::<Option<GetTxOutWire<'_>>>(result.get()) {
-                    Ok(Some(wire)) => wire,
-                    Ok(None) => return RpcValue::ExplicitNull,
+                let wire = match serde_json::from_str::<GetTxOutWire<'_>>(result.get()) {
+                    Ok(wire) => wire,
                     Err(_) => {
                         response_failures += 1;
                         return RpcValue::RetryableFailure;
@@ -1228,12 +1208,8 @@ pub enum PolicyError {
         "policy limits require 1..={MAX_RPC_LANES} RPC lanes, a 1..={MAX_AUXILIARY_CACHE_BYTES}-byte auxiliary cache, and 1..={MAX_TRANSACTIONS_PER_SLICE} transactions per slice"
     )]
     InvalidLimits,
-    #[error("failed to create policy RPC client: {0}")]
-    ClientInitialization(#[source] jsonrpc::minreq_http::Error),
-    #[error("failed to encode policy RPC parameters: {0}")]
-    EncodeParameters(#[source] serde_json::Error),
     #[error("policy RPC batch failed: {0}")]
-    Batch(#[source] jsonrpc::Error),
+    Batch(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("policy RPC batch response used {actual} bytes, exceeding the {maximum}-byte limit")]
     BatchResponseTooLarge { actual: usize, maximum: usize },
     #[error(
@@ -1274,8 +1250,6 @@ struct BatchFetch<T> {
 enum RpcValue<T> {
     Found(T),
     /// The successful no-value shape that Bitcoin Core emits as JSON `null`.
-    /// jsonrpc 0.18 does not preserve whether the result member was present, so
-    /// an otherwise valid envelope with an omitted result is indistinguishable.
     /// Item-local, missing-response, and decoding failures remain retryable.
     ExplicitNull,
     RetryableFailure,
@@ -1558,8 +1532,7 @@ enum FactState {
     /// generation.
     OperationallyDeferred,
     /// Created from the successful no-value shape returned by the confirmed
-    /// `gettxout` path. See `RpcValue::ExplicitNull` for the jsonrpc 0.18
-    /// member-presence limitation.
+    /// `gettxout` path.
     ExplicitlyMissing,
 }
 
@@ -2496,47 +2469,12 @@ fn estimated_confirmed_batch_response_bytes(outpoint_count: usize) -> usize {
     outpoint_count.saturating_mul(ESTIMATED_GETTXOUT_RESPONSE_BYTES)
 }
 
-fn validated_decoded_response_bytes(
-    responses: &[Option<jsonrpc::Response>],
-) -> Result<usize, PolicyError> {
-    // jsonrpc's minreq transport has already buffered and parsed the HTTP body
-    // here. It exposes no receive-size setting, so this guard prevents further
-    // per-result decoding while the process memory cgroup remains the hard
-    // transient bound.
-    validated_decoded_response_bytes_with_limit(responses, MAX_BATCH_RESPONSE_BYTES)
-}
-
-fn validated_decoded_response_bytes_with_limit(
-    responses: &[Option<jsonrpc::Response>],
-    maximum: usize,
-) -> Result<usize, PolicyError> {
-    let mut counter = ResponseByteCounter(2);
-    for response in responses.iter().flatten() {
-        if serde_json::to_writer(&mut counter, response).is_err() {
-            counter.0 = usize::MAX;
-            break;
+fn map_policy_rpc_error(error: PolicyRpcError) -> PolicyError {
+    match error {
+        PolicyRpcError::ResponseTooLarge { actual, maximum } => {
+            PolicyError::BatchResponseTooLarge { actual, maximum }
         }
-        counter.0 = counter.0.saturating_add(1);
-    }
-    if counter.0 > maximum {
-        return Err(PolicyError::BatchResponseTooLarge {
-            actual: counter.0,
-            maximum,
-        });
-    }
-    Ok(counter.0)
-}
-
-struct ResponseByteCounter(usize);
-
-impl std::io::Write for ResponseByteCounter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0 = self.0.saturating_add(buffer.len());
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        error => PolicyError::Batch(Box::new(error)),
     }
 }
 
@@ -2620,30 +2558,6 @@ fn public_rule_id(rule: RuleId) -> Bip110RuleId {
     }
 }
 
-fn valid_rpc_result(response: &jsonrpc::Response) -> Result<&serde_json::value::RawValue, ()> {
-    if response
-        .jsonrpc
-        .as_deref()
-        .is_none_or(|version| version == "2.0")
-        && response.error.is_none()
-    {
-        response.result.as_deref().ok_or(())
-    } else {
-        Err(())
-    }
-}
-
-fn is_systemic_rpc_response_failure(response: &jsonrpc::Response) -> bool {
-    response
-        .jsonrpc
-        .as_deref()
-        .is_some_and(|version| version != "2.0")
-        || response
-            .error
-            .as_ref()
-            .is_some_and(|error| matches!(error.code, -32700..=-32600 | -28))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
@@ -2692,6 +2606,7 @@ mod tests {
     #[derive(Debug)]
     enum FixtureResponse {
         Result(Value),
+        OmittedResult,
         Error,
         SystemicError,
         Missing,
@@ -2909,12 +2824,14 @@ mod tests {
                 FixtureResponse::Result(result) => responses.push(json!({
                     "jsonrpc": "2.0",
                     "result": result,
-                    "error": null,
+                    "id": request["id"]
+                })),
+                FixtureResponse::OmittedResult => responses.push(json!({
+                    "jsonrpc": "2.0",
                     "id": request["id"]
                 })),
                 FixtureResponse::Error => responses.push(json!({
                     "jsonrpc": "2.0",
-                    "result": null,
                     "error": {
                         "code": -5,
                         "message": "fixture RPC failure"
@@ -2923,7 +2840,6 @@ mod tests {
                 })),
                 FixtureResponse::SystemicError => responses.push(json!({
                     "jsonrpc": "2.0",
-                    "result": null,
                     "error": {
                         "code": -32601,
                         "message": "fixture method unavailable"
@@ -2973,6 +2889,20 @@ mod tests {
                 .expect("fixture server");
         });
         (state, address, server)
+    }
+
+    async fn start_invalid_policy_fixture() -> (SocketAddr, JoinHandle<()>) {
+        let application = Router::new().route("/", post(|| async { "not JSON" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, application)
+                .await
+                .expect("fixture server");
+        });
+        (address, server)
     }
 
     fn test_enricher(address: SocketAddr) -> PolicyEnricher {
@@ -3444,13 +3374,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn confirmed_fetch_distinguishes_null_from_malformed_error_and_missing() {
+    async fn confirmed_fetch_distinguishes_null_from_omitted_malformed_error_and_missing() {
         let literal_null = confirmed_outpoint(6, 0);
-        let malformed = confirmed_outpoint(7, 0);
+        let omitted_result = confirmed_outpoint(7, 0);
+        let malformed = confirmed_outpoint(10, 0);
         let rpc_error = confirmed_outpoint(8, 0);
         let missing_response = confirmed_outpoint(9, 0);
         let rpc = RpcFixture::new([])
             .with_gettxout_responses(literal_null, [FixtureResponse::Result(Value::Null)])
+            .with_gettxout_responses(omitted_result, [FixtureResponse::OmittedResult])
             .with_gettxout_responses(
                 malformed,
                 [FixtureResponse::Result(json!({
@@ -3464,6 +3396,7 @@ mod tests {
         let fetch = tokio::task::spawn_blocking(move || {
             enricher.fetch_confirmed_prevouts(&[
                 literal_null,
+                omitted_result,
                 malformed,
                 rpc_error,
                 missing_response,
@@ -3478,10 +3411,11 @@ mod tests {
         assert!(matches!(fetch.values[1], RpcValue::RetryableFailure));
         assert!(matches!(fetch.values[2], RpcValue::RetryableFailure));
         assert!(matches!(fetch.values[3], RpcValue::RetryableFailure));
-        assert_eq!(fetch.response_failures, 3);
+        assert!(matches!(fetch.values[4], RpcValue::RetryableFailure));
+        assert_eq!(fetch.response_failures, 4);
         assert_eq!(fetch.systemic_response_failures, 0);
         assert_eq!(fetch.missing_responses, 1);
-        assert_eq!(fixture.fixture.lock().await.calls.len(), 4);
+        assert_eq!(fixture.fixture.lock().await.calls.len(), 5);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3593,6 +3527,31 @@ mod tests {
         assert!(!report.complete);
         assert_eq!(report.disposition, PolicyDrain::Paused);
         assert!(!report.classifications.contains_key(&txid));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn framing_failure_pauses_with_only_the_batch_failure_counter() {
+        let transaction = transaction();
+        let (address, server) = start_invalid_policy_fixture().await;
+        let enricher = test_enricher(address);
+        enricher
+            .install_snapshot(test_snapshot(1, &[transaction]))
+            .expect("membership");
+
+        let report = enricher
+            .classify_next()
+            .await
+            .expect("batch failure report");
+        server.abort();
+
+        assert_eq!(report.batch_failures, 1);
+        assert_eq!(report.response_failures, 0);
+        assert_eq!(report.systemic_response_failures, 0);
+        assert_eq!(report.missing_responses, 0);
+        assert_eq!(report.fact_requests, 0);
+        assert_eq!(report.newly_classified, 0);
+        assert!(!report.complete);
+        assert_eq!(report.disposition, PolicyDrain::Paused);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5091,51 +5050,6 @@ mod tests {
         assert_eq!(fetch.response_failures, 1);
         assert!(fetch.response_bytes < MAX_BATCH_RESPONSE_BYTES);
         assert_eq!(fixture.fixture.lock().await.calls.len(), 1);
-    }
-
-    #[test]
-    fn decoded_response_guard_counts_the_complete_response_object() {
-        let response = jsonrpc::Response {
-            result: Some(
-                serde_json::value::RawValue::from_string("\"bounded\"".to_owned())
-                    .expect("raw JSON string"),
-            ),
-            error: None,
-            id: json!(1),
-            jsonrpc: Some("2.0".to_owned()),
-        };
-
-        let error = validated_decoded_response_bytes_with_limit(&[Some(response)], 8)
-            .expect_err("complete response exceeds tiny limit");
-
-        assert!(matches!(
-            error,
-            PolicyError::BatchResponseTooLarge { maximum: 8, .. }
-        ));
-    }
-
-    #[test]
-    fn jsonrpc_response_model_erases_null_result_member_presence() {
-        let explicit_null = serde_json::from_value::<jsonrpc::Response>(json!({
-            "jsonrpc": "2.0",
-            "result": null,
-            "error": null,
-            "id": 1
-        }))
-        .expect("explicit-null response");
-        let omitted_result = serde_json::from_value::<jsonrpc::Response>(json!({
-            "jsonrpc": "2.0",
-            "error": null,
-            "id": 1
-        }))
-        .expect("omitted-result response");
-
-        assert!(explicit_null.result.is_none());
-        assert!(omitted_result.result.is_none());
-        assert_eq!(
-            serde_json::to_value(explicit_null).expect("serialized explicit null"),
-            serde_json::to_value(omitted_result).expect("serialized omitted result")
-        );
     }
 
     #[test]

@@ -11,6 +11,10 @@ website. Comparison and archival are separate future products.
 
 - `apps/atlas/src/rpc.rs` owns the complete membership observation:
   `getmempoolinfo`, verbose `getrawmempool`, and `getblockchaininfo`.
+- `apps/atlas/src/policy_rpc.rs` owns authenticated, bounded policy batches. It
+  preserves JSON member presence, restores out-of-order batch responses by
+  globally unique numeric request ID, requires Bitcoin Core's JSON-RPC v2
+  response shape, and caps each body before parsing.
 - `apps/atlas/src/policy.rs` owns continuous, bounded classification through
   concurrent batched `getrawtransaction` and `gettxout(txid, vout, false)`.
   It owns current in-memory generations, same-generation pending fact waves,
@@ -44,8 +48,10 @@ addresses, credentials, and fleet inventory remain outside this repository.
 - `corepc-client` supplies synchronous Bitcoin Core v28 RPC for complete
   membership observations. Its fixed 15-second transport timeout applies to
   that path. Keep the calls behind `spawn_blocking`.
-- `jsonrpc` with `minreq_http` supplies bounded batch transport for
-  classification enrichment with a 20-second per-batch timeout.
+- `minreq` supplies lazy HTTP response reads for Atlas-owned classification
+  batches with a 20-second timeout and redirects disabled. `base64` encodes the
+  Basic Auth header, and `serde_json` raw values preserve wire-member presence
+  until the envelope is interpreted.
 - `rdts-rules` evaluates exact, typed BIP-110 rule evidence without I/O, chain
   access, async state, or a clock.
 - `bitcoin` validates transaction IDs, block hashes, and exact BTC amounts.
@@ -95,8 +101,10 @@ Use `just` targets whenever one exists:
 - Evaluate a candidate only after every required script is present or has a
   genuine terminal lookup result. A successful null-shaped `gettxout` response
   from the trusted Bitcoin Core endpoint is terminal only for an outpoint known
-  not to be a current mempool parent. A null fallback after parent-raw failure
-  is ambiguous and remains collection state.
+  not to be a current mempool parent. The `result` member must be present in the
+  required Bitcoin Core JSON-RPC 2.0 success shape; an omitted member is an
+  operational failure. A null fallback after parent-raw failure is ambiguous
+  and remains collection state.
 - Capacity deferral, unscheduled work, batch or transport failure, malformed or
   oversized responses, and missing response envelopes remain collection state.
   They leave public `bip110` as `null` rather than manufacturing an
@@ -198,14 +206,18 @@ Use `just` targets whenever one exists:
   count, yields and checks staleness between relief passes, and does not discard
   a positive fact already fetched in the current call while one of its
   dependents survives.
-- Returned transaction hex is capped at 8,000,000 characters and each decoded
-  JSON-RPC response envelope at 16 MiB. The minreq transport buffers and parses
-  a response before the envelope check, so it is not a peak-memory limit. The
-  production 2 GiB memory cgroup is the hard transient boundary.
-- `jsonrpc` 0.18 maps both a literal `result: null` and an omitted `result`
-  member to `Response.result == None`. The trusted Bitcoin Core endpoint emits
-  the member correctly, but policy code cannot independently prove its wire
-  presence. Bead `atlas-wgx` tracks a transport-level distinction.
+- Returned transaction hex is capped at 8,000,000 characters. Each
+  classification HTTP body rejects `Transfer-Encoding` and is capped at 16 MiB
+  before JSON parsing. A declared length above the cap is rejected immediately,
+  a declared body must arrive at exactly that length, and a close-delimited body
+  aborts on the first byte beyond the cap. Concurrent bodies, membership
+  buffering, and the rest of the process remain subject to the production
+  2 GiB memory cgroup.
+- The Atlas-owned policy transport distinguishes an omitted `result` member, a
+  present JSON null, and a present value. It also preserves `error` presence,
+  gives errors precedence over results, requires the Bitcoin Core JSON-RPC 2.0
+  envelope shape over HTTP 200, and rejects duplicate or unexpected response
+  IDs and excess responses.
 - `ATLAS_CLASSIFICATION_CACHE_MIB` bounds the combined estimated admission of
   exact current-transaction outputs and cross-generation positive confirmed
   scripts at 256 MiB by default and 512 MiB maximum. Positive confirmed facts
@@ -255,6 +267,8 @@ Use `just` targets whenever one exists:
 - `docs/adr/0005-resolve-policy-facts-before-evaluation.md` records the pending
   fact resolver, explicit-null semantics, positive prevout cache, and P2SH
   evaluation. It supersedes ADR 0003's attempt-once classification details.
+- `docs/adr/0006-own-policy-json-rpc-wire-boundary.md` records the bounded,
+  presence-preserving classification transport and its HTTP framing contract.
 
 `agent_docs/.docs-ref` stores the commit against which references were last
 validated. After architectural changes, run

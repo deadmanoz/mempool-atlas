@@ -8,7 +8,8 @@ the seven BIP-110 rules as deployed Bitcoin Knots mempool policy.
 [ADR 0005](adr/0005-resolve-policy-facts-before-evaluation.md) defines the
 pending fact resolver, explicit-null semantics, positive prevout cache, and
 P2SH evaluation described here. It supersedes ADR 0003's attempt-once
-classification details.
+classification details. [ADR 0006](adr/0006-own-policy-json-rpc-wire-boundary.md)
+defines the policy transport and HTTP framing contract.
 
 ```mermaid
 flowchart TB
@@ -21,6 +22,7 @@ flowchart TB
     subgraph presentation["Presentation host: one Atlas process"]
         membership["Complete membership collector"]
         generation["Install current in-memory generation<br/>reuse exact surviving classifications"]
+        policy_rpc["Bounded wire-preserving<br/>policy RPC client"]
         enrichment["Pending candidate and fact waves<br/>current wtxid and positive script caches"]
         evaluator["Pure seven-rule evaluator"]
         guard["Generation and revision guard"]
@@ -37,7 +39,8 @@ flowchart TB
     end
 
     rpc_proxy -->|"existing WireGuard: membership RPC"| membership
-    rpc_proxy -->|"existing WireGuard: bounded detail RPC"| enrichment
+    rpc_proxy -->|"existing WireGuard: bounded detail RPC"| policy_rpc
+    policy_rpc --> enrichment
     browser["Browser"] --> static
     browser --> api
 ```
@@ -48,6 +51,10 @@ flowchart TB
 
 - `rpc.rs` collects complete membership with `getmempoolinfo`, verbose
   `getrawmempool`, and `getblockchaininfo` through `corepc-client`.
+- `policy_rpc.rs` sends authenticated policy batches through lazy `minreq`
+  reads. It owns response-byte limits, redirect refusal, request IDs, Bitcoin
+  Core JSON-RPC 2.0 envelope validation, and the distinction between missing,
+  null, and value result members.
 - `policy.rs` resolves bounded windows of current witness variants through
   batched concurrent `getrawtransaction` and
   `gettxout(txid, vout, false)` calls. It owns same-generation pending fact
@@ -223,13 +230,24 @@ terminal missing script can produce a visible partial assessment while
 independently decidable violations remain preserved. None of these conditions
 invalidates fresh membership.
 
-Classification batches use a 20-second transport timeout. Returned transaction
-hex is capped at 8,000,000 characters, confirmed script hex at 64 KiB, and a
-batch is rejected if its decoded JSON-RPC response envelope exceeds 16 MiB.
-The minreq transport buffers and parses the response before the application can
-enforce that guard. The candidate-raw, mempool-parent-raw, and
-confirmed-prevout wave estimates bound planned work, not transport allocation.
-The production 2 GiB memory cgroup is the hard transient boundary.
+Classification batches use a 20-second transport timeout and do not follow
+redirects. Atlas requires HTTP 200, the Bitcoin Core JSON-RPC 2.0 envelope
+shape, and globally unique numeric request IDs. It restores out-of-order
+responses to request order and rejects duplicate or unexpected IDs and excess
+responses as batch failures. The owned wire model preserves missing, null, and
+value `result` states plus `error` presence; a valid error takes precedence over
+any simultaneous result.
+
+Returned transaction hex is capped at 8,000,000 characters and confirmed
+script hex at 64 KiB. Every classification response rejects
+`Transfer-Encoding` and is capped at 16 MiB before JSON parsing. A declared
+length above the cap is rejected before reading, and the received length must
+exactly match any declaration. A close-delimited body aborts on the first byte
+beyond the cap and must decode as one complete JSON batch. The candidate-raw,
+mempool-parent-raw, and confirmed-prevout wave estimates still bound planned
+work rather than total process allocation. The production 2 GiB memory cgroup
+remains the hard boundary for concurrent responses, the separately buffered
+membership path, and all other state.
 
 ## Publication and failure
 
@@ -272,12 +290,16 @@ or response failures during best-effort classification are logged and leave
 affected transactions unclassified; they do not make a fresh membership
 snapshot stale.
 
-The current `jsonrpc` 0.18 model loses one piece of wire information before
-policy code runs: both literal `result: null` and an omitted `result` member
-deserialize to `Response.result == None`. The trusted Bitcoin Core endpoint
-emits a valid result member, but Atlas cannot independently distinguish a
-malformed omission on this transport. Bead `atlas-wgx` tracks replacing or
-adapting that boundary.
+The policy transport accepts `result: null` as successful no-value data only
+for a JSON-RPC 2.0 response with no `error` member. In an otherwise decodable
+v2 item, an omitted result, explicit `error: null`, malformed error object, or
+ordinary non-systemic RPC error is a response-local collection failure. A
+missing or wrong JSON-RPC version, an RPC error in `-32700..=-32600`, or Bitcoin
+Core warm-up error `-28` is systemic. Invalid or non-array JSON, invalid IDs,
+duplicate or unexpected IDs, an excess response count, unsupported HTTP
+framing, non-200 HTTP status, transport failure, or body overflow fails the
+batch. A missing expected response slot remains separately countable and
+retryable unless every response in a multi-item batch is absent.
 
 Each current-snapshot HTTP request clones the immutable shared response buffer
 rather than allocating and serializing another large body. The presentation
@@ -299,9 +321,11 @@ pending scripts have a separate 256 MiB ceiling. Unresolved fact indexes,
 pending raw transactions, classification details, concurrent RPC responses,
 the encoded snapshot, allocator overhead, and reader overlap remain outside
 these budgets.
-Deployment acceptance must still observe real peak memory. Classification HTTP
-bodies are buffered before the decoded 16 MiB envelope guard runs, so the
-deployment's 2 GiB memory cgroup is the hard transient response boundary.
+Deployment acceptance must still observe real peak memory. Each classification
+body is bounded before parsing, but multiple lane-local bodies, the membership
+buffer, pending transactions, caches, publication overlap, and allocator
+overhead can coexist. The deployment's 2 GiB memory cgroup therefore remains
+the hard process boundary.
 
 Version 0.8 of `corepc-client` also fixes the JSON-RPC transport timeout at 15
 seconds for the complete membership path. The first membership-only deployment

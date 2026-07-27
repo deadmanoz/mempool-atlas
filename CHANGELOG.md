@@ -25,6 +25,10 @@ All notable changes to Mempool Atlas will be documented in this file.
 - Publish complete membership independently from policy work, then resolve the
   current generation through bounded concurrent candidate and script-fact
   waves before evaluation.
+- Preserve missing, null, and value JSON-RPC results through an Atlas-owned
+  policy transport, cap each classification body before parsing, reconcile
+  concurrent responses by request ID, and keep malformed omissions out of
+  terminal missing facts.
 - Keep each admitted, verified raw transaction pending across same-generation
   fact waves so bounded work continues fairly without refetching the candidate.
 - Reserve typed missing script facts for successful null-shaped

@@ -1,6 +1,7 @@
 pub mod api;
 pub mod model;
 pub mod policy;
+mod policy_rpc;
 pub mod rpc;
 pub mod runtime;
 

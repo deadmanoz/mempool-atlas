@@ -2,6 +2,12 @@
 
 Status: accepted
 
+ADR 0005 supersedes this decision's attempt-once classification scheduling and
+missing-prevout treatment. The single-process, in-memory product boundary and
+independent membership cadence remain current.
+[ADR 0006](0006-own-policy-json-rpc-wire-boundary.md) records the later policy
+RPC wire boundary.
+
 ## Context
 
 The first two Mempool Atlas experiments coupled too many concerns. Attempt #1
@@ -116,13 +122,14 @@ batches have a nominal 512-request cap, but the 16 MiB estimate and 64 KiB
 per-script-hex bound currently reduce that to 254. The confirmed phase has its
 own 256 MiB aggregate response estimate, permitting 4,064 worst-case calls
 under current constants. Classification batches have a 20-second transport
-timeout. Returned transaction hex is capped at 8,000,000 characters and each
-decoded JSON-RPC response envelope at 16 MiB.
-
-The minreq transport buffers and parses a complete HTTP response before that
-decoded envelope guard runs. The phase limits bound estimated planned work, not
-transport memory. The production 2 GiB memory cgroup is the hard transient
-boundary.
+timeout. Returned transaction hex is capped at 8,000,000 characters. The
+Atlas-owned classification transport caps each HTTP body at 16 MiB before JSON
+parsing, rejects transfer-encoded framing, verifies declared lengths, bounds
+close-delimited responses while reading, preserves result and error member
+presence, and reconciles responses by unique request ID. The phase limits bound
+estimated planned work, not total process memory. Concurrent classification
+bodies, the separately buffered membership path, and other state remain subject
+to the production 2 GiB memory cgroup.
 
 The auxiliary output-script cache uses a 256 MiB default admission estimate
 with a 512 MiB configuration maximum. This is not a process-memory quota:
