@@ -15,7 +15,8 @@ use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
 use crate::model::{
-    ChainTip, MAX_SUPPORTED_MEMPOOL_ENTRIES, MempoolEntry, MempoolSnapshot, ModelError,
+    ChainTip, MAX_SAFE_JSON_INTEGER, MAX_SUPPORTED_MEMPOOL_ENTRIES, MempoolEntry, MempoolSnapshot,
+    ModelError,
 };
 
 thread_local! {
@@ -48,8 +49,8 @@ impl RpcClient {
         })
     }
 
-    /// Fetches one complete mempool snapshot and binds it to the node's
-    /// chain tip immediately after the verbose mempool call.
+    /// Fetches one complete mempool snapshot between two matching chain-tip
+    /// reads and binds it to that stable tip.
     pub async fn get_mempool_snapshot(
         &self,
         source_id: &str,
@@ -60,6 +61,13 @@ impl RpcClient {
         let source_id = source_id.to_owned();
         let source_label = source_label.to_owned();
         tokio::task::spawn_blocking(move || {
+            let collection_started_at_ms = system_now_ms()?;
+            let starting_tip = decode_chain_tip(
+                client
+                    .call::<BlockchainInfoWire>("getblockchaininfo", &[])
+                    .map_err(RpcError::GetBlockchainInfo)?,
+            )?;
+
             let info = client
                 .call::<MempoolInfoWire>("getmempoolinfo", &[])
                 .map_err(RpcError::GetMempoolInfo)?;
@@ -71,22 +79,29 @@ impl RpcClient {
                 .map_err(RpcError::GetRawMempool)?
                 .into_entries(maximum)?;
 
-            let chain = client
+            let ending_chain = client
                 .call::<BlockchainInfoWire>("getblockchaininfo", &[])
                 .map_err(RpcError::GetBlockchainInfo)?;
-            let hash = BlockHash::from_str(&chain.bestblockhash)
-                .map_err(|_| RpcError::InvalidBestBlockHash(chain.bestblockhash))?
-                .to_string();
-            let observed_at_ms = system_now_ms()?;
+            let collection_completed_at_ms = system_now_ms()?;
+            let ending_tip = decode_chain_tip(ending_chain)?;
+            if starting_tip != ending_tip {
+                return Err(RpcError::UnstableChainTip {
+                    starting_height: starting_tip.height,
+                    starting_hash: starting_tip.hash,
+                    ending_height: ending_tip.height,
+                    ending_hash: ending_tip.hash,
+                });
+            }
+            let collection_duration_ms =
+                collection_completed_at_ms.saturating_sub(collection_started_at_ms);
 
-            MempoolSnapshot::new(
+            MempoolSnapshot::new_with_collection_window(
                 source_id,
                 source_label,
-                observed_at_ms,
-                ChainTip {
-                    height: chain.blocks,
-                    hash,
-                },
+                collection_started_at_ms,
+                collection_completed_at_ms,
+                collection_duration_ms,
+                ending_tip,
                 entries,
             )
             .map_err(RpcError::InvalidSnapshot)
@@ -133,6 +148,19 @@ pub enum RpcError {
     },
     #[error("getblockchaininfo returned invalid best block hash {0:?}")]
     InvalidBestBlockHash(String),
+    #[error(
+        "getblockchaininfo returned block height {0}, which cannot be represented exactly in JSON"
+    )]
+    InvalidBlockHeight(u64),
+    #[error(
+        "Bitcoin node chain tip changed during mempool collection from {starting_height}:{starting_hash} to {ending_height}:{ending_hash}"
+    )]
+    UnstableChainTip {
+        starting_height: u64,
+        starting_hash: String,
+        ending_height: u64,
+        ending_hash: String,
+    },
     #[error("system clock is before the Unix epoch")]
     InvalidSystemClock,
     #[error("system time cannot be represented in milliseconds")]
@@ -163,6 +191,8 @@ impl RpcError {
             | Self::EntryTimeOverflow { .. }
             | Self::InvalidEntryFacts { .. }
             | Self::InvalidBestBlockHash(_)
+            | Self::InvalidBlockHeight(_)
+            | Self::UnstableChainTip { .. }
             | Self::InvalidSnapshot(_) => "Bitcoin node returned an invalid mempool snapshot",
         }
     }
@@ -177,6 +207,19 @@ struct MempoolInfoWire {
 struct BlockchainInfoWire {
     blocks: u64,
     bestblockhash: String,
+}
+
+fn decode_chain_tip(chain: BlockchainInfoWire) -> Result<ChainTip, RpcError> {
+    if chain.blocks > MAX_SAFE_JSON_INTEGER {
+        return Err(RpcError::InvalidBlockHeight(chain.blocks));
+    }
+    let hash = BlockHash::from_str(&chain.bestblockhash)
+        .map_err(|_| RpcError::InvalidBestBlockHash(chain.bestblockhash))?
+        .to_string();
+    Ok(ChainTip {
+        height: chain.blocks,
+        hash,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,6 +394,7 @@ fn system_now_ms() -> Result<u64, RpcError> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc as Shared;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::extract::State;
     use axum::http::HeaderMap;
@@ -378,6 +422,13 @@ mod tests {
     }
 
     type ObservedRpcCalls = Shared<AsyncMutex<Vec<ObservedRpcCall>>>;
+
+    #[derive(Debug)]
+    struct ChangingTipFixture {
+        chain_reads: AtomicUsize,
+        ending_height: u64,
+        ending_hash: &'static str,
+    }
 
     async fn rpc_fixture(
         State(calls): State<ObservedRpcCalls>,
@@ -438,6 +489,44 @@ mod tests {
         })
     }
 
+    async fn changing_tip_rpc_fixture(
+        State(fixture): State<Shared<ChangingTipFixture>>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        let method = request["method"].as_str().expect("RPC method");
+        let result = match method {
+            "getblockchaininfo" => {
+                if fixture.chain_reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    json!({
+                        "blocks": 900_000,
+                        "bestblockhash": TXID_A
+                    })
+                } else {
+                    json!({
+                        "blocks": fixture.ending_height,
+                        "bestblockhash": fixture.ending_hash
+                    })
+                }
+            }
+            "getmempoolinfo" => json!({ "size": 1 }),
+            "getrawmempool" => json!({
+                TXID_A: {
+                    "wtxid": TXID_A,
+                    "vsize": 141,
+                    "time": 1_721_234_000_u64,
+                    "fees": { "base": 0.00001200 }
+                }
+            }),
+            other => panic!("unexpected RPC method {other}"),
+        };
+        Json(json!({
+            "jsonrpc": "2.0",
+            "result": result,
+            "error": null,
+            "id": request["id"]
+        }))
+    }
+
     #[tokio::test]
     async fn performs_authenticated_membership_snapshot_sequence() {
         let calls = Shared::new(AsyncMutex::new(Vec::new()));
@@ -470,6 +559,12 @@ mod tests {
         assert_eq!(snapshot.transaction_count, 1);
         assert_eq!(snapshot.transactions[0].fee_sats, 1_200);
         assert_eq!(snapshot.chain_tip.height, 900_000);
+        assert!(snapshot.collection_completed_at_ms >= snapshot.collection_started_at_ms);
+        assert_eq!(
+            snapshot.collection_duration_ms,
+            snapshot.collection_completed_at_ms - snapshot.collection_started_at_ms
+        );
+        assert_eq!(snapshot.observed_at_ms, snapshot.collection_completed_at_ms);
         assert_eq!(snapshot.bip110_summary.unclassified_count, 1);
         assert!(
             snapshot
@@ -484,16 +579,68 @@ mod tests {
                 .iter()
                 .map(|call| call.method.as_str())
                 .collect::<Vec<_>>(),
-            ["getmempoolinfo", "getrawmempool", "getblockchaininfo"]
+            [
+                "getblockchaininfo",
+                "getmempoolinfo",
+                "getrawmempool",
+                "getblockchaininfo"
+            ]
         );
         assert_eq!(calls[0].params, json!([]));
-        assert_eq!(calls[1].params, json!([true]));
-        assert_eq!(calls[2].params, json!([]));
+        assert_eq!(calls[1].params, json!([]));
+        assert_eq!(calls[2].params, json!([true]));
+        assert_eq!(calls[3].params, json!([]));
         assert!(
             calls
                 .iter()
                 .all(|call| call.authorization.as_deref() == Some("Basic YXRsYXM6c2VjcmV0"))
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_snapshot_when_chain_tip_changes_during_collection() {
+        for (expected_height, expected_hash) in [(900_001, TXID_A), (900_000, TXID_B)] {
+            let fixture = Shared::new(ChangingTipFixture {
+                chain_reads: AtomicUsize::new(0),
+                ending_height: expected_height,
+                ending_hash: expected_hash,
+            });
+            let application = Router::new()
+                .route("/", post(changing_tip_rpc_fixture))
+                .with_state(Shared::clone(&fixture));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("fixture listener");
+            let address = listener.local_addr().expect("fixture address");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, application)
+                    .await
+                    .expect("fixture server");
+            });
+
+            let client = RpcClient::new(
+                &format!("http://{address}/"),
+                "atlas",
+                "secret",
+                MAX_SUPPORTED_MEMPOOL_ENTRIES,
+            )
+            .expect("RPC client");
+            let result = client.get_mempool_snapshot("core", "Bitcoin Core").await;
+            server.abort();
+
+            assert!(matches!(
+                result,
+                Err(RpcError::UnstableChainTip {
+                    starting_height: 900_000,
+                    starting_hash,
+                    ending_height,
+                    ending_hash,
+                }) if starting_hash == TXID_A
+                    && ending_height == expected_height
+                    && ending_hash == expected_hash
+            ));
+            assert_eq!(fixture.chain_reads.load(Ordering::SeqCst), 2);
+        }
     }
 
     #[test]

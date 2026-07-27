@@ -29,6 +29,9 @@ const source = () => ({
 const snapshot = (): MempoolSnapshot => ({
   source_id: "core",
   source_label: "Bitcoin Core",
+  collection_started_at_ms: 1_700_000_000_000,
+  collection_completed_at_ms: 1_700_000_001_000,
+  collection_duration_ms: 1_000,
   observed_at_ms: 1_700_000_001_000,
   classification_revision: 3,
   chain_tip: { height: 900_000, hash: BLOCK_HASH },
@@ -209,6 +212,32 @@ describe("parseSourceSnapshotResponse", () => {
     expect(() =>
       parseSourceSnapshotResponse({ source: source(), snapshot: value }),
     ).toThrow("Invalid mempool snapshot");
+  });
+
+  it("requires internally consistent snapshot collection timing", () => {
+    expect(() =>
+      parseSourceSnapshotResponse({
+        source: source(),
+        snapshot: { ...snapshot(), collection_duration_ms: 999 },
+      }),
+    ).toThrow("Invalid mempool snapshot collection timing");
+
+    expect(() =>
+      parseSourceSnapshotResponse({
+        source: source(),
+        snapshot: {
+          ...snapshot(),
+          collection_started_at_ms: 1_700_000_002_000,
+        },
+      }),
+    ).toThrow("Invalid mempool snapshot collection timing");
+
+    expect(() =>
+      parseSourceSnapshotResponse({
+        source: source(),
+        snapshot: { ...snapshot(), observed_at_ms: 1_700_000_001_001 },
+      }),
+    ).toThrow("Invalid mempool snapshot collection timing");
   });
 
   it("rejects malformed or unordered transactions", () => {
@@ -444,6 +473,22 @@ describe("fetchSourceSnapshot", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/sources/core/mempool", {
       headers: { Accept: "application/json" },
+    });
+  });
+
+  it("passes a cancellation signal to a snapshot request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ source: source(), snapshot: snapshot() }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    await fetchSourceSnapshot("core", controller.signal);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/sources/core/mempool", {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
     });
   });
 

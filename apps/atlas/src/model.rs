@@ -167,6 +167,9 @@ pub struct ChainTip {
 pub struct MempoolSnapshot {
     pub source_id: String,
     pub source_label: String,
+    pub collection_started_at_ms: u64,
+    pub collection_completed_at_ms: u64,
+    pub collection_duration_ms: u64,
     pub observed_at_ms: u64,
     pub classification_revision: u64,
     pub chain_tip: ChainTip,
@@ -184,12 +187,48 @@ impl MempoolSnapshot {
         chain_tip: ChainTip,
         transactions: Vec<MempoolEntry>,
     ) -> Result<Self, ModelError> {
+        Self::new_with_collection_window(
+            source_id,
+            source_label,
+            observed_at_ms,
+            observed_at_ms,
+            0,
+            chain_tip,
+            transactions,
+        )
+    }
+
+    pub fn new_with_collection_window(
+        source_id: String,
+        source_label: String,
+        collection_started_at_ms: u64,
+        collection_completed_at_ms: u64,
+        collection_duration_ms: u64,
+        chain_tip: ChainTip,
+        transactions: Vec<MempoolEntry>,
+    ) -> Result<Self, ModelError> {
         validate_source_id(&source_id)?;
         validate_source_label(&source_label)?;
-        if observed_at_ms > MAX_SAFE_JSON_INTEGER {
-            return Err(ModelError::UnsafeJsonInteger {
-                field: "observed_at_ms",
-                value: observed_at_ms,
+        for (field, value) in [
+            ("collection_started_at_ms", collection_started_at_ms),
+            ("collection_completed_at_ms", collection_completed_at_ms),
+            ("collection_duration_ms", collection_duration_ms),
+        ] {
+            if value > MAX_SAFE_JSON_INTEGER {
+                return Err(ModelError::UnsafeJsonInteger { field, value });
+            }
+        }
+        let expected_duration = collection_completed_at_ms
+            .checked_sub(collection_started_at_ms)
+            .ok_or(ModelError::InvalidCollectionWindow {
+                started_at_ms: collection_started_at_ms,
+                completed_at_ms: collection_completed_at_ms,
+            })?;
+        if collection_duration_ms != expected_duration {
+            return Err(ModelError::CollectionDurationMismatch {
+                started_at_ms: collection_started_at_ms,
+                completed_at_ms: collection_completed_at_ms,
+                duration_ms: collection_duration_ms,
             });
         }
         if chain_tip.height > MAX_SAFE_JSON_INTEGER {
@@ -223,7 +262,10 @@ impl MempoolSnapshot {
         Ok(Self {
             source_id,
             source_label,
-            observed_at_ms,
+            collection_started_at_ms,
+            collection_completed_at_ms,
+            collection_duration_ms,
+            observed_at_ms: collection_completed_at_ms,
             classification_revision: 0,
             chain_tip,
             transaction_count,
@@ -314,10 +356,12 @@ impl MempoolObservation {
                 entry
             })
             .collect();
-        let snapshot = MempoolSnapshot::new(
+        let snapshot = MempoolSnapshot::new_with_collection_window(
             membership.source_id.clone(),
             membership.source_label.clone(),
-            membership.observed_at_ms,
+            membership.collection_started_at_ms,
+            membership.collection_completed_at_ms,
+            membership.collection_duration_ms,
             membership.chain_tip.clone(),
             transactions,
         )?
@@ -540,6 +584,21 @@ pub enum ModelError {
     ZeroVsize,
     #[error("{field} value {value} cannot be represented exactly in JSON")]
     UnsafeJsonInteger { field: &'static str, value: u64 },
+    #[error(
+        "snapshot collection completed at {completed_at_ms} ms before it started at {started_at_ms} ms"
+    )]
+    InvalidCollectionWindow {
+        started_at_ms: u64,
+        completed_at_ms: u64,
+    },
+    #[error(
+        "snapshot collection duration {duration_ms} ms does not match the window from {started_at_ms} ms to {completed_at_ms} ms"
+    )]
+    CollectionDurationMismatch {
+        started_at_ms: u64,
+        completed_at_ms: u64,
+        duration_ms: u64,
+    },
     #[error("mempool snapshot has too many transactions")]
     SnapshotTooLarge,
     #[error("mempool snapshot total vsize overflowed")]
@@ -608,6 +667,79 @@ mod tests {
         assert_eq!(snapshot.transaction_count, 2);
         assert_eq!(snapshot.total_vsize, 350);
         assert_eq!(snapshot.bip110_summary.unclassified_count, 2);
+        assert_eq!(snapshot.collection_started_at_ms, 1_700_000_000_100);
+        assert_eq!(snapshot.collection_completed_at_ms, 1_700_000_000_100);
+        assert_eq!(snapshot.collection_duration_ms, 0);
+        assert_eq!(snapshot.observed_at_ms, snapshot.collection_completed_at_ms);
+    }
+
+    #[test]
+    fn snapshot_validates_collection_window() {
+        let chain_tip = ChainTip {
+            height: 900_000,
+            hash: "00".repeat(32),
+        };
+        let snapshot = MempoolSnapshot::new_with_collection_window(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            1_700_000_000_000,
+            1_700_000_000_125,
+            125,
+            chain_tip.clone(),
+            vec![entry("00", 100)],
+        )
+        .expect("snapshot");
+
+        assert_eq!(snapshot.collection_started_at_ms, 1_700_000_000_000);
+        assert_eq!(snapshot.collection_completed_at_ms, 1_700_000_000_125);
+        assert_eq!(snapshot.collection_duration_ms, 125);
+        assert_eq!(snapshot.observed_at_ms, snapshot.collection_completed_at_ms);
+
+        assert!(matches!(
+            MempoolSnapshot::new_with_collection_window(
+                "core".to_owned(),
+                "Bitcoin Core".to_owned(),
+                200,
+                100,
+                0,
+                chain_tip.clone(),
+                Vec::new(),
+            ),
+            Err(ModelError::InvalidCollectionWindow {
+                started_at_ms: 200,
+                completed_at_ms: 100,
+            })
+        ));
+        assert!(matches!(
+            MempoolSnapshot::new_with_collection_window(
+                "core".to_owned(),
+                "Bitcoin Core".to_owned(),
+                100,
+                200,
+                99,
+                chain_tip.clone(),
+                Vec::new(),
+            ),
+            Err(ModelError::CollectionDurationMismatch {
+                duration_ms: 99,
+                ..
+            })
+        ));
+        assert!(matches!(
+            MempoolSnapshot::new_with_collection_window(
+                "core".to_owned(),
+                "Bitcoin Core".to_owned(),
+                MAX_SAFE_JSON_INTEGER + 1,
+                MAX_SAFE_JSON_INTEGER + 1,
+                0,
+                chain_tip,
+                Vec::new(),
+            ),
+            Err(ModelError::UnsafeJsonInteger {
+                field: "collection_started_at_ms",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -680,10 +812,12 @@ mod tests {
 
     #[test]
     fn observation_materializes_exact_current_classifications() {
-        let membership = MempoolSnapshot::new(
+        let membership = MempoolSnapshot::new_with_collection_window(
             "core".to_owned(),
             "Bitcoin Core".to_owned(),
             1,
+            5,
+            4,
             ChainTip {
                 height: 1,
                 hash: "00".repeat(32),
@@ -710,6 +844,10 @@ mod tests {
         .expect("observation");
 
         assert_eq!(observation.snapshot.classification_revision, 1);
+        assert_eq!(observation.snapshot.collection_started_at_ms, 1);
+        assert_eq!(observation.snapshot.collection_completed_at_ms, 5);
+        assert_eq!(observation.snapshot.collection_duration_ms, 4);
+        assert_eq!(observation.snapshot.observed_at_ms, 5);
         assert!(membership.transactions[0].bip110.is_none());
         assert_eq!(
             observation.snapshot.transactions[0].bip110.as_ref(),

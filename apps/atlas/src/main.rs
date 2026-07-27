@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
@@ -6,30 +7,30 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::Parser;
+use mempool_atlas::model::{validate_source_id, validate_source_label};
 use mempool_atlas::{
-    PolicyEnricher, PolicyLimits, RpcClient, SourceRegistry, SourceRuntime, router,
+    AtlasRuntime, AtlasSource, MAX_CONFIGURED_SOURCES, PolicyEnricher, PolicyLimits, RpcClient,
+    SourceRegistry, SourceRuntime, router,
 };
+use serde::Deserialize;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+const MAX_SOURCE_CONFIG_BYTES: usize = 64 * 1024;
+const MAX_TOTAL_CLASSIFICATION_CACHE_MIB: usize = 512;
+
 #[derive(Debug, Parser)]
 #[command(name = "mempool-atlas")]
-#[command(about = "Periodically snapshot one Bitcoin node for the Mempool Atlas website")]
+#[command(about = "Periodically snapshot Bitcoin nodes for the Mempool Atlas website")]
 struct Cli {
     #[arg(long, env = "ATLAS_BIND", default_value = "127.0.0.1:3101")]
     bind: SocketAddr,
     #[arg(long, env = "ATLAS_WEB_ROOT", default_value = "web/dist")]
     web_root: PathBuf,
-    #[arg(long, env = "ATLAS_SOURCE_ID")]
-    source_id: String,
-    #[arg(long, env = "ATLAS_SOURCE_LABEL")]
-    source_label: Option<String>,
-    #[arg(long, env = "ATLAS_RPC_URL")]
-    rpc_url: String,
-    #[arg(long, env = "ATLAS_RPC_USERNAME", default_value = "atlas")]
-    rpc_username: String,
-    #[arg(long, env = "ATLAS_RPC_PASSWORD_FILE")]
-    rpc_password_file: PathBuf,
+    #[arg(long, env = "ATLAS_SOURCES_FILE")]
+    sources_file: PathBuf,
+    #[arg(long, env = "ATLAS_CREDENTIALS_DIRECTORY")]
+    credentials_directory: PathBuf,
     #[arg(long, env = "ATLAS_POLL_SECONDS", default_value = "300")]
     poll_seconds: NonZeroU64,
     #[arg(long, env = "ATLAS_MAX_MEMPOOL_ENTRIES", default_value = "200000")]
@@ -42,8 +43,28 @@ struct Cli {
     classification_slice_entries: NonZeroUsize,
     #[arg(long, env = "ATLAS_CLASSIFICATION_RPC_LANES", default_value = "4")]
     classification_rpc_lanes: NonZeroUsize,
-    #[arg(long, env = "ATLAS_CLASSIFICATION_CACHE_MIB", default_value = "256")]
-    classification_cache_mib: NonZeroUsize,
+    #[arg(
+        long,
+        env = "ATLAS_CLASSIFICATION_TOTAL_CACHE_MIB",
+        default_value = "256"
+    )]
+    classification_total_cache_mib: NonZeroUsize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourcesFile {
+    sources: Vec<SourceConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceConfig {
+    source_id: String,
+    source_label: String,
+    rpc_url: String,
+    rpc_username: String,
+    rpc_password_credential: String,
 }
 
 #[tokio::main]
@@ -57,58 +78,141 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     validate_bind(cli.bind)?;
-    let password = read_secret(&cli.rpc_password_file)
-        .with_context(|| format!("reading {}", cli.rpc_password_file.display()))?;
-    let source_label = cli.source_label.unwrap_or_else(|| cli.source_id.clone());
+    let source_configs = read_sources_file(&cli.sources_file)
+        .with_context(|| format!("reading {}", cli.sources_file.display()))?;
     let poll_interval = Duration::from_secs(cli.poll_seconds.get());
-    let source = Arc::new(
-        SourceRuntime::new(cli.source_id.clone(), source_label, poll_interval)
-            .context("validating source configuration")?,
-    );
-    let auxiliary_cache_bytes = cli
-        .classification_cache_mib
-        .get()
+    let total_cache_mib = cli.classification_total_cache_mib.get();
+    if total_cache_mib > MAX_TOTAL_CLASSIFICATION_CACHE_MIB {
+        bail!(
+            "classification total cache size {total_cache_mib} MiB exceeds the supported maximum {MAX_TOTAL_CLASSIFICATION_CACHE_MIB} MiB"
+        );
+    }
+    let total_cache_bytes = total_cache_mib
         .checked_mul(1024 * 1024)
         .context("classification cache size overflows this platform")?;
-    let policy_limits = PolicyLimits::new(
-        cli.classification_slice_entries.get(),
-        cli.classification_rpc_lanes.get(),
-        auxiliary_cache_bytes,
-    )
-    .context("validating policy enrichment limits")?;
-    let rpc = RpcClient::new(
-        &cli.rpc_url,
-        cli.rpc_username.clone(),
-        password.clone(),
-        cli.max_mempool_entries.get(),
-    )
-    .context("creating Bitcoin RPC client")?;
-    let policy = PolicyEnricher::new(&cli.rpc_url, cli.rpc_username, password, policy_limits)
+    let per_source_cache_bytes = total_cache_bytes
+        .checked_div(source_configs.len())
+        .context("at least one source is required")?;
+    let mut configured_sources = Vec::with_capacity(source_configs.len());
+    for source_config in source_configs {
+        let credential_path = cli
+            .credentials_directory
+            .join(&source_config.rpc_password_credential);
+        let password = read_secret(&credential_path)
+            .with_context(|| format!("reading {}", credential_path.display()))?;
+        let runtime = Arc::new(
+            SourceRuntime::new(
+                source_config.source_id,
+                source_config.source_label,
+                poll_interval,
+            )
+            .context("validating source configuration")?,
+        );
+        let policy_limits = PolicyLimits::new(
+            cli.classification_slice_entries.get(),
+            cli.classification_rpc_lanes.get(),
+            per_source_cache_bytes,
+        )
+        .context("validating policy enrichment limits")?;
+        let rpc = RpcClient::new(
+            &source_config.rpc_url,
+            source_config.rpc_username.clone(),
+            password.clone(),
+            cli.max_mempool_entries.get(),
+        )
+        .context("creating Bitcoin RPC client")?;
+        let policy = PolicyEnricher::new(
+            &source_config.rpc_url,
+            source_config.rpc_username,
+            password,
+            policy_limits,
+        )
         .context("creating BIP-110 policy client")?;
+        configured_sources.push(AtlasSource::new(runtime, rpc, policy));
+    }
+    let atlas = Arc::new(
+        AtlasRuntime::new(configured_sources, poll_interval)
+            .context("creating bounded source coordinator")?,
+    );
     let registry =
-        SourceRegistry::new(vec![Arc::clone(&source)]).context("creating source registry")?;
+        SourceRegistry::new(atlas.source_runtimes()).context("creating source registry")?;
     let listener = tokio::net::TcpListener::bind(cli.bind)
         .await
         .with_context(|| format!("binding {}", cli.bind))?;
 
     info!(
         bind = %cli.bind,
-        source_id = %cli.source_id,
-        rpc_url = %cli.rpc_url,
+        source_count = atlas.source_runtimes().len(),
         poll_seconds = cli.poll_seconds.get(),
         max_mempool_entries = cli.max_mempool_entries.get(),
         classification_slice_entries = cli.classification_slice_entries.get(),
         classification_rpc_lanes = cli.classification_rpc_lanes.get(),
-        classification_cache_mib = cli.classification_cache_mib.get(),
+        classification_total_cache_mib = total_cache_mib,
+        classification_cache_bytes_per_source = per_source_cache_bytes,
         "Mempool Atlas snapshot service listening"
     );
 
-    let poll_task = tokio::spawn(Arc::clone(&source).run(rpc, policy));
+    let runtime_task = tokio::spawn(Arc::clone(&atlas).run());
     let result = axum::serve(listener, router(registry, cli.web_root))
         .with_graceful_shutdown(shutdown_signal())
         .await;
-    poll_task.abort();
+    runtime_task.abort();
     result.context("serving Mempool Atlas API")
+}
+
+fn read_sources_file(path: &Path) -> anyhow::Result<Vec<SourceConfig>> {
+    let contents = std::fs::read(path)?;
+    if contents.len() > MAX_SOURCE_CONFIG_BYTES {
+        bail!(
+            "source configuration is {} bytes, exceeding the {}-byte limit",
+            contents.len(),
+            MAX_SOURCE_CONFIG_BYTES
+        );
+    }
+    parse_sources_file(&contents)
+}
+
+fn parse_sources_file(contents: &[u8]) -> anyhow::Result<Vec<SourceConfig>> {
+    let parsed: SourcesFile = serde_json::from_slice(contents)?;
+    if parsed.sources.is_empty() {
+        bail!("source configuration must contain at least one source");
+    }
+    if parsed.sources.len() > MAX_CONFIGURED_SOURCES {
+        bail!(
+            "source configuration contains {} sources, exceeding the supported maximum {}",
+            parsed.sources.len(),
+            MAX_CONFIGURED_SOURCES
+        );
+    }
+    let mut source_ids = BTreeSet::new();
+    for source in &parsed.sources {
+        validate_source_id(&source.source_id)?;
+        validate_source_label(&source.source_label)?;
+        if !source_ids.insert(source.source_id.clone()) {
+            bail!("source {:?} is configured more than once", source.source_id);
+        }
+        if source.rpc_username.is_empty()
+            || source.rpc_username.len() > 128
+            || source.rpc_username.contains(['\r', '\n'])
+        {
+            bail!("RPC username must contain 1 to 128 characters on one line");
+        }
+        validate_credential_name(&source.rpc_password_credential)?;
+    }
+    Ok(parsed.sources)
+}
+
+fn validate_credential_name(value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || matches!(value, "." | "..")
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!("RPC password credential {value:?} must be a safe 1 to 128 character file name");
+    }
+    Ok(())
 }
 
 fn validate_bind(bind: SocketAddr) -> anyhow::Result<()> {
@@ -167,12 +271,10 @@ mod tests {
     fn arguments<'a>(extra: &'a [&'a str]) -> Vec<&'a str> {
         let mut arguments = vec![
             "mempool-atlas",
-            "--source-id",
-            "core",
-            "--rpc-url",
-            "http://127.0.0.1:18443/",
-            "--rpc-password-file",
-            "/run/credentials/atlas-rpc-password",
+            "--sources-file",
+            "/etc/mempool-atlas/sources.json",
+            "--credentials-directory",
+            "/run/credentials/mempool-atlas.service",
         ];
         arguments.extend_from_slice(extra);
         arguments
@@ -183,13 +285,85 @@ mod tests {
         let cli = Cli::try_parse_from(arguments(&[])).expect("CLI");
 
         assert_eq!(cli.bind, "127.0.0.1:3101".parse().expect("address"));
-        assert_eq!(cli.rpc_username, "atlas");
         assert_eq!(cli.poll_seconds.get(), 300);
         assert_eq!(cli.max_mempool_entries.get(), 200_000);
         assert_eq!(cli.classification_slice_entries.get(), 2_048);
         assert_eq!(cli.classification_rpc_lanes.get(), 4);
-        assert_eq!(cli.classification_cache_mib.get(), 256);
+        assert_eq!(cli.classification_total_cache_mib.get(), 256);
         validate_bind(cli.bind).expect("loopback bind");
+    }
+
+    #[test]
+    fn source_file_preserves_declared_order_and_per_source_credentials() {
+        let sources = parse_sources_file(
+            br#"{
+                "sources": [
+                    {
+                        "source_id": "core",
+                        "source_label": "Bitcoin Core",
+                        "rpc_url": "http://127.0.0.1:18443/",
+                        "rpc_username": "atlas-core",
+                        "rpc_password_credential": "core-password"
+                    },
+                    {
+                        "source_id": "knots",
+                        "source_label": "Bitcoin Knots",
+                        "rpc_url": "http://127.0.0.1:28443/",
+                        "rpc_username": "atlas-knots",
+                        "rpc_password_credential": "knots-password"
+                    }
+                ]
+            }"#,
+        )
+        .expect("source configuration");
+
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].source_id, "core");
+        assert_eq!(sources[1].source_id, "knots");
+        assert_eq!(sources[1].rpc_password_credential, "knots-password");
+    }
+
+    #[test]
+    fn source_file_rejects_empty_duplicate_excess_and_unknown_configuration() {
+        assert!(parse_sources_file(br#"{"sources": []}"#).is_err());
+        assert!(
+            parse_sources_file(
+                br#"{"sources": [
+                    {"source_id":"core","source_label":"Core","rpc_url":"http://core/","rpc_username":"atlas","rpc_password_credential":"password"},
+                    {"source_id":"core","source_label":"Again","rpc_url":"http://other/","rpc_username":"atlas","rpc_password_credential":"password"}
+                ]}"#,
+            )
+            .is_err()
+        );
+        let five_sources = format!(
+            "{{\"sources\":[{}]}}",
+            (0..=MAX_CONFIGURED_SOURCES)
+                .map(|index| format!(
+                    "{{\"source_id\":\"source-{index}\",\"source_label\":\"Source {index}\",\"rpc_url\":\"http://source-{index}/\",\"rpc_username\":\"atlas\",\"rpc_password_credential\":\"password\"}}"
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(parse_sources_file(five_sources.as_bytes()).is_err());
+        assert!(parse_sources_file(br#"{"sources": [], "unexpected": true}"#,).is_err());
+    }
+
+    #[test]
+    fn source_file_rejects_credential_path_traversal() {
+        for credential in [
+            "",
+            ".",
+            "..",
+            "../password",
+            "nested/password",
+            "line\nbreak",
+        ] {
+            assert!(
+                validate_credential_name(credential).is_err(),
+                "{credential:?}"
+            );
+        }
+        validate_credential_name("mempool-atlas-core.password").expect("safe credential");
     }
 
     #[test]

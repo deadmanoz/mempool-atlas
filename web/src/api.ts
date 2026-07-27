@@ -326,6 +326,9 @@ export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
     !hasOnlyKeys(value, [
       "source_id",
       "source_label",
+      "collection_started_at_ms",
+      "collection_completed_at_ms",
+      "collection_duration_ms",
       "observed_at_ms",
       "classification_revision",
       "chain_tip",
@@ -337,6 +340,9 @@ export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
     !isSourceId(value.source_id) ||
     typeof value.source_label !== "string" ||
     value.source_label.trim().length === 0 ||
+    !isNonNegativeInteger(value.collection_started_at_ms) ||
+    !isNonNegativeInteger(value.collection_completed_at_ms) ||
+    !isNonNegativeInteger(value.collection_duration_ms) ||
     !isNonNegativeInteger(value.observed_at_ms) ||
     !isNonNegativeInteger(value.classification_revision) ||
     !isNonNegativeInteger(value.transaction_count) ||
@@ -344,6 +350,15 @@ export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
     !Array.isArray(value.transactions)
   ) {
     throw new TypeError("Invalid mempool snapshot");
+  }
+
+  if (
+    value.collection_completed_at_ms < value.collection_started_at_ms ||
+    value.collection_duration_ms !==
+      value.collection_completed_at_ms - value.collection_started_at_ms ||
+    value.observed_at_ms !== value.collection_completed_at_ms
+  ) {
+    throw new TypeError("Invalid mempool snapshot collection timing");
   }
 
   parseChainTip(value.chain_tip);
@@ -530,10 +545,17 @@ export const parseSourceSnapshotResponse = (
   return value as unknown as SourceSnapshotResponse;
 };
 
-const fetchJson = async (path: string): Promise<unknown> => {
-  const response = await fetch(path, {
+const fetchJson = async (
+  path: string,
+  signal?: AbortSignal,
+): Promise<unknown> => {
+  const options: RequestInit = {
     headers: { Accept: "application/json" },
-  });
+  };
+  if (signal !== undefined) {
+    options.signal = signal;
+  }
+  const response = await fetch(path, options);
   if (!response.ok) {
     let detail = "";
     try {
@@ -549,22 +571,30 @@ const fetchJson = async (path: string): Promise<unknown> => {
   return response.json();
 };
 
-export const fetchSources = async (): Promise<SourcesResponse> =>
-  parseSourcesResponse(await fetchJson("/api/v1/sources"));
+export const fetchSources = async (
+  signal?: AbortSignal,
+): Promise<SourcesResponse> =>
+  parseSourcesResponse(await fetchJson("/api/v1/sources", signal));
 
 export const fetchSourceSnapshot = async (
   sourceId: string,
+  signal?: AbortSignal,
 ): Promise<SourceSnapshotResponse> =>
   parseSourceSnapshotResponse(
-    await fetchJson(`/api/v1/sources/${encodeURIComponent(sourceId)}/mempool`),
+    await fetchJson(
+      `/api/v1/sources/${encodeURIComponent(sourceId)}/mempool`,
+      signal,
+    ),
   );
 
 export const fetchTransactionDetail = async (
   sourceId: string,
   txid: string,
+  signal?: AbortSignal,
 ): Promise<TransactionDetailResponse> =>
   parseTransactionDetailResponse(
     await fetchJson(
       `/api/v1/sources/${encodeURIComponent(sourceId)}/transactions/${encodeURIComponent(txid)}`,
+      signal,
     ),
   );

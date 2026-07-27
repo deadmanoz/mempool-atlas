@@ -1,43 +1,56 @@
 # Mempool Atlas
 
 Mempool Atlas is a classification-first Bitcoin mempool viewer. It periodically
-asks one Bitcoin node for its complete current mempool, evaluates current
-transactions against the seven BIP-110 rules as deployed Bitcoin Knots mempool
-policy, and serves the latest result from memory.
+asks a small configured set of Bitcoin nodes for their complete current
+mempools, evaluates current transactions against the seven BIP-110 rules as
+deployed Bitcoin Knots mempool policy, and serves each latest result from
+memory.
 
-The first product slice deliberately does not collect transaction-arrival
-events, retain history, archive evidence, or compare nodes. Those are separate
-products that can consume the same snapshot contract later without complicating
-the single-node viewer.
+The node viewer and the separate comparison page share that source-scoped
+snapshot infrastructure. Atlas deliberately does not collect transaction-
+arrival events, retain history, or archive evidence. Archival remains a
+separate product with a different lifecycle.
 
 ## How it works
 
 ```mermaid
 flowchart TB
-    node["Bitcoin node host"] -->|"existing private WireGuard RPC"| atlas["Mempool Atlas<br/>presentation host"]
-    atlas --> membership["Complete membership generation"]
-    membership -->|"publish immediately<br/>with exact surviving classifications"| current["Current snapshot, classification revision,<br/>and rule evidence in memory"]
-    membership -->|"wake bounded candidate windows"| policy["Pending transaction and fact waves"]
+    nodes["Configured Bitcoin node hosts"] -->|"existing private WireGuard RPC<br/>sequential turns"| atlas["Mempool Atlas coordinator<br/>presentation host"]
+    atlas --> membership["Independent complete membership generations"]
+    membership -->|"publish immediately<br/>with exact surviving classifications"| current["One current snapshot, classification revision,<br/>and rule-evidence map per source"]
+    membership -->|"wake fair bounded source turns"| policy["Pending transaction and fact waves<br/>one service-wide RPC gate"]
     policy -->|"generation and revision guard"| current
-    current --> api["Current-snapshot API"]
-    current --> web["Exact rule-combination terrain"]
-    browser["Browser"] --> web
+    current --> api["Source-scoped current-snapshot API"]
+    current --> web["Single-node terrain"]
+    browser["Browser"] --> compare["Two-snapshot membership comparison"]
+    api --> compare
+    browser --> web
     browser --> api
 ```
 
 The production deployment reuses the existing private WireGuard network and
-the node's private nginx RPC proxy. No Atlas service, database, queue, ZMQ
-subscriber, container, or new listener runs beside Bitcoin Core. Every
-membership poll makes three calls:
+each node's private nginx RPC proxy. No Atlas service, database, queue, ZMQ
+subscriber, container, or new listener runs beside the Bitcoin nodes. Every
+membership poll makes four calls:
 
-1. `getmempoolinfo` checks the reported entry count.
-2. `getrawmempool true` collects the complete current membership.
-3. `getblockchaininfo` records the chain tip associated with the observation.
+1. `getblockchaininfo` records the starting chain tip.
+2. `getmempoolinfo` checks the reported entry count.
+3. `getrawmempool true` collects the complete current membership.
+4. `getblockchaininfo` requires the same ending chain tip.
 
-Membership polling and classification run independently. Atlas installs and
-publishes each validated membership generation immediately, including any
-classification whose exact `txid` and `wtxid` survived from the prior
-generation. Fresh membership therefore never waits for new policy RPC work.
+One coordinator polls configured sources sequentially in a deterministic
+round. A source failure leaves its last good snapshot visible and does not stop
+later sources. The successful snapshot records its collection start,
+completion, and duration. A tip change rejects that poll instead of publishing
+a block-boundary mixture.
+
+Membership and classification share one service-wide RPC gate. A due
+membership round polls every source before classification resumes.
+Classification then advances source-local generations round-robin in bounded
+slices. Atlas installs and publishes each validated membership generation
+immediately, including any classification whose exact `txid` and `wtxid`
+survived from the prior generation. Fresh membership therefore never waits for
+new policy RPC work.
 
 A second loop drains bounded candidate windows and fact waves for the current
 generation. `getrawtransaction` supplies exact transaction bytes, and
@@ -102,6 +115,8 @@ the terrain's grouping semantics. [ADR 0005](docs/adr/0005-resolve-policy-facts-
 supersedes ADR 0003's attempt-once classification details with the pending fact
 resolver and P2SH semantics. [ADR 0006](docs/adr/0006-own-policy-json-rpc-wire-boundary.md)
 records the bounded, presence-preserving classification transport.
+[ADR 0007](docs/adr/0007-browser-derived-snapshot-comparison.md) records the
+bounded multi-source coordinator and browser-derived snapshot comparison.
 
 ## Website
 
@@ -129,6 +144,21 @@ The browser never contacts the Bitcoin node and its refresh button does not
 trigger a new RPC poll. It only fetches the latest snapshot already held by
 Atlas.
 
+The comparison page is a separate product surface. It fetches two complete
+source snapshots and merges their sorted transaction IDs in the browser. Every
+transaction appears once in one of three regions: present in both sampled
+snapshots, observed only in the left snapshot, or observed only in the right
+snapshot. The page shows both collection windows, observation skew, chain-tip
+agreement, freshness, and source-specific totals. Common transaction IDs retain
+both source-local witness variants and assessments. Pair changes abort obsolete
+full-snapshot reads. Selection-only paints reuse Canvas geometry, and a bounded
+virtual transaction navigator makes every region entry keyboard-reachable
+without adding one DOM node per transaction.
+
+Membership differences are observations, not rejection evidence. The page does
+not infer filtering, relay causality, or relative permissiveness from absence in
+one sampled snapshot.
+
 ## Development
 
 Prerequisites are a current Rust toolchain, Node.js, npm, and `just`.
@@ -150,26 +180,37 @@ host's existing web proxy.
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `ATLAS_SOURCE_ID` | yes | none | Stable, URL-safe source name |
-| `ATLAS_SOURCE_LABEL` | no | source ID | Human-readable node name |
-| `ATLAS_RPC_URL` | yes | none | Private Bitcoin RPC proxy URL |
-| `ATLAS_RPC_USERNAME` | no | `atlas` | Dedicated least-privilege RPC user |
-| `ATLAS_RPC_PASSWORD_FILE` | yes | none | One-line RPC password credential |
+| `ATLAS_SOURCES_FILE` | yes | none | Root-controlled JSON file containing one to four source records |
+| `ATLAS_CREDENTIALS_DIRECTORY` | yes | none | Directory containing the named one-line RPC password credentials |
 | `ATLAS_POLL_SECONDS` | no | `300` | Scheduled complete-membership interval |
 | `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `200000` | Preflight and decode entry limit |
 | `ATLAS_CLASSIFICATION_SLICE_ENTRIES` | no | `2048` | Maximum witness variants admitted into one pending candidate window; range 1 to 8192 |
 | `ATLAS_CLASSIFICATION_RPC_LANES` | no | `4` | Concurrent raw-transaction RPC batches; range 1 to 8 |
-| `ATLAS_CLASSIFICATION_CACHE_MIB` | no | `256` | Combined current-output and positive confirmed-script cache admission; range 1 to 512 MiB |
+| `ATLAS_CLASSIFICATION_TOTAL_CACHE_MIB` | no | `256` | Service-wide source-cache budget divided among configured sources; range 1 to 512 MiB |
 | `ATLAS_BIND` | no | `127.0.0.1:3101` | Loopback API and website listener |
 | `ATLAS_WEB_ROOT` | no | `web/dist` | Built website directory |
 
-Example development configuration:
+The source file has this non-secret shape:
+
+```json
+{
+  "sources": [
+    {
+      "source_id": "core",
+      "source_label": "Bitcoin Core",
+      "rpc_url": "http://127.0.0.1:18443/",
+      "rpc_username": "atlas",
+      "rpc_password_credential": "core-password"
+    }
+  ]
+}
+```
+
+Example development environment:
 
 ```bash
-export ATLAS_SOURCE_ID=core
-export ATLAS_SOURCE_LABEL="Bitcoin Core"
-export ATLAS_RPC_URL=http://node-wireguard-address:9000/
-export ATLAS_RPC_PASSWORD_FILE=/path/to/development-rpc-password
+export ATLAS_SOURCES_FILE=/path/to/sources.json
+export ATLAS_CREDENTIALS_DIRECTORY=/path/to/credential-directory
 just dev
 ```
 
@@ -186,6 +227,7 @@ Deployment configuration owns those values.
 - `GET /api/v1/sources/{source_id}/transactions/{txid}` returns the current
   compact assessment, typed evidence, and matching classification revision for
   one classified witness variant.
+- `GET /compare/` serves the separate browser-derived comparison product.
 
 All API responses disable caching. Static website files are served by the same
 process.
@@ -248,10 +290,12 @@ count and yields between relief passes while preserving facts already fetched
 in the current call. These estimates bound planned work, not transport
 allocation.
 
-The configured auxiliary cache bound covers exact current-transaction outputs
-and positive confirmed `OutPoint` scripts. Positive confirmed facts may survive
-membership generations and are evicted when necessary; nulls and failures are
-never cached. Retained pending scripts have a separate 256 MiB ceiling.
+The configured total auxiliary cache budget is divided among sources. Each
+source share covers exact current-transaction outputs and positive confirmed
+`OutPoint` scripts. Positive confirmed facts may survive membership generations
+and are evicted when necessary; nulls and failures are never cached. Each
+source's retained pending scripts have a separate ceiling equal to the smaller
+of its share and 256 MiB.
 Unresolved fact indexes, pending raw transactions, bounded policy response
 bodies, the separately buffered membership response, classifications, the
 encoded snapshot, allocator overhead, and overlapping readers remain outside
@@ -261,7 +305,10 @@ Classification drains according to an explicit continue, complete, paused, or
 stale disposition. Fact-only progress continues without publishing a snapshot
 revision, locally exhausted candidates are counted and deferred, systemic RPC
 failure pauses the generation, and replacement membership stops stale work.
-Classification does not lengthen an otherwise on-schedule membership interval.
+Membership and classification never issue RPC work concurrently. A due
+membership round takes the gate after the currently running bounded
+classification slice, polls all sources sequentially, and then lets
+round-robin classification resume.
 Logs expose `fact_requests`, `facts_resolved`, `facts_missing`,
 `capacity_deferred`, `deferred_candidates`, `response_failures`,
 `systemic_response_failures`, `missing_responses`, `batch_failures`, and
@@ -284,11 +331,6 @@ freshness. Do not shorten it merely because the viewer can poll more often.
 
 Attempt #3 has no SQLite database, migrations, event queue, delta protocol,
 node-local agent, ZMQ subscriber, container, forensic evidence ingest,
-historical archive, or comparison endpoint. It adds no network path beyond the
-existing WireGuard RPC route. Git history preserves the earlier experiments
-and their lessons.
-
-Comparison is the next product slice. It will collect independent snapshots
-using the same private transport and derive set differences at read time. It
-must never describe absence from one node as proof of rejection, filtering, or
-relay causality.
+historical archive, server-side comparison projection, or comparison cache. It
+adds no network path beyond the existing WireGuard RPC routes. Git history
+preserves the earlier experiments and their lessons.

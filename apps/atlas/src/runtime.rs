@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use thiserror::Error;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Notify, RwLock, Semaphore};
 use tracing::{info, warn};
 
 use crate::model::{
@@ -15,12 +15,205 @@ use crate::model::{
 use crate::policy::{PolicyDrain, PolicyEnricher, PolicyError, PolicyPublication};
 use crate::rpc::{RpcClient, RpcError};
 
+pub const MAX_CONFIGURED_SOURCES: usize = 4;
+
+#[derive(Clone, Debug)]
+pub struct AtlasSource {
+    runtime: Arc<SourceRuntime>,
+    rpc: RpcClient,
+    policy: PolicyEnricher,
+}
+
+impl AtlasSource {
+    pub fn new(runtime: Arc<SourceRuntime>, rpc: RpcClient, policy: PolicyEnricher) -> Self {
+        Self {
+            runtime,
+            rpc,
+            policy,
+        }
+    }
+}
+
+/// Coordinates all current-state sources under one bounded RPC work gate.
+///
+/// A membership round owns the gate while it polls every source in configured
+/// order. Classification then advances sources round-robin in bounded slices,
+/// releasing the gate between slices so a due membership round takes priority.
+#[derive(Debug)]
+pub struct AtlasRuntime {
+    sources: Vec<AtlasSource>,
+    poll_interval: Duration,
+    rpc_work_gate: Semaphore,
+    classification_wakeup: Notify,
+    classification_pending: Mutex<BTreeSet<usize>>,
+}
+
+impl AtlasRuntime {
+    pub fn new(sources: Vec<AtlasSource>, poll_interval: Duration) -> Result<Self, RuntimeError> {
+        if sources.is_empty() {
+            return Err(RuntimeError::NoSources);
+        }
+        if sources.len() > MAX_CONFIGURED_SOURCES {
+            return Err(RuntimeError::TooManySources {
+                configured: sources.len(),
+                maximum: MAX_CONFIGURED_SOURCES,
+            });
+        }
+        if poll_interval.is_zero() {
+            return Err(RuntimeError::ZeroPollInterval);
+        }
+        let mut source_ids = BTreeSet::new();
+        for source in &sources {
+            let source_id = source.runtime.source_id().to_owned();
+            if !source_ids.insert(source_id.clone()) {
+                return Err(RuntimeError::DuplicateSource(source_id));
+            }
+            if source.runtime.poll_interval != poll_interval {
+                return Err(RuntimeError::PollIntervalMismatch {
+                    source_id,
+                    expected_seconds: poll_interval.as_secs(),
+                    actual_seconds: source.runtime.poll_interval.as_secs(),
+                });
+            }
+        }
+        Ok(Self {
+            sources,
+            poll_interval,
+            rpc_work_gate: Semaphore::new(1),
+            classification_wakeup: Notify::new(),
+            classification_pending: Mutex::new(BTreeSet::new()),
+        })
+    }
+
+    pub fn source_runtimes(&self) -> Vec<Arc<SourceRuntime>> {
+        self.sources
+            .iter()
+            .map(|source| Arc::clone(&source.runtime))
+            .collect()
+    }
+
+    pub async fn run(self: Arc<Self>) {
+        tokio::join!(
+            Arc::clone(&self).run_membership_rounds(),
+            self.run_classification()
+        );
+    }
+
+    async fn run_membership_rounds(self: Arc<Self>) {
+        let mut interval = tokio::time::interval(self.poll_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut round_id = 0_u64;
+        loop {
+            interval.tick().await;
+            round_id = round_id.wrapping_add(1);
+            self.poll_round(round_id).await;
+        }
+    }
+
+    async fn poll_round(&self, round_id: u64) {
+        let round_started_at = Instant::now();
+        let permit = self
+            .rpc_work_gate
+            .acquire()
+            .await
+            .expect("Atlas RPC work gate remains open");
+        info!(
+            round_id,
+            source_count = self.sources.len(),
+            "starting sequential mempool snapshot round"
+        );
+        let mut published_sources = Vec::new();
+        for (source_order, source) in self.sources.iter().enumerate() {
+            let source_started_at = Instant::now();
+            match source.runtime.poll_once(&source.rpc, &source.policy).await {
+                Ok(()) => published_sources.push(source_order),
+                Err(error) => warn!(
+                    round_id,
+                    source_order,
+                    source_id = %source.runtime.source_id(),
+                    error = %error,
+                    "mempool snapshot poll failed; retaining the last good snapshot"
+                ),
+            }
+            info!(
+                round_id,
+                source_order,
+                source_id = %source.runtime.source_id(),
+                elapsed_ms = source_started_at.elapsed().as_millis(),
+                "completed source membership turn"
+            );
+        }
+        info!(
+            round_id,
+            elapsed_ms = round_started_at.elapsed().as_millis(),
+            "completed sequential mempool snapshot round"
+        );
+        drop(permit);
+        for source_index in published_sources {
+            self.schedule_classification(source_index);
+        }
+    }
+
+    fn schedule_classification(&self, source_index: usize) {
+        assert!(
+            source_index < self.sources.len(),
+            "classification source index must be configured"
+        );
+        self.classification_pending
+            .lock()
+            .expect("classification pending set is not poisoned")
+            .insert(source_index);
+        self.classification_wakeup.notify_one();
+    }
+
+    async fn run_classification(&self) {
+        loop {
+            self.classification_wakeup.notified().await;
+            let mut active = BTreeSet::new();
+            let mut next_source_index = 0;
+            loop {
+                self.take_pending_classification(&mut active);
+                let Some(source_index) = active
+                    .range(next_source_index..)
+                    .next()
+                    .copied()
+                    .or_else(|| active.first().copied())
+                else {
+                    break;
+                };
+                active.remove(&source_index);
+                let source = &self.sources[source_index];
+                let permit = self
+                    .rpc_work_gate
+                    .acquire()
+                    .await
+                    .expect("Atlas RPC work gate remains open");
+                if source.runtime.classify_one_slice(&source.policy).await {
+                    active.insert(source_index);
+                }
+                drop(permit);
+                next_source_index = (source_index + 1) % self.sources.len();
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    fn take_pending_classification(&self, active: &mut BTreeSet<usize>) {
+        let mut pending = self
+            .classification_pending
+            .lock()
+            .expect("classification pending set is not poisoned");
+        active.append(&mut pending);
+    }
+}
+
 #[derive(Debug)]
 pub struct SourceRuntime {
     source_id: String,
     source_label: String,
     poll_interval: Duration,
     state: RwLock<RuntimeState>,
+    #[cfg(test)]
     classification_wakeup: Notify,
 }
 
@@ -52,6 +245,7 @@ impl SourceRuntime {
             source_label,
             poll_interval,
             state: RwLock::new(RuntimeState::default()),
+            #[cfg(test)]
             classification_wakeup: Notify::new(),
         })
     }
@@ -64,104 +258,86 @@ impl SourceRuntime {
         &self.source_label
     }
 
-    pub async fn run(self: Arc<Self>, rpc: RpcClient, policy: PolicyEnricher) {
-        tokio::join!(
-            Arc::clone(&self).run_membership(rpc, policy.clone()),
-            self.run_classification(policy)
-        );
-    }
-
-    async fn run_membership(self: Arc<Self>, rpc: RpcClient, policy: PolicyEnricher) {
-        let mut interval = tokio::time::interval(self.poll_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    #[cfg(test)]
+    async fn run_classification(&self, policy: PolicyEnricher) {
         loop {
-            interval.tick().await;
-            if let Err(error) = self.poll_once(&rpc, &policy).await {
-                warn!(
-                    source_id = %self.source_id,
-                    error = %error,
-                    "mempool snapshot poll failed; retaining the last good snapshot"
-                );
+            self.classification_wakeup.notified().await;
+            while self.classify_one_slice(&policy).await {
+                tokio::task::yield_now().await;
             }
         }
     }
 
-    async fn run_classification(&self, policy: PolicyEnricher) {
-        loop {
-            self.classification_wakeup.notified().await;
-            loop {
-                let slice_started_at = Instant::now();
-                let expected_generation = self.state.read().await.policy_generation;
-                let report = match policy
-                    .classify_next_for_generation(expected_generation)
-                    .await
-                {
-                    Ok(report) => report,
-                    Err(error) => {
-                        warn!(
-                            source_id = %self.source_id,
-                            error = %error,
-                            elapsed_ms = slice_started_at.elapsed().as_millis(),
-                            "BIP-110 classification slice failed"
-                        );
-                        break;
-                    }
-                };
-                info!(
+    async fn classify_one_slice(&self, policy: &PolicyEnricher) -> bool {
+        let slice_started_at = Instant::now();
+        let expected_generation = self.state.read().await.policy_generation;
+        let report = match policy
+            .classify_next_for_generation(expected_generation)
+            .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                warn!(
+                    source_id = %self.source_id,
+                    error = %error,
+                    elapsed_ms = slice_started_at.elapsed().as_millis(),
+                    "BIP-110 classification slice failed"
+                );
+                return false;
+            }
+        };
+        info!(
+            source_id = %self.source_id,
+            generation = report.generation,
+            attempted = report.attempted,
+            newly_classified = report.newly_classified,
+            fact_requests = report.fact_requests,
+            facts_resolved = report.facts_resolved,
+            facts_missing = report.facts_missing,
+            capacity_deferred = report.capacity_deferred,
+            deferred_candidates = report.deferred_candidates,
+            response_failures = report.response_failures,
+            systemic_response_failures = report.systemic_response_failures,
+            missing_responses = report.missing_responses,
+            batch_failures = report.batch_failures,
+            response_bytes = report.response_bytes,
+            elapsed_ms = slice_started_at.elapsed().as_millis(),
+            classified = report.classified,
+            remaining = report.remaining,
+            complete = report.complete,
+            stale = report.stale,
+            "completed BIP-110 classification slice"
+        );
+        if let Some(publication) = report.publication {
+            match self.record_policy_progress(publication).await {
+                Ok(true) => {}
+                Ok(false) => return false,
+                Err(error) => {
+                    warn!(
+                        source_id = %self.source_id,
+                        error = %error,
+                        "failed to publish BIP-110 classification progress"
+                    );
+                    return false;
+                }
+            }
+        }
+        match report.disposition {
+            PolicyDrain::Continue => true,
+            PolicyDrain::Complete | PolicyDrain::Stale => false,
+            PolicyDrain::Paused => {
+                warn!(
                     source_id = %self.source_id,
                     generation = report.generation,
-                    attempted = report.attempted,
-                    newly_classified = report.newly_classified,
-                    fact_requests = report.fact_requests,
-                    facts_resolved = report.facts_resolved,
-                    facts_missing = report.facts_missing,
-                    capacity_deferred = report.capacity_deferred,
-                    deferred_candidates = report.deferred_candidates,
                     response_failures = report.response_failures,
                     systemic_response_failures = report.systemic_response_failures,
                     missing_responses = report.missing_responses,
                     batch_failures = report.batch_failures,
-                    response_bytes = report.response_bytes,
-                    elapsed_ms = slice_started_at.elapsed().as_millis(),
-                    classified = report.classified,
-                    remaining = report.remaining,
-                    complete = report.complete,
-                    stale = report.stale,
-                    "completed BIP-110 classification slice"
+                    capacity_deferred = report.capacity_deferred,
+                    deferred_candidates = report.deferred_candidates,
+                    "pausing BIP-110 classification until the next membership generation"
                 );
-                if let Some(publication) = report.publication {
-                    match self.record_policy_progress(publication).await {
-                        Ok(true) => {}
-                        Ok(false) => break,
-                        Err(error) => {
-                            warn!(
-                                source_id = %self.source_id,
-                                error = %error,
-                                "failed to publish BIP-110 classification progress"
-                            );
-                            break;
-                        }
-                    }
-                }
-                match report.disposition {
-                    PolicyDrain::Continue => {}
-                    PolicyDrain::Complete | PolicyDrain::Stale => break,
-                    PolicyDrain::Paused => {
-                        warn!(
-                            source_id = %self.source_id,
-                            generation = report.generation,
-                            response_failures = report.response_failures,
-                            systemic_response_failures = report.systemic_response_failures,
-                            missing_responses = report.missing_responses,
-                            batch_failures = report.batch_failures,
-                            capacity_deferred = report.capacity_deferred,
-                            deferred_candidates = report.deferred_candidates,
-                            "pausing BIP-110 classification until the next membership generation"
-                        );
-                        break;
-                    }
-                }
-                tokio::task::yield_now().await;
+                false
             }
         }
     }
@@ -180,6 +356,11 @@ impl SourceRuntime {
             Ok(snapshot) => {
                 let transaction_count = snapshot.transaction_count;
                 let observed_at_ms = snapshot.observed_at_ms;
+                let collection_started_at_ms = snapshot.collection_started_at_ms;
+                let collection_completed_at_ms = snapshot.collection_completed_at_ms;
+                let collection_duration_ms = snapshot.collection_duration_ms;
+                let chain_height = snapshot.chain_tip.height;
+                let chain_hash = snapshot.chain_tip.hash.clone();
                 let publication = policy.install_snapshot(snapshot)?;
                 let classified = publication
                     .observation
@@ -197,12 +378,18 @@ impl SourceRuntime {
                         .bip110_summary
                         .indeterminate_count;
                 self.record_membership(publication).await?;
+                #[cfg(test)]
                 self.classification_wakeup.notify_one();
                 info!(
                     source_id = %self.source_id,
                     transaction_count,
                     classified,
                     observed_at_ms,
+                    collection_started_at_ms,
+                    collection_completed_at_ms,
+                    collection_duration_ms,
+                    chain_height,
+                    chain_hash,
                     "published complete mempool membership"
                 );
                 Ok(())
@@ -500,6 +687,12 @@ pub struct SourceRegistry {
 
 impl SourceRegistry {
     pub fn new(sources: Vec<Arc<SourceRuntime>>) -> Result<Self, RuntimeError> {
+        if sources.len() > MAX_CONFIGURED_SOURCES {
+            return Err(RuntimeError::TooManySources {
+                configured: sources.len(),
+                maximum: MAX_CONFIGURED_SOURCES,
+            });
+        }
         let mut indexed = BTreeMap::new();
         for source in sources {
             let source_id = source.source_id().to_owned();
@@ -556,8 +749,18 @@ pub enum RuntimeError {
     ZeroPollInterval,
     #[error("at least one source is required")]
     NoSources,
+    #[error("configured {configured} sources, exceeding the supported maximum {maximum}")]
+    TooManySources { configured: usize, maximum: usize },
     #[error("source {0:?} is configured more than once")]
     DuplicateSource(String),
+    #[error(
+        "source {source_id:?} uses a {actual_seconds}-second poll interval; expected {expected_seconds} seconds"
+    )]
+    PollIntervalMismatch {
+        source_id: String,
+        expected_seconds: u64,
+        actual_seconds: u64,
+    },
     #[error("snapshot source {actual:?} does not match runtime source {expected:?}")]
     SnapshotSourceMismatch { expected: String, actual: String },
     #[error("policy generation counter overflowed")]
@@ -586,7 +789,7 @@ mod tests {
         consensus::encode::serialize_hex, transaction::Version,
     };
     use serde_json::{Value, json};
-    use tokio::sync::{Notify, Semaphore};
+    use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore};
 
     use super::*;
     use crate::model::{ChainTip, MempoolEntry, TransactionClassification};
@@ -607,6 +810,123 @@ mod tests {
     struct FailingPolicyFixture {
         raw_batches_started: AtomicUsize,
         raw_batch_started: Notify,
+    }
+
+    #[derive(Debug, Default)]
+    struct MembershipProbe {
+        source_order: AsyncMutex<Vec<String>>,
+        active_verbose_calls: AtomicUsize,
+        maximum_active_verbose_calls: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    struct MembershipFixture {
+        source_id: String,
+        probe: Arc<MembershipProbe>,
+        chain_reads: AtomicUsize,
+        fail_mempool_info: bool,
+    }
+
+    async fn membership_rpc(
+        State(fixture): State<Arc<MembershipFixture>>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        let method = request["method"].as_str().expect("RPC method");
+        if method == "getblockchaininfo"
+            && fixture.chain_reads.fetch_add(1, Ordering::SeqCst) % 2 == 0
+        {
+            fixture
+                .probe
+                .source_order
+                .lock()
+                .await
+                .push(fixture.source_id.clone());
+        }
+        if fixture.fail_mempool_info && method == "getmempoolinfo" {
+            return Json(json!({
+                "jsonrpc": "2.0",
+                "error": { "code": -1, "message": "fixture failure" },
+                "id": request["id"]
+            }));
+        }
+        let result = match method {
+            "getblockchaininfo" => json!({
+                "blocks": 900_000,
+                "bestblockhash": "00".repeat(32)
+            }),
+            "getmempoolinfo" => json!({ "size": 0 }),
+            "getrawmempool" => {
+                let active = fixture
+                    .probe
+                    .active_verbose_calls
+                    .fetch_add(1, Ordering::SeqCst)
+                    + 1;
+                fixture
+                    .probe
+                    .maximum_active_verbose_calls
+                    .fetch_max(active, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                fixture
+                    .probe
+                    .active_verbose_calls
+                    .fetch_sub(1, Ordering::SeqCst);
+                json!({})
+            }
+            other => panic!("unexpected membership RPC method {other}"),
+        };
+        Json(json!({
+            "jsonrpc": "2.0",
+            "result": result,
+            "error": null,
+            "id": request["id"]
+        }))
+    }
+
+    async fn start_membership_fixture(
+        source_id: &str,
+        probe: Arc<MembershipProbe>,
+        fail_mempool_info: bool,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let fixture = Arc::new(MembershipFixture {
+            source_id: source_id.to_owned(),
+            probe,
+            chain_reads: AtomicUsize::new(0),
+            fail_mempool_info,
+        });
+        let application = Router::new()
+            .route("/", post(membership_rpc))
+            .with_state(fixture);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, application)
+                .await
+                .expect("fixture server");
+        });
+        (address, server)
+    }
+
+    fn atlas_source(
+        source_id: &str,
+        address: std::net::SocketAddr,
+        poll_interval: Duration,
+    ) -> AtlasSource {
+        let url = format!("http://{address}/");
+        let runtime = Arc::new(
+            SourceRuntime::new(source_id.to_owned(), source_id.to_owned(), poll_interval)
+                .expect("source runtime"),
+        );
+        let rpc = RpcClient::new(&url, "atlas", "secret", 100).expect("membership RPC client");
+        let policy = PolicyEnricher::new(
+            &url,
+            "atlas".to_owned(),
+            "secret".to_owned(),
+            PolicyLimits::new(1, 1, 1024 * 1024).expect("policy limits"),
+        )
+        .expect("policy client");
+        AtlasSource::new(runtime, rpc, policy)
     }
 
     async fn blocking_policy_rpc(
@@ -878,6 +1198,15 @@ mod tests {
     }
 
     fn policy_snapshot(transactions: &[Transaction], observed_at_ms: u64) -> MempoolSnapshot {
+        policy_snapshot_for("core", "Bitcoin Core", transactions, observed_at_ms)
+    }
+
+    fn policy_snapshot_for(
+        source_id: &str,
+        source_label: &str,
+        transactions: &[Transaction],
+        observed_at_ms: u64,
+    ) -> MempoolSnapshot {
         let mut entries = transactions
             .iter()
             .map(|transaction| {
@@ -893,8 +1222,8 @@ mod tests {
             .collect::<Vec<_>>();
         entries.sort_unstable_by(|left, right| left.txid.cmp(&right.txid));
         MempoolSnapshot::new(
-            "core".to_owned(),
-            "Bitcoin Core".to_owned(),
+            source_id.to_owned(),
+            source_label.to_owned(),
             observed_at_ms,
             ChainTip {
                 height: 900_000,
@@ -930,6 +1259,303 @@ mod tests {
                 .map(|snapshot| snapshot.transaction_count),
             Some(1)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn atlas_runtime_polls_sources_in_order_without_verbose_overlap() {
+        let probe = Arc::new(MembershipProbe::default());
+        let (core_address, core_server) =
+            start_membership_fixture("core", Arc::clone(&probe), false).await;
+        let (knots_address, knots_server) =
+            start_membership_fixture("knots", Arc::clone(&probe), false).await;
+        let poll_interval = Duration::from_secs(60);
+        let atlas = AtlasRuntime::new(
+            vec![
+                atlas_source("core", core_address, poll_interval),
+                atlas_source("knots", knots_address, poll_interval),
+            ],
+            poll_interval,
+        )
+        .expect("Atlas runtime");
+
+        atlas.poll_round(1).await;
+
+        assert_eq!(
+            probe.source_order.lock().await.as_slice(),
+            ["core", "knots"]
+        );
+        assert_eq!(probe.maximum_active_verbose_calls.load(Ordering::SeqCst), 1);
+        for runtime in atlas.source_runtimes() {
+            assert_eq!(
+                runtime.summary().await.availability,
+                SourceAvailability::Ready
+            );
+        }
+
+        core_server.abort();
+        knots_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_source_failure_does_not_block_later_sources_in_the_round() {
+        let probe = Arc::new(MembershipProbe::default());
+        let (core_address, core_server) =
+            start_membership_fixture("core", Arc::clone(&probe), true).await;
+        let (knots_address, knots_server) =
+            start_membership_fixture("knots", Arc::clone(&probe), false).await;
+        let poll_interval = Duration::from_secs(60);
+        let atlas = AtlasRuntime::new(
+            vec![
+                atlas_source("core", core_address, poll_interval),
+                atlas_source("knots", knots_address, poll_interval),
+            ],
+            poll_interval,
+        )
+        .expect("Atlas runtime");
+
+        atlas.poll_round(1).await;
+
+        assert_eq!(
+            probe.source_order.lock().await.as_slice(),
+            ["core", "knots"]
+        );
+        let runtimes = atlas.source_runtimes();
+        assert_eq!(
+            runtimes[0].summary().await.availability,
+            SourceAvailability::Error
+        );
+        assert_eq!(
+            runtimes[1].summary().await.availability,
+            SourceAvailability::Ready
+        );
+
+        core_server.abort();
+        knots_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn atlas_runtime_never_overlaps_source_classification_slices() {
+        let core_transactions = [policy_transaction(700), policy_transaction(702)];
+        let knots_transaction = policy_transaction(701);
+        let (core_fixture, core_address, core_server) =
+            start_blocking_policy_fixture(&core_transactions).await;
+        let (knots_fixture, knots_address, knots_server) =
+            start_blocking_policy_fixture(std::slice::from_ref(&knots_transaction)).await;
+        let poll_interval = Duration::from_secs(60);
+        let limits = PolicyLimits::new(1, 1, 1024 * 1024).expect("policy limits");
+
+        let core_runtime = Arc::new(
+            SourceRuntime::new("core".to_owned(), "Bitcoin Core".to_owned(), poll_interval)
+                .expect("Core runtime"),
+        );
+        let core_url = format!("http://{core_address}/");
+        let core_policy =
+            PolicyEnricher::new(&core_url, "atlas".to_owned(), "secret".to_owned(), limits)
+                .expect("Core policy");
+        let core_source = AtlasSource::new(
+            Arc::clone(&core_runtime),
+            RpcClient::new(&core_url, "atlas", "secret", 100).expect("Core RPC"),
+            core_policy.clone(),
+        );
+
+        let knots_runtime = Arc::new(
+            SourceRuntime::new(
+                "knots".to_owned(),
+                "Bitcoin Knots".to_owned(),
+                poll_interval,
+            )
+            .expect("Knots runtime"),
+        );
+        let knots_url = format!("http://{knots_address}/");
+        let knots_policy =
+            PolicyEnricher::new(&knots_url, "atlas".to_owned(), "secret".to_owned(), limits)
+                .expect("Knots policy");
+        let knots_source = AtlasSource::new(
+            Arc::clone(&knots_runtime),
+            RpcClient::new(&knots_url, "atlas", "secret", 100).expect("Knots RPC"),
+            knots_policy.clone(),
+        );
+
+        core_runtime
+            .record_membership(
+                core_policy
+                    .install_snapshot(policy_snapshot_for(
+                        "core",
+                        "Bitcoin Core",
+                        &core_transactions,
+                        20,
+                    ))
+                    .expect("Core membership"),
+            )
+            .await
+            .expect("publish Core membership");
+        knots_runtime
+            .record_membership(
+                knots_policy
+                    .install_snapshot(policy_snapshot_for(
+                        "knots",
+                        "Bitcoin Knots",
+                        std::slice::from_ref(&knots_transaction),
+                        20,
+                    ))
+                    .expect("Knots membership"),
+            )
+            .await
+            .expect("publish Knots membership");
+
+        let atlas = Arc::new(
+            AtlasRuntime::new(vec![core_source, knots_source], poll_interval)
+                .expect("Atlas runtime"),
+        );
+        let classifier = tokio::spawn({
+            let atlas = Arc::clone(&atlas);
+            async move { atlas.run_classification().await }
+        });
+        atlas.schedule_classification(0);
+
+        wait_for_raw_batches(&core_fixture, 1).await;
+        atlas.schedule_classification(1);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                wait_for_raw_batches(&knots_fixture, 1),
+            )
+            .await
+            .is_err(),
+            "Knots classification must wait while the Core slice owns the global gate"
+        );
+        core_fixture.release_raw_batch.add_permits(1);
+        wait_for_classified(&core_runtime, 1).await;
+        wait_for_raw_batches(&knots_fixture, 1).await;
+        assert_eq!(
+            core_fixture.raw_batches_started.load(Ordering::SeqCst),
+            1,
+            "the next Core slice must wait for Knots to receive its fair turn"
+        );
+        knots_fixture.release_raw_batch.add_permits(1);
+        wait_for_classified(&knots_runtime, 1).await;
+        wait_for_raw_batches(&core_fixture, 2).await;
+        core_fixture.release_raw_batch.add_permits(1);
+        wait_for_classified(&core_runtime, 2).await;
+
+        classifier.abort();
+        let _ = classifier.await;
+        core_server.abort();
+        knots_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn successful_source_does_not_rearm_another_sources_paused_generation() {
+        let (core_fixture, core_address, core_server) = start_failing_policy_fixture().await;
+        let knots_transactions = [policy_transaction(710), policy_transaction(711)];
+        let (knots_fixture, knots_address, knots_server) =
+            start_blocking_policy_fixture(&knots_transactions).await;
+        let poll_interval = Duration::from_secs(60);
+        let limits = PolicyLimits::new(1, 1, 1024 * 1024).expect("policy limits");
+
+        let core_runtime = Arc::new(
+            SourceRuntime::new("core".to_owned(), "Bitcoin Core".to_owned(), poll_interval)
+                .expect("Core runtime"),
+        );
+        let core_url = format!("http://{core_address}/");
+        let core_policy =
+            PolicyEnricher::new(&core_url, "atlas".to_owned(), "secret".to_owned(), limits)
+                .expect("Core policy");
+        let core_source = AtlasSource::new(
+            Arc::clone(&core_runtime),
+            RpcClient::new(&core_url, "atlas", "secret", 100).expect("Core RPC"),
+            core_policy.clone(),
+        );
+
+        let knots_runtime = Arc::new(
+            SourceRuntime::new(
+                "knots".to_owned(),
+                "Bitcoin Knots".to_owned(),
+                poll_interval,
+            )
+            .expect("Knots runtime"),
+        );
+        let knots_url = format!("http://{knots_address}/");
+        let knots_policy =
+            PolicyEnricher::new(&knots_url, "atlas".to_owned(), "secret".to_owned(), limits)
+                .expect("Knots policy");
+        let knots_source = AtlasSource::new(
+            Arc::clone(&knots_runtime),
+            RpcClient::new(&knots_url, "atlas", "secret", 100).expect("Knots RPC"),
+            knots_policy.clone(),
+        );
+
+        core_runtime
+            .record_membership(
+                core_policy
+                    .install_snapshot(policy_snapshot_for(
+                        "core",
+                        "Bitcoin Core",
+                        std::slice::from_ref(&knots_transactions[0]),
+                        20,
+                    ))
+                    .expect("Core membership"),
+            )
+            .await
+            .expect("publish Core membership");
+        knots_runtime
+            .record_membership(
+                knots_policy
+                    .install_snapshot(policy_snapshot_for(
+                        "knots",
+                        "Bitcoin Knots",
+                        std::slice::from_ref(&knots_transactions[0]),
+                        20,
+                    ))
+                    .expect("Knots membership"),
+            )
+            .await
+            .expect("publish Knots membership");
+
+        let atlas = Arc::new(
+            AtlasRuntime::new(vec![core_source, knots_source], poll_interval)
+                .expect("Atlas runtime"),
+        );
+        let classifier = tokio::spawn({
+            let atlas = Arc::clone(&atlas);
+            async move { atlas.run_classification().await }
+        });
+        atlas.schedule_classification(0);
+        atlas.schedule_classification(1);
+
+        wait_for_failing_raw_batches(&core_fixture, 1).await;
+        wait_for_raw_batches(&knots_fixture, 1).await;
+        knots_fixture.release_raw_batch.add_permits(1);
+        wait_for_classified(&knots_runtime, 1).await;
+
+        knots_runtime
+            .record_membership(
+                knots_policy
+                    .install_snapshot(policy_snapshot_for(
+                        "knots",
+                        "Bitcoin Knots",
+                        std::slice::from_ref(&knots_transactions[1]),
+                        30,
+                    ))
+                    .expect("replacement Knots membership"),
+            )
+            .await
+            .expect("publish replacement Knots membership");
+        atlas.schedule_classification(1);
+
+        wait_for_raw_batches(&knots_fixture, 2).await;
+        assert_eq!(
+            core_fixture.raw_batches_started.load(Ordering::SeqCst),
+            1,
+            "Core must remain paused until Core publishes a replacement generation"
+        );
+        knots_fixture.release_raw_batch.add_permits(1);
+        wait_for_classified(&knots_runtime, 1).await;
+
+        classifier.abort();
+        let _ = classifier.await;
+        core_server.abort();
+        knots_server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]

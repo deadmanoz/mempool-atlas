@@ -4,10 +4,21 @@ All notable changes to Mempool Atlas will be documented in this file.
 
 ## [Unreleased]
 
-- Rebuild Mempool Atlas as a single central service that periodically pulls one
-  complete mempool over the existing private WireGuard RPC path, retains only
-  the latest successful snapshot in memory, exposes a small source-scoped API,
-  and serves the website.
+- Rebuild Mempool Atlas as a single central service that periodically pulls
+  complete mempools from a bounded configured source set over existing private
+  WireGuard RPC paths, retains only the latest successful snapshot per source
+  in memory, exposes a small source-scoped API, and serves the website.
+- Coordinate one to four sources under one RPC work gate: poll complete
+  membership sequentially in deterministic rounds, isolate source failures,
+  and advance successful source-local classification generations fairly in
+  bounded round-robin slices.
+- Bracket every membership observation with matching chain-tip reads and expose
+  its collection start, completion, and duration so comparisons show sampling
+  skew instead of implying simultaneous observations.
+- Add a separate browser-derived comparison page that merge-joins two current
+  snapshots into present-in-both and two symmetric observed-only regions,
+  preserves source-local witness variants and policy assessments, and stores no
+  server-side comparison projection or history.
 - Encode each published snapshot response once and share its immutable bytes
   across readers so concurrent requests cannot multiply large serialization
   work and memory allocation.
@@ -64,9 +75,9 @@ All notable changes to Mempool Atlas will be documented in this file.
   browser can keep progressive rule evidence consistent with its visible
   terrain.
 - Remove the experimental node agents, SQLite replicas, checkpoint and delta
-  protocol, evidence pipeline, classifiers, database tooling, and multi-node
-  comparison surface from the active workspace. Their code and lessons remain
-  available in Git history.
+  protocol, evidence pipeline, classifiers, database tooling, and earlier
+  server-projected multi-node comparison surface from the active workspace.
+  Their code and lessons remain available in Git history.
 - Separate current-state visualisation from historical archival. Attempt #3
   intentionally stores no application history and requires no database
   migration or recovery path.

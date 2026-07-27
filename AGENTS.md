@@ -1,16 +1,18 @@
 # Mempool Atlas
 
-Mempool Atlas is a classification-first Bitcoin mempool viewer. Attempt #3
-focuses on one selected source: one central service on the presentation host
-periodically pulls a complete mempool snapshot, evaluates current transactions
-against the seven BIP-110 rules as deployed Bitcoin Knots mempool policy, keeps
-only the latest successful observation in memory, and serves a Canvas-based
-website. Comparison and archival are separate future products.
+Mempool Atlas is a classification-first Bitcoin mempool viewer. One central
+service on the presentation host periodically pulls complete, independent
+mempool snapshots from a small configured set of Bitcoin nodes, evaluates
+current transactions against the seven BIP-110 rules as deployed Bitcoin Knots
+mempool policy, keeps only the latest successful observation per source in
+memory, and serves Canvas-based single-node and comparison products. Archival
+remains a separate product.
 
 ## Architecture
 
-- `apps/atlas/src/rpc.rs` owns the complete membership observation:
-  `getmempoolinfo`, verbose `getrawmempool`, and `getblockchaininfo`.
+- `apps/atlas/src/rpc.rs` owns the complete membership observation. It brackets
+  `getmempoolinfo` and verbose `getrawmempool` with matching
+  `getblockchaininfo` calls and records the successful collection window.
 - `apps/atlas/src/policy_rpc.rs` owns authenticated, bounded policy batches. It
   preserves JSON member presence, restores out-of-order batch responses by
   globally unique numeric request ID, requires Bitcoin Core's JSON-RPC v2
@@ -25,18 +27,20 @@ website. Comparison and archival are separate future products.
   consensus mode.
 - `apps/atlas/src/model.rs` owns the source-scoped snapshot, compact assessment,
   and typed transaction-detail contracts.
-- `apps/atlas/src/runtime.rs` runs fixed-interval membership independently from
-  current-generation classification. It publishes complete membership first,
-  then atomically publishes strictly newer matching detail revisions as
-  assessments complete.
+- `apps/atlas/src/runtime.rs` owns the bounded multi-source coordinator.
+  Membership rounds poll sources sequentially, while classification advances
+  source-local generations round-robin. Both paths share one RPC work gate. It
+  publishes complete membership first, then atomically publishes strictly
+  newer matching detail revisions as assessments complete.
 - `apps/atlas/src/api.rs` exposes health, readiness, source discovery, current
   membership, current transaction detail, and the built website.
-- `apps/atlas/src/main.rs` configures one source, reads the RPC password from a
-  credential file, binds to loopback, and owns process lifecycle.
-- `web/` discovers the source, validates one complete snapshot, and renders the
-  exact rule-combination terrain, the secondary fee-rate-by-age lens, health
-  state, overlapping marginal rule filters, and bounded transaction-detail
-  inspector.
+- `apps/atlas/src/main.rs` validates a root-controlled source file containing
+  one to four sources, resolves named systemd credentials, divides one total
+  classification cache budget among sources, binds to loopback, and owns
+  process lifecycle.
+- `web/` contains two product entries. The node viewer validates and renders
+  one complete snapshot. The comparison page fetches two independent current
+  snapshots and derives their sorted membership partition in the browser.
 
 Production reuses the existing WireGuard-only node RPC proxy. No Atlas process,
 agent, database, queue, retained history, ZMQ subscriber, container, or new
@@ -77,7 +81,15 @@ Use `just` targets whenever one exists:
 
 ## Snapshot invariants
 
-- One source snapshot describes only that node's current mempool.
+- One source snapshot describes only that node's current mempool. Comparison
+  never constructs a combined server-side mempool.
+- Bind every successful snapshot to collection start, completion, duration,
+  and a chain tip that remained stable across the membership RPC sequence.
+- Poll configured sources sequentially in deterministic order. One source
+  failure must not prevent later sources in the round from being attempted.
+- Admit membership and classification RPC work through one service-wide gate.
+  Advance source-local classification generations fairly, and rearm only a
+  source that published replacement membership.
 - Membership is keyed and strictly sorted by `txid`; each entry also carries
   the node-reported `wtxid` for its current witness variant.
 - Retain `vsize`, exact base fee in satoshis, node entry time, and the compact
@@ -153,8 +165,8 @@ Use `just` targets whenever one exists:
   container, or node-local service to the current-state viewer.
 - Do not add a network path beside the existing WireGuard-only RPC proxy.
 - Do not mix forensic evidence or archival retention into the viewer process.
-- Keep future comparison source-scoped and derive differences from independent
-  complete snapshots.
+- Keep comparison source-scoped and derive differences in the browser from two
+  independent complete snapshots. Retain no combined server projection.
 - Keep source IDs configurable. Never commit hostnames, private addresses, RPC
   credentials, or deployment inventory.
 - Require a server-side RPC whitelist containing only `getmempoolinfo`,
@@ -218,11 +230,12 @@ Use `just` targets whenever one exists:
   gives errors precedence over results, requires the Bitcoin Core JSON-RPC 2.0
   envelope shape over HTTP 200, and rejects duplicate or unexpected response
   IDs and excess responses.
-- `ATLAS_CLASSIFICATION_CACHE_MIB` bounds the combined estimated admission of
-  exact current-transaction outputs and cross-generation positive confirmed
-  scripts at 256 MiB by default and 512 MiB maximum. Positive confirmed facts
-  use bounded eviction. The pending resolver has a separate 256 MiB retained
-  script-byte ceiling. Neither bound covers unresolved fact indexes, pending raw
+- `ATLAS_CLASSIFICATION_TOTAL_CACHE_MIB` is a 256 MiB default, 512 MiB maximum
+  service-wide budget divided among configured sources. Each share bounds the
+  combined admission of that source's exact current-transaction outputs and
+  cross-generation positive confirmed scripts. Its pending resolver has a
+  separate retained-script ceiling equal to the smaller of that share and
+  256 MiB. Neither bound covers unresolved fact indexes, pending raw
   transactions, classifications, RPC buffers, encoded snapshots, allocator
   overhead, or reader overlap.
 - Policy logs expose `fact_requests`, `facts_resolved`, `facts_missing`,
@@ -245,13 +258,23 @@ Use `just` targets whenever one exists:
   not bandwidth abuse.
 - The node-side RPC proxy must stream verbose responses without proxy-temp
   spill. Membership uses a five-minute interval with delayed missed ticks.
-  Classification runs independently and must not lengthen an otherwise
-  on-schedule membership cadence. Choose production cadence from measured
-  bytes, duration, node cost, and freshness.
+  One due membership round polls all sources before classification resumes.
+  A currently running bounded classification slice may finish first, but later
+  slices cannot overtake the waiting round. Choose production cadence from
+  measured bytes, duration, node cost, and freshness.
 - The service binds only to loopback and expects the existing presentation-host
   web proxy.
-- The executable configures one source even though the read model remains
-  source-scoped for later comparison.
+- The executable accepts one to four configured sources. The configured
+  classification cache is a service-wide total divided among them. Each
+  source's pending-script ceiling is no larger than its share, while the
+  existing 256 MiB absolute pending ceiling remains.
+- The comparison page places each txid once into present-in-both, observed-only-
+  left, or observed-only-right. A common txid retains both source-local entries
+  and explicitly exposes different witness variants.
+- Pair changes abort obsolete snapshot and detail reads. Selection-only Canvas
+  paints reuse identity- and viewport-bound geometry. Keep transaction-level
+  keyboard access virtual and bounded instead of creating one DOM node per
+  transaction.
 - Browser refresh fetches the latest server copy. It does not trigger an RPC
   poll.
 - A restart discards current state by design and waits for the first new
@@ -269,6 +292,8 @@ Use `just` targets whenever one exists:
   evaluation. It supersedes ADR 0003's attempt-once classification details.
 - `docs/adr/0006-own-policy-json-rpc-wire-boundary.md` records the bounded,
   presence-preserving classification transport and its HTTP framing contract.
+- `docs/adr/0007-browser-derived-snapshot-comparison.md` records bounded
+  multi-source scheduling and the symmetric browser-derived comparison.
 
 `agent_docs/.docs-ref` stores the commit against which references were last
 validated. After architectural changes, run

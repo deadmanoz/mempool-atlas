@@ -1,47 +1,53 @@
 # Architecture
 
-Mempool Atlas attempt #3 is one central process on the presentation host and
-one browser client. Its scope is the current mempool of one selected Bitcoin
-node, including a bounded classification of current witness variants against
-the seven BIP-110 rules as deployed Bitcoin Knots mempool policy.
+Mempool Atlas attempt #3 is one central process on the presentation host and a
+dependency-light browser client. The process keeps one current snapshot for
+each of one to four configured Bitcoin nodes, including bounded classification
+of current witness variants against the seven BIP-110 rules as deployed Bitcoin
+Knots mempool policy. The browser exposes a source-local node viewer and a
+separate comparison of two independently sampled current snapshots.
 
 [ADR 0005](adr/0005-resolve-policy-facts-before-evaluation.md) defines the
 pending fact resolver, explicit-null semantics, positive prevout cache, and
 P2SH evaluation described here. It supersedes ADR 0003's attempt-once
 classification details. [ADR 0006](adr/0006-own-policy-json-rpc-wire-boundary.md)
 defines the policy transport and HTTP framing contract.
+[ADR 0007](adr/0007-browser-derived-snapshot-comparison.md) defines bounded
+multi-source coordination and browser-derived comparison.
 
 ```mermaid
 flowchart TB
-    subgraph node["Node host"]
-        bitcoind["Bitcoin Core or Knots"]
-        rpc_proxy["Existing private nginx RPC proxy"]
-        bitcoind --> rpc_proxy
+    subgraph nodes["Configured node hosts"]
+        core["Bitcoin Core"] --> core_proxy["Existing private RPC proxy"]
+        knots["Bitcoin Knots"] --> knots_proxy["Existing private RPC proxy"]
     end
 
     subgraph presentation["Presentation host: one Atlas process"]
-        membership["Complete membership collector"]
-        generation["Install current in-memory generation<br/>reuse exact surviving classifications"]
+        gate["One service-wide RPC work gate"]
+        membership["Sequential membership round"]
+        generation["Independent in-memory generation per source<br/>reuse exact surviving classifications"]
         policy_rpc["Bounded wire-preserving<br/>policy RPC client"]
-        enrichment["Pending candidate and fact waves<br/>current wtxid and positive script caches"]
+        enrichment["Round-robin source classification<br/>pending candidate and fact waves"]
         evaluator["Pure seven-rule evaluator"]
         guard["Generation and revision guard"]
-        current["Latest membership, classification revision,<br/>detail map, and encoded response in memory"]
+        current["Latest membership, revision, detail map,<br/>and encoded response per source"]
         api["Source-scoped JSON API"]
         static["Static website"]
+        gate --> membership
         membership --> generation
         generation -->|"publish membership first"| current
         generation -->|"wake resolver"| enrichment
+        gate --> policy_rpc
         enrichment --> evaluator
         evaluator --> guard
         guard -->|"publish current progress"| current
         current --> api
     end
 
-    rpc_proxy -->|"existing WireGuard: membership RPC"| membership
-    rpc_proxy -->|"existing WireGuard: bounded detail RPC"| policy_rpc
+    core_proxy -->|"existing WireGuard"| gate
+    knots_proxy -->|"existing WireGuard"| gate
     policy_rpc --> enrichment
-    browser["Browser"] --> static
+    browser["Browser: node view or comparison"] --> static
     browser --> api
 ```
 
@@ -49,8 +55,9 @@ flowchart TB
 
 `apps/atlas/` owns collection, current state, the API, and static file serving:
 
-- `rpc.rs` collects complete membership with `getmempoolinfo`, verbose
-  `getrawmempool`, and `getblockchaininfo` through `corepc-client`.
+- `rpc.rs` brackets `getmempoolinfo` and verbose `getrawmempool` with matching
+  `getblockchaininfo` calls, records the complete collection window, and rejects
+  a chain-tip change through `corepc-client`.
 - `policy_rpc.rs` sends authenticated policy batches through lazy `minreq`
   reads. It owns response-byte limits, redirect refusal, request IDs, Bitcoin
   Core JSON-RPC 2.0 envelope validation, and the distinction between missing,
@@ -62,23 +69,27 @@ flowchart TB
   and stale result rejection.
 - `model.rs` defines the complete flat snapshot, compact classification, and
   typed transaction-detail contracts.
-- `runtime.rs` runs membership and classification as independent loops.
-  Membership is published before new policy work, and each successful
-  current-generation assessment publication atomically replaces the snapshot
-  and matching detail map with a strictly newer revision.
+- `runtime.rs` runs membership and classification as independent loops under
+  one service-wide RPC gate. Membership rounds poll sources sequentially in
+  configured order. Classification advances successful source-local
+  generations round-robin in bounded slices, releasing the gate between
+  slices. Membership is published before new policy work, and each successful
+  current-generation assessment publication atomically replaces that source's
+  snapshot and matching detail map with a strictly newer revision.
 - `api.rs` exposes health, readiness, source discovery, current membership,
   current transaction detail, and the built website.
-- `main.rs` owns configuration, the loopback listener, credential-file loading,
-  and graceful shutdown.
+- `main.rs` validates a bounded JSON source file, loads each named credential
+  from a separate directory, divides one total classification cache budget
+  among sources, and owns the loopback listener and graceful shutdown.
 
 `crates/rdts-rules/` is a pure evaluator. It has no I/O, async state, chain
 access, or clock. It exposes separate consensus and mempool-policy modes. Atlas
 uses only the mempool-policy mode, which applies all seven rules without a
 deployment activation gate or UTXO grandfathering.
 
-The initial executable configures exactly one source. `SourceRegistry` keeps the
-read contract source-scoped so a later comparison product can add independent
-sources without inventing a combined mempool.
+The executable accepts one to four sources. `SourceRegistry` keeps every read
+source-scoped. The comparison product fetches two ordinary source responses and
+does not invent a combined server-side mempool or comparison cache.
 
 ## Snapshot contract
 
@@ -94,13 +105,14 @@ classification:
 | `entered_at_ms` | Node-reported mempool entry time |
 | `bip110` | Compatible, violating, indeterminate, or `null` when not yet classified |
 
-The snapshot also records source identity, membership observation time,
-membership-local `classification_revision`, block height, best block hash,
-transaction count, total virtual size, evaluator identity, policy scope, and
-the four classification totals. The revision begins at zero for every
-membership generation and advances with each published assessment batch.
-Transactions are strictly sorted by txid. This makes equality, future
-merge-based comparison, and payload validation straightforward.
+The snapshot also records source identity, collection start, collection
+completion, exact collection duration, membership-local
+`classification_revision`, block height, best block hash, transaction count,
+total virtual size, evaluator identity, policy scope, and the four
+classification totals. `observed_at_ms` is the collection completion time. The
+revision begins at zero for every membership generation and advances with each
+published assessment batch. Transactions are strictly sorted by txid. This
+makes browser merge comparison and payload validation straightforward.
 
 The compact assessment identifies all proven violated rules, all rules with
 missing facts, and the deterministic first rejection when it can be known. A
@@ -155,18 +167,36 @@ form.
 
 ## Collection and enrichment
 
-Every poll first establishes complete membership:
+Every source turn establishes one complete membership observation:
 
-1. `getmempoolinfo` preflights the reported entry count.
-2. `getrawmempool true` returns the complete current membership, including
+1. `getblockchaininfo` records the starting height and best block hash.
+2. `getmempoolinfo` preflights the reported entry count.
+3. `getrawmempool true` returns the complete current membership, including
    `txid`, `wtxid`, `vsize`, entry time, and base fee.
-3. `getblockchaininfo` binds the observation to the source chain tip.
+4. `getblockchaininfo` must report the same ending height and best block hash.
 
 Before requesting the large verbose response, Atlas rejects a node-reported
 mempool above `ATLAS_MAX_MEMPOOL_ENTRIES`. The custom deserializer enforces the
-limit again because membership can change between the two RPC calls. It rejects
-the complete poll if a required membership field is absent, malformed,
-inexact, overflowing, or unsafe for JSON.
+limit again because membership can change between the count and verbose calls.
+It rejects the complete poll if the chain tip changes or if a required
+membership field is absent, malformed, inexact, overflowing, or unsafe for
+JSON. The successful snapshot records timing around the entire four-call
+sequence.
+
+One service-wide coordinator owns all node RPC work. A membership round takes
+the gate once, polls every configured source sequentially in file order, and
+then releases it. Failure of one source records that source's error and keeps
+its last good snapshot visible, but does not prevent later sources in the round
+from being attempted. Only sources that publish replacement membership are
+scheduled for classification.
+
+Classification takes the same gate for one bounded source-local resolver slice
+at a time. It releases the gate between slices and rotates to the next pending
+source, including a source that becomes ready while an older generation is
+already draining. This prevents concurrent membership and classification RPC,
+gives a waiting membership round the next opportunity after the current slice,
+and prevents activity on one source from restarting a paused generation on
+another.
 
 Complete membership installation and policy enrichment are separate. A
 successful collector result first installs a new process-local generation,
@@ -177,7 +207,8 @@ configured auxiliary cache bound and eviction policy. Null and failed lookups
 are never cached. Atlas then materializes, encodes, and publishes complete
 membership as revision 0 before waking classification.
 
-The classification loop drains a bounded pending resolver for that generation:
+Each source-local classification turn drains one bounded portion of that
+generation's pending resolver:
 
 1. Admit at most `ATLAS_CLASSIFICATION_SLICE_ENTRIES` current witness variants,
    2,048 by default and configurable up to a hard 8,192-entry candidate-window
@@ -313,14 +344,15 @@ private node details through the website.
 `corepc-client` buffers the HTTP response before custom deserialization. During
 replacement, the old structured snapshot and encoded response can also remain
 alive while a reader finishes. The 200,000-entry cap is therefore an entry
-bound, not a complete memory bound. The configurable auxiliary cache estimate,
-256 MiB by default and 512 MiB maximum, covers exact current-transaction output
-sets together with positive confirmed `OutPoint` scripts. Positive confirmed
-facts are evicted when necessary; nulls and failures are not admitted. Retained
-pending scripts have a separate 256 MiB ceiling. Unresolved fact indexes,
-pending raw transactions, classification details, concurrent RPC responses,
-the encoded snapshot, allocator overhead, and reader overlap remain outside
-these budgets.
+bound, not a complete memory bound. `ATLAS_CLASSIFICATION_TOTAL_CACHE_MIB`,
+256 MiB by default and 512 MiB maximum, is divided evenly among configured
+sources. Each source share covers exact current-transaction output sets
+together with positive confirmed `OutPoint` scripts. Positive confirmed facts
+are evicted when necessary; nulls and failures are not admitted. Each source's
+retained pending scripts have a separate ceiling equal to the smaller of its
+share and 256 MiB. Unresolved fact indexes, pending raw transactions,
+classification details, concurrent RPC responses, encoded snapshots, allocator
+overhead, and reader overlap remain outside these budgets.
 Deployment acceptance must still observe real peak memory. Each classification
 body is bounded before parsing, but multiple lane-local bodies, the membership
 buffer, pending transactions, caches, publication overlap, and allocator
@@ -373,8 +405,9 @@ All API responses use `Cache-Control: no-store`.
 
 ## Browser boundary
 
-`web/` is a dependency-light Vite application. It discovers the configured
-source, fetches one complete snapshot, validates it, and renders:
+`web/` is a dependency-light multi-page Vite application. The node entry
+discovers the configured sources, fetches one complete snapshot, validates it,
+and renders:
 
 - a health and freshness summary;
 - a primary Canvas classification terrain with compatible, indeterminate,
@@ -419,12 +452,33 @@ matches the visible transaction. Unrelated classification progress can
 therefore coexist with an open inspector without attaching changed evidence to
 a stale terrain tile.
 
-The service defaults to a five-minute membership interval. A separate
-classification loop means policy work does not lengthen a membership poll that
-fits within that interval. The interval uses delayed missed ticks, so an
-overrunning membership request delays the next start instead of creating
-catch-up polls. Production cadence is an operational capacity choice based on
-measured response bytes, transfer time, node work, and required freshness, not
+The separate comparison entry discovers sources and requires two with complete
+snapshots. It fetches both ordinary source-scoped responses concurrently,
+validates each independently, then merge-joins their txid-sorted transaction
+vectors in O(n+m) browser work. Each txid is placed exactly once into one of
+three symmetric regions: present in both sampled snapshots, observed only in
+the left snapshot, or observed only in the right snapshot. Common entries keep
+both source-local transactions, including both `wtxid` values and compact
+policy assessments.
+
+The comparison exposes collection windows, observation skew, chain-tip
+agreement, freshness, source-local exact and partial policy buckets,
+overlapping marginal rule filters, and on-demand detail. A differing witness
+variant is shown explicitly and never causes one source's assessment to replace
+the other's. Changing the source pair aborts obsolete full-snapshot and detail
+requests and still guards against late results. Selection-only paints reuse
+geometry keyed by comparison identity, viewport dimensions, and device pixel
+ratio. A region-scoped virtual listbox makes every transaction keyboard-
+reachable without creating one DOM element per glyph. The browser retains no
+combined server projection or comparison history.
+
+The service defaults to a five-minute membership-round interval. A bounded
+classification slice may finish before a due round takes the shared gate, but
+later slices cannot overtake that waiting round. The round then polls all
+sources before classification resumes. The interval uses delayed missed ticks,
+so an overrun delays the next round instead of creating catch-up polls.
+Production cadence is an operational capacity choice based on measured bytes,
+transfer time, node work, configured source count, and required freshness, not
 a live-data promise.
 
 ## Products kept separate
@@ -434,7 +488,7 @@ snapshot and is discarded when membership changes. Forensic archives,
 peer-observer events, rejection observations, and other retained evidence have
 different lifecycle and capacity needs and must remain a separate system.
 
-Multi-node comparison is also a separate product surface. It may reuse the
-snapshot model and collection code, but each source remains independent and
-comparison is derived from complete snapshots. Absence from a source is not
-evidence of rejection, filtering, or relay causality.
+Multi-node comparison is a separate browser product surface over the same
+source-scoped current-state API. Each source remains independent and comparison
+is derived only from two complete snapshots. Absence from a source is not
+evidence of rejection, filtering, relative permissiveness, or relay causality.

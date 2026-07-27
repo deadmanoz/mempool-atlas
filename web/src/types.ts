@@ -48,6 +48,9 @@ export interface MempoolTransaction {
 export interface MempoolSnapshot {
   source_id: string;
   source_label: string;
+  collection_started_at_ms: number;
+  collection_completed_at_ms: number;
+  collection_duration_ms: number;
   observed_at_ms: number;
   classification_revision: number;
   chain_tip: ChainTip;

@@ -38,9 +38,11 @@ const MAX_CONFIRMED_RESPONSE_BYTES_PER_SLICE: usize = 256 * 1024 * 1024;
 const MAX_UNIQUE_PREVOUTS_PER_SLICE: usize = 65_536;
 const MAX_FACT_ATTEMPTS_PER_SOURCE_PER_WINDOW: u8 = 2;
 // Pending fact scripts survive across resolver waves, unlike decoded RPC
-// envelopes. Keep that retained working set independently bounded. An
+// envelopes. Keep that retained working set independently bounded. This is
+// the absolute per-source ceiling; a source configured with a smaller
+// auxiliary-cache budget uses that smaller value for pending scripts too. An
 // individual accepted raw transaction may exceed the fact-count target, but
-// its script facts still cannot exceed this byte ceiling.
+// its script facts still cannot exceed the effective byte ceiling.
 const MAX_PENDING_SCRIPT_BYTES: usize = MAX_CONFIRMED_RESPONSE_BYTES_PER_SLICE;
 const MAX_AUXILIARY_CACHE_BYTES: usize = 512 * 1024 * 1024;
 const ESTIMATED_JSON_BYTES_PER_RESPONSE: usize = 512;
@@ -97,12 +99,12 @@ struct ResolverLimits {
 }
 
 impl ResolverLimits {
-    fn production() -> Self {
+    fn production(max_auxiliary_cache_bytes: usize) -> Self {
         Self {
             max_parent_transactions_per_wave: MAX_TRANSACTIONS_PER_SLICE,
             max_confirmed_prevouts_per_wave: maximum_confirmed_prevouts_per_slice(),
             max_unique_prevouts_per_window: MAX_UNIQUE_PREVOUTS_PER_SLICE,
-            max_pending_script_bytes: MAX_PENDING_SCRIPT_BYTES,
+            max_pending_script_bytes: MAX_PENDING_SCRIPT_BYTES.min(max_auxiliary_cache_bytes),
         }
     }
 }
@@ -134,7 +136,7 @@ impl PolicyEnricher {
                 limits.max_auxiliary_cache_bytes,
             ))),
             limits,
-            resolver_limits: ResolverLimits::production(),
+            resolver_limits: ResolverLimits::production(limits.max_auxiliary_cache_bytes),
         })
     }
 
@@ -4046,11 +4048,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn auxiliary_cache_never_exceeds_its_admission_limit() {
         let transaction = transaction();
+        let cache_limit = estimated_script_bytes(&transaction.output[0].script_pubkey);
         let (fixture, address, server) =
             start_rpc_fixture(RpcFixture::new([transaction.clone()])).await;
         let enricher = test_enricher_with_limits(
             address,
-            PolicyLimits::new(1, 1, 1).expect("tiny cache limit"),
+            PolicyLimits::new(1, 1, cache_limit).expect("one-script cache limit"),
         );
         let membership = MempoolSnapshot::new(
             "core".to_owned(),
@@ -4071,13 +4074,16 @@ mod tests {
         assert_eq!(report.newly_classified, 1);
         let generation = enricher.current_generation().expect("current generation");
         {
+            let coordinator = enricher.coordinator();
             let work = generation.work();
             assert_eq!(work.classifications.len(), 1);
-            assert!(work.outputs.is_empty());
             assert!(work.pending.is_none());
-            assert!(work.output_cache_bytes <= 1);
+            assert!(
+                work.output_cache_bytes
+                    .saturating_add(coordinator.confirmed_cache.estimated_bytes)
+                    <= cache_limit
+            );
         }
-        assert!(enricher.coordinator().confirmed_cache.estimated_bytes <= 1);
         assert!(!fixture.fixture.lock().await.calls.is_empty());
     }
 
@@ -4090,7 +4096,14 @@ mod tests {
         let pending_limit = estimated_script_bytes(&script) - 1;
         let (fixture, address, server) =
             start_rpc_fixture(RpcFixture::new([transaction.clone()])).await;
-        let enricher = test_enricher(address).with_test_pending_script_limit(pending_limit);
+        let enricher = test_enricher_with_limits(
+            address,
+            PolicyLimits::new(10, 4, pending_limit).expect("small source cache budget"),
+        );
+        assert_eq!(
+            enricher.resolver_limits.max_pending_script_bytes,
+            pending_limit
+        );
         let initial = enricher
             .install_snapshot(test_snapshot(1, &[transaction]))
             .expect("generation");
@@ -4340,7 +4353,7 @@ mod tests {
         let script_bytes = estimated_script_bytes(&script);
         let limits = ResolverLimits {
             max_pending_script_bytes: script_bytes,
-            ..ResolverLimits::production()
+            ..ResolverLimits::production(MAX_PENDING_SCRIPT_BYTES)
         };
         let mut pending = PendingSlice::new(
             vec![(expected(&survivor), survivor), (expected(&victim), victim)],
@@ -4416,7 +4429,7 @@ mod tests {
         );
         let limits = ResolverLimits {
             max_pending_script_bytes: estimated_script_bytes(&transient_script),
-            ..ResolverLimits::production()
+            ..ResolverLimits::production(MAX_PENDING_SCRIPT_BYTES)
         };
         let mut pending = PendingSlice::new(
             vec![
@@ -5062,6 +5075,41 @@ mod tests {
         assert!(PolicyLimits::new(2_048, 4, 256 * 1024 * 1024).is_ok());
         assert!(PolicyLimits::new(MAX_TRANSACTIONS_PER_SLICE, 1, 1).is_ok());
         assert!(PolicyLimits::new(MAX_TRANSACTIONS_PER_SLICE + 1, 1, 1).is_err());
+    }
+
+    #[test]
+    fn small_source_cache_budget_also_caps_pending_scripts() {
+        let budget = 64 * 1024;
+        let limits = PolicyLimits::new(1, 1, budget).expect("small source budget");
+        let enricher = PolicyEnricher::new(
+            "http://127.0.0.1:1/",
+            "atlas".to_owned(),
+            "secret".to_owned(),
+            limits,
+        )
+        .expect("enricher");
+
+        assert_eq!(enricher.limits.max_auxiliary_cache_bytes, budget);
+        assert_eq!(enricher.resolver_limits.max_pending_script_bytes, budget);
+    }
+
+    #[test]
+    fn production_cache_budget_preserves_the_256_mib_pending_ceiling() {
+        let budget = 256 * 1024 * 1024;
+        let limits = PolicyLimits::new(2_048, 4, budget).expect("production limits");
+        let enricher = PolicyEnricher::new(
+            "http://127.0.0.1:1/",
+            "atlas".to_owned(),
+            "secret".to_owned(),
+            limits,
+        )
+        .expect("enricher");
+
+        assert_eq!(enricher.limits.max_auxiliary_cache_bytes, budget);
+        assert_eq!(
+            enricher.resolver_limits.max_pending_script_bytes,
+            MAX_PENDING_SCRIPT_BYTES
+        );
     }
 
     #[test]

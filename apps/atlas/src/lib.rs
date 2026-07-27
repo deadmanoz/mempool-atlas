@@ -13,4 +13,7 @@ pub use model::{
 };
 pub use policy::{PolicyEnricher, PolicyError, PolicyLimits};
 pub use rpc::{RpcClient, RpcError};
-pub use runtime::{SourceRegistry, SourceRuntime, TransactionLookup};
+pub use runtime::{
+    AtlasRuntime, AtlasSource, MAX_CONFIGURED_SOURCES, SourceRegistry, SourceRuntime,
+    TransactionLookup,
+};

@@ -1,52 +1,87 @@
 # Atlas runtime
 
-The `mempool-atlas` binary runs one fixed-interval membership loop, one
-current-generation classification loop, one in-memory source runtime, and one
-loopback HTTP listener on the presentation host. The current snapshot,
-classification state, auxiliary script cache, and transaction-detail map are
-memory only. The process stores no application data on disk.
+The `mempool-atlas` binary runs one fixed-interval membership-round loop, one
+fair classification loop, one in-memory runtime per configured source, and one
+loopback HTTP listener on the presentation host. One service-wide gate admits
+all membership and classification RPC work. Current snapshots, classification
+state, auxiliary script caches, and transaction-detail maps are memory only.
+The process stores no application data on disk.
 
 [ADR 0005](../docs/adr/0005-resolve-policy-facts-before-evaluation.md) is the
 authoritative decision for the pending fact resolver, explicit-null semantics,
 positive prevout cache, and P2SH evaluation. It supersedes ADR 0003's
 attempt-once classification details. [ADR 0006](../docs/adr/0006-own-policy-json-rpc-wire-boundary.md)
 defines the classification transport and HTTP framing contract.
+[ADR 0007](../docs/adr/0007-browser-derived-snapshot-comparison.md) defines
+bounded multi-source scheduling and browser-derived comparison.
 
 ## Startup
 
-`main.rs` parses one source configuration, rejects a non-loopback bind, reads a
-one-line RPC password file, constructs separate membership and classification
-RPC clients plus `SourceRuntime`, then starts the runtime task and Axum server.
-Both RPC clients use the same configured URL and dedicated credential.
-`rpc.rs` owns the `corepc-client` membership path. `policy_rpc.rs` owns the
-separate bounded classification wire path.
+`main.rs` rejects a non-loopback bind and parses a root-controlled JSON file
+containing one to four source records. The file is capped at 64 KiB, rejects
+unknown fields and duplicate source IDs, and names credentials rather than
+containing passwords. Atlas reads each one-line password from
+`ATLAS_CREDENTIALS_DIRECTORY`, constructs separate membership and
+classification RPC clients plus a `SourceRuntime` for every source, divides one
+total auxiliary-cache budget evenly among them, then starts the coordinator and
+Axum server. Each source's two RPC clients use the same configured URL,
+username, and dedicated credential. `rpc.rs` owns the `corepc-client`
+membership path. `policy_rpc.rs` owns the separate bounded classification wire
+path.
 
 The process can serve `/healthz` and static files before a snapshot exists.
 `/readyz` returns unavailable until the first complete poll succeeds.
 
 ## Complete membership sequence
 
-Each poll runs the blocking membership RPC and decoding in one `spawn_blocking`
-task:
+Each source turn runs the blocking membership RPC and decoding in one
+`spawn_blocking` task:
 
-1. Call `getmempoolinfo`.
-2. Reject a reported size above `ATLAS_MAX_MEMPOOL_ENTRIES`.
+1. Record the collection start and call `getblockchaininfo` for the starting
+   height and best block hash.
+2. Call `getmempoolinfo` and reject a reported size above
+   `ATLAS_MAX_MEMPOOL_ENTRIES`.
 3. Call `getrawmempool true`.
 4. Decode `wtxid`, `vsize`, `time`, and `fees.base` for every returned `txid`.
 5. Enforce the entry limit again while decoding.
 6. Validate and canonicalize every `txid` and `wtxid`, reject duplicates, and
    convert BTC fees exactly to integer satoshis.
 7. Sort transactions by txid.
-8. Call `getblockchaininfo` and validate the best block hash.
-9. Record the completed membership observation time.
+8. Call `getblockchaininfo` again and require the ending height and best block
+   hash to match the start.
+9. Record collection completion and derive the exact duration. The public
+   `observed_at_ms` is this completion time.
 
-`getmempoolinfo` and `getrawmempool` are not atomic. Both size checks are
-required. Any failure in this sequence rejects the poll.
+`getmempoolinfo` and `getrawmempool` are not atomic. Both size checks and the
+stable-tip bracket are required. Any failure in this sequence rejects only that
+source's poll.
 
 The complete membership path uses synchronous `corepc-client` 0.8. Its
 transport buffers the JSON-RPC response and has a fixed 15-second timeout.
 Policy work does not run in this task and cannot delay publication of a
 successfully validated membership.
+
+## Multi-source coordination
+
+`AtlasRuntime` owns the configured sources in file order, one Tokio semaphore,
+one classification wake-up, and a pending-source set. A membership round
+acquires the semaphore for the whole round and attempts every source
+sequentially. A source failure records a stable public error and preserves that
+source's last good snapshot; later sources are still attempted. After the round
+releases the gate, only sources that published a new generation are inserted
+into the classification workset.
+
+The classifier repeatedly merges newly pending sources into its active set,
+selects the next source from a rotating cursor, acquires the same semaphore for
+one bounded resolver slice, and releases it before rotating. A source remains
+active only while its drain result is `Continue`. This makes late arrivals and
+wraparound fair, keeps membership and classification RPC non-overlapping, and
+does not rearm a paused generation merely because another source published.
+
+A due membership round may wait for the currently running bounded
+classification slice. Because the semaphore queues waiters, subsequent slices
+cannot overtake that round. The membership round then polls all configured
+sources before classification resumes.
 
 ## Membership generation installation
 
@@ -72,10 +107,10 @@ same-`txid` witness result is attached.
 
 ## Continuous bounded classification
 
-One wake-up drains bounded candidate and script-fact waves for the installed
-generation. The generation owns verified pending raw transactions and their
-unresolved facts, so crossing a wave boundary does not restart work or refetch
-a successfully admitted candidate:
+A scheduled source turn advances bounded candidate and script-fact waves for
+that source's installed generation. The generation owns verified pending raw
+transactions and their unresolved facts, so crossing a wave boundary does not
+restart work or refetch a successfully admitted candidate:
 
 1. Admit up to `ATLAS_CLASSIFICATION_SLICE_ENTRIES` current witness variants,
    2,048 by default. Configuration accepts one through the hard 8,192-entry
@@ -177,11 +212,11 @@ Each resolver call returns an explicit `PolicyDrain` disposition:
 - `Continue` means eligible work remains and no systemic circuit breaker fired.
   The runtime yields and runs another bounded wave. Fact-only progress does not
   publish a new revision.
-- `Complete` means no eligible work remains for the current generation. The
-  classification loop waits for the next membership wake-up.
+- `Complete` means no eligible work remains for the current generation. That
+  source leaves the active workset until it publishes replacement membership.
 - `Paused` means a systemic RPC failure tripped the generation circuit breaker.
-  The loop waits for replacement membership instead of spinning on the same
-  failure.
+  That source leaves the active workset until its own replacement membership
+  instead of spinning on the same failure.
 - `Stale` means a newer membership generation superseded the work. In-flight
   calls may finish, but their results cannot update current state or the shared
   positive script cache.
@@ -222,8 +257,9 @@ only when its generation object is still the coordinator's current generation.
 `SourceRuntime` separately accepts policy publication only when its generation
 matches the published membership and its revision strictly advances the
 runtime's current revision. Old in-flight work is therefore discarded even if
-membership changes between policy installation and runtime publication. A stale
-classification loop stops draining and waits for the new membership wake-up.
+membership changes between policy installation and runtime publication. Stale
+source work leaves the active classification workset and waits for that
+source's next successful membership generation.
 Raw and confirmed-prevout schedulers check generation identity before each
 replacement wave, so superseded work can finish already in-flight requests but
 cannot schedule further batches or downstream phases. Stale work cannot admit
@@ -248,12 +284,13 @@ response content cannot leak through the website. Source availability is:
 | present | absent | `ready` |
 | present | present | `stale` |
 
-Membership uses a Tokio interval with `Delay` missed-tick behaviour. Polls
-start at the configured `ATLAS_POLL_SECONDS` cadence while each membership poll
-fits inside the interval. A membership overrun delays the next tick instead of
-running catch-up polls. Classification runs in the other loop and does not
-lengthen this start-to-start cadence. Shutdown aborts the combined runtime task
-after the HTTP server finishes graceful shutdown.
+Membership rounds use a Tokio interval with `Delay` missed-tick behaviour. A
+round starts at the configured `ATLAS_POLL_SECONDS` cadence while the previous
+round and any wait for the shared gate fit inside the interval. An overrun
+delays the next tick instead of running catch-up rounds. Classification runs in
+the other loop but releases the gate after every bounded source slice. Shutdown
+aborts the combined runtime task after the HTTP server finishes graceful
+shutdown.
 
 ## Read API
 
@@ -278,6 +315,16 @@ rejects an older server detail revision, and accepts a later revision only when
 the transaction's compact assessment exactly matches the visible snapshot.
 This allows unrelated classification progress without attaching changed rule
 evidence to a stale terrain tile.
+
+The static site has a node entry at `/` and a comparison entry at `/compare/`.
+Comparison has no server projection endpoint. It fetches two existing source
+snapshot responses, validates them independently, and merge-joins their sorted
+transaction vectors in the browser. It keeps common entries source-local,
+aborts obsolete pair and detail requests after selection changes, and still
+rejects late results. Selection-only Canvas paints reuse cached geometry, while
+a single virtual listbox option exposes every region transaction to bounded
+keyboard navigation without a transaction-sized DOM. The browser stores no
+history.
 
 After each membership, policy-progress, or failure transition, Atlas serializes
 the complete snapshot response once on a blocking worker. It atomically stores
@@ -306,17 +353,18 @@ Wave estimates limit scheduling, while the production 2 GiB memory cgroup
 remains the hard boundary for concurrent classification bodies, the membership
 buffer, and total process memory.
 
-`ATLAS_CLASSIFICATION_CACHE_MIB` is an auxiliary script-cache admission budget,
-not a total process-memory cap. It defaults to 256 MiB and accepts at most
-512 MiB. The implementation estimates each cached current-transaction output
-set or confirmed prevout script as its script bytes plus fixed bookkeeping,
-then declines or evicts entries to remain within the budget. Positive confirmed
-scripts may survive generation replacement, while null and failed lookups are
-never cached. Retained pending scripts have a separate 256 MiB ceiling.
-Unresolved fact indexes, pending raw transactions, classifications, the reader
-detail map, concurrent RPC responses, the membership buffer, serialized
-response, allocator overhead, and briefly overlapping reader state remain
-outside these budgets.
+`ATLAS_CLASSIFICATION_TOTAL_CACHE_MIB` is a service-wide auxiliary script-cache
+admission budget, not a total process-memory cap. It defaults to 256 MiB,
+accepts at most 512 MiB, and is divided evenly among configured sources. The
+implementation estimates each cached current-transaction output set or
+confirmed prevout script as its script bytes plus fixed bookkeeping, then
+declines or evicts entries to keep that source within its share. Positive
+confirmed scripts may survive generation replacement, while null and failed
+lookups are never cached. Each source's retained pending scripts have a
+separate ceiling equal to the smaller of its share and 256 MiB. Unresolved fact
+indexes, pending raw transactions, classifications, reader detail maps,
+concurrent RPC responses, membership buffers, serialized responses, allocator
+overhead, and briefly overlapping reader state remain outside these budgets.
 
 The process always caps the `corepc` log target at debug even when a broader
 `RUST_LOG` enables trace, because the dependency's trace record contains the
@@ -326,21 +374,21 @@ complete verbose mempool response.
 
 | Variable | Required | Default | Limit or purpose |
 | --- | --- | --- | --- |
-| `ATLAS_SOURCE_ID` | yes | none | Stable source identity |
-| `ATLAS_SOURCE_LABEL` | no | source ID | Reader-visible label |
-| `ATLAS_RPC_URL` | yes | none | Existing private RPC proxy |
-| `ATLAS_RPC_USERNAME` | no | `atlas` | Dedicated RPC identity |
-| `ATLAS_RPC_PASSWORD_FILE` | yes | none | One-line credential file |
-| `ATLAS_POLL_SECONDS` | no | `300` | Nonzero membership interval |
+| `ATLAS_SOURCES_FILE` | yes | none | At most 64 KiB of JSON containing one to four source records |
+| `ATLAS_CREDENTIALS_DIRECTORY` | yes | none | Directory containing source-named one-line password files |
+| `ATLAS_POLL_SECONDS` | no | `300` | Nonzero membership-round interval |
 | `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `200000` | At most `200000` |
 | `ATLAS_CLASSIFICATION_SLICE_ENTRIES` | no | `2048` | 1 through `8192` pending candidates |
 | `ATLAS_CLASSIFICATION_RPC_LANES` | no | `4` | 1 through `8` |
-| `ATLAS_CLASSIFICATION_CACHE_MIB` | no | `256` | 1 through `512` MiB |
+| `ATLAS_CLASSIFICATION_TOTAL_CACHE_MIB` | no | `256` | 1 through `512` MiB divided among sources |
 | `ATLAS_BIND` | no | `127.0.0.1:3101` | Loopback only |
 | `ATLAS_WEB_ROOT` | no | `web/dist` | Built static website |
 
-The RPC URL points at the existing private WireGuard-only node proxy. The
-binary has no WireGuard-specific code and no public RPC fallback.
+Each source record contains `source_id`, `source_label`, `rpc_url`,
+`rpc_username`, and `rpc_password_credential`. The credential field must be a
+safe file name, not a path. Each RPC URL points at that source's existing
+private WireGuard-only node proxy. The binary has no WireGuard-specific code
+and no public RPC fallback.
 Deployment must whitelist the Atlas RPC identity to exactly
 `getmempoolinfo`, `getrawmempool`, `getblockchaininfo`, `getrawtransaction`,
 and `gettxout`. The proxy path must stream the response without writing it
@@ -360,7 +408,8 @@ additional sources.
 
 ## Restart and recovery
 
-An ordinary restart loses the in-memory snapshot, generation state,
-classification and auxiliary caches, and detail map, then begins collecting
-again. No migrations, backups, checkpoints, replays, or recovery commands
-exist. Historical data and forensic archives are outside this process.
+An ordinary restart loses every in-memory snapshot, generation state,
+classification and auxiliary cache, and detail map, then begins collecting
+again in configured source order. No migrations, backups, checkpoints, replays,
+or recovery commands exist. Historical data and forensic archives are outside
+this process.
