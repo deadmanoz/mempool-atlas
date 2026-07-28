@@ -19,7 +19,7 @@
             <p>Rule Terrain</p>
             <nav class="product-nav" aria-label="Mempool Atlas products">
               <a href="./" aria-current="page">Node</a>
-              <a href="./compare/">Compare</a>
+              <a id="compare-link" href="./compare/">Compare</a>
             </nav>
           </div>
         </div>
@@ -63,6 +63,31 @@
         <span class="status-light" aria-hidden="true"></span>
         <strong id="status-title">Connecting to Atlas</strong>
         <span id="status-detail">Loading the configured source.</span>
+      </section>
+
+      <section class="exploration-bar" aria-label="Explore current snapshot">
+        <label class="exploration-field">
+          <span>Node</span>
+          <select id="source-select" aria-label="Node source"></select>
+        </label>
+        <form id="transaction-search" class="transaction-search" role="search">
+          <label for="transaction-search-input">Transaction</label>
+          <div class="transaction-search-row">
+            <input
+              id="transaction-search-input"
+              name="txid"
+              type="search"
+              inputmode="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste a transaction ID"
+            />
+            <button type="submit">Find</button>
+          </div>
+          <span id="transaction-search-status" aria-live="polite"
+            >Search this snapshot by txid.</span
+          >
+        </form>
       </section>
 
       <section class="lens-toolbar" aria-label="View controls">

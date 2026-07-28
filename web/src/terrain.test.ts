@@ -5,12 +5,14 @@ import {
   createTerrainLayout,
   hitTestTerrain,
   incompleteViolationPopulation,
+  paintTerrain,
   ruleMask,
   rulePopulation,
   rulesForMask,
   signatureLabel,
   signaturePopulations,
   statusPopulation,
+  terrainRegionKey,
   violationSignature,
 } from "./terrain";
 import type { Bip110Assessment, MempoolTransaction, RuleId } from "./types";
@@ -142,6 +144,43 @@ describe("rule signatures", () => {
       keys.add(signature?.key ?? "");
     }
     expect(keys).toHaveLength(127);
+  });
+});
+
+describe("terrainRegionKey", () => {
+  it("maps every assessment shape to its canonical terrain region", () => {
+    expect(terrainRegionKey(transaction(1))).toBe("compatible");
+    expect(terrainRegionKey(transaction(2, { bip110: null }))).toBe(
+      "unclassified",
+    );
+    expect(
+      terrainRegionKey(
+        transaction(3, {
+          bip110: {
+            status: "indeterminate",
+            primary_rule: null,
+            violated_rules: [],
+            unknown_rules: ["undefined_version"],
+          },
+        }),
+      ),
+    ).toBe("indeterminate");
+    expect(
+      terrainRegionKey(
+        transaction(4, {
+          bip110: violating(["element_size", "tapscript_op_if"]),
+        }),
+      ),
+    ).toBe("exact:42");
+    expect(
+      terrainRegionKey(
+        transaction(5, {
+          bip110: violating("element_size", {
+            unknown: ["tapscript_op_if"],
+          }),
+        }),
+      ),
+    ).toBe("partial:02:40");
   });
 });
 
@@ -410,6 +449,60 @@ describe("createTerrainLayout", () => {
       kind: "region",
       region: { key: "exact:42" },
     });
+  });
+
+  it("outlines only the selected transaction glyph", () => {
+    const transactions = [transaction(1), transaction(2)];
+    const layout = createTerrainLayout(transactions, 900, 600, "count");
+    const operations: string[] = [];
+    const strokeCalls: Array<{
+      style: string;
+      lineWidth: number;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }> = [];
+    const contextState = {
+      fillStyle: "",
+      strokeStyle: "",
+      lineWidth: 1,
+      globalAlpha: 1,
+      clearRect: () => undefined,
+      fillRect: () => operations.push("fill"),
+      strokeRect(x: number, y: number, width: number, height: number): void {
+        operations.push(`stroke:${contextState.strokeStyle}`);
+        strokeCalls.push({
+          style: contextState.strokeStyle,
+          lineWidth: contextState.lineWidth,
+          x,
+          y,
+          width,
+          height,
+        });
+      },
+    };
+    const context = contextState as unknown as CanvasRenderingContext2D;
+
+    paintTerrain(
+      context,
+      layout,
+      { kind: "region", regionKey: "compatible" },
+      transactions[0]?.txid,
+    );
+
+    const selectedGlyph = layout.glyphs.find(
+      ({ txid }) => txid === transactions[0]?.txid,
+    );
+    expect(selectedGlyph).toBeDefined();
+    expect(strokeCalls.filter(({ style }) => style === "#f7ff6a")).toEqual([
+      {
+        style: "#f7ff6a",
+        lineWidth: 2.5,
+        ...selectedGlyph?.rect,
+      },
+    ]);
+    expect(operations.at(-1)).toBe("stroke:#f7ff6a");
   });
 
   it("keeps one Canvas glyph per entry without theoretical bucket allocation", () => {

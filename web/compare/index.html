@@ -88,6 +88,28 @@
             <h3>Waiting</h3>
           </article>
         </div>
+        <form
+          id="comparison-transaction-search"
+          class="transaction-search comparison-transaction-search"
+          role="search"
+        >
+          <label for="comparison-transaction-search-input">Transaction</label>
+          <div class="transaction-search-row">
+            <input
+              id="comparison-transaction-search-input"
+              name="txid"
+              type="search"
+              inputmode="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Find a txid in either snapshot"
+            />
+            <button type="submit">Find</button>
+          </div>
+          <span id="comparison-transaction-search-status" aria-live="polite"
+            >Search the current membership union.</span
+          >
+        </form>
         <div id="sampling-panel" class="sampling-panel" hidden>
           <div class="sampling-heading">
             <div>

@@ -10,6 +10,7 @@ import {
   filterTransactions,
   type MempoolFilters,
 } from "./filters";
+import { RequestLifecycle } from "./comparison-lifecycle";
 import { formatMembershipAge } from "./membership-table";
 import { renderSwimView } from "./swim-view";
 import {
@@ -21,6 +22,7 @@ import {
   signatureLabel,
   signaturePopulation,
   statusPopulation,
+  terrainRegionKey,
   terrainRule,
   unknownRulesLabel,
   type TerrainLayout,
@@ -31,6 +33,11 @@ import {
   type ViolationSignature,
   type ViolationSignatureKey,
 } from "./terrain";
+import {
+  parseNodeViewState,
+  serializeNodeViewState,
+  type NodeViewState,
+} from "./view-state";
 import "./styles.css";
 import type {
   Bip110Assessment,
@@ -39,6 +46,7 @@ import type {
   RuleId,
   RuleAssessment,
   SourceSnapshotResponse,
+  SourceSummary,
   TransactionDetailResponse,
 } from "./types";
 
@@ -54,6 +62,16 @@ const pageStatus = requiredElement<HTMLElement>("page-status");
 const statusTitle = requiredElement<HTMLElement>("status-title");
 const statusDetail = requiredElement<HTMLElement>("status-detail");
 const refreshButton = requiredElement<HTMLButtonElement>("refresh");
+const compareLink = requiredElement<HTMLAnchorElement>("compare-link");
+const sourceSelect = requiredElement<HTMLSelectElement>("source-select");
+const transactionSearch =
+  requiredElement<HTMLFormElement>("transaction-search");
+const transactionSearchInput = requiredElement<HTMLInputElement>(
+  "transaction-search-input",
+);
+const transactionSearchStatus = requiredElement<HTMLElement>(
+  "transaction-search-status",
+);
 const sourceLabel = requiredElement<HTMLElement>("source-label");
 const sourceId = requiredElement<HTMLElement>("source-id");
 const observedValue = requiredElement<HTMLElement>("observed-value");
@@ -117,6 +135,10 @@ const percentageFormat = new Intl.NumberFormat(undefined, {
 type Lens = "terrain" | "fee-age";
 type InspectorSelection = TerrainSelection;
 
+const initialViewState = parseNodeViewState(window.location.search);
+const snapshotLifecycle = new RequestLifecycle();
+
+let configuredSources: SourceSummary[] = [];
 let selectedSourceId: string | null = null;
 let currentSnapshot: MempoolSnapshot | null = null;
 let transactionById = new Map<string, MempoolTransaction>();
@@ -132,6 +154,7 @@ let pendingTerrainFrame: number | null = null;
 let pendingFeeAgeFrame: number | null = null;
 let detailSequence = 0;
 let selectedTransactionId: string | null = null;
+let nodeViewState: NodeViewState = initialViewState;
 
 const formatVsize = (value: number): string => {
   if (value >= 1_000_000_000) {
@@ -186,6 +209,38 @@ const selectionsMatch = (
     : left.regionKey ===
       (right as { kind: "region"; regionKey: TerrainRegionKey }).regionKey);
 
+const setTransactionSearchStatus = (
+  message: string,
+  state?: "found" | "absent" | "error",
+): void => {
+  transactionSearchStatus.textContent = message;
+  if (state === undefined) {
+    delete transactionSearchStatus.dataset.state;
+  } else {
+    transactionSearchStatus.dataset.state = state;
+  }
+};
+
+const updateCompareLink = (): void => {
+  const current = selectedSourceId;
+  const other = configuredSources.find(
+    ({ source_id: source }) => source !== current,
+  )?.source_id;
+  if (current === null || other === undefined) {
+    compareLink.href = "./compare/";
+    return;
+  }
+  const params = new URLSearchParams({ left: current, right: other });
+  compareLink.href = `./compare/?${params.toString()}`;
+};
+
+const replaceViewUrl = (): void => {
+  const query = serializeNodeViewState(nodeViewState);
+  const next = `${window.location.pathname}${query.length === 0 ? "" : `?${query}`}${window.location.hash}`;
+  window.history.replaceState(null, "", next);
+  updateCompareLink();
+};
+
 const readFilters = (): MempoolFilters => {
   const feeRate = Number.parseFloat(minimumFeeRate.value);
   const size = Number.parseInt(minimumVsize.value, 10);
@@ -197,9 +252,17 @@ const readFilters = (): MempoolFilters => {
   };
 };
 
-const clearDetail = (message: string): void => {
+const clearDetail = (
+  message: string,
+  clearAddressedTransaction = true,
+): void => {
   detailSequence += 1;
   selectedTransactionId = null;
+  if (clearAddressedTransaction) {
+    nodeViewState = { ...nodeViewState, txid: null };
+    transactionSearchInput.value = "";
+    setTransactionSearchStatus("Search this snapshot by txid.");
+  }
   detailStatus.textContent = message;
   detailTransaction.replaceChildren();
   detailRules.replaceChildren();
@@ -341,6 +404,28 @@ const renderTransactionDetail = (detail: TransactionDetailResponse): void => {
   detailRules.replaceChildren(...detail.rules.map(renderRuleDetail));
 };
 
+const showAbsentTransaction = (txid: string): void => {
+  detailSequence += 1;
+  nodeViewState = { ...nodeViewState, txid };
+  selectedTransactionId = null;
+  transactionSearchInput.value = txid;
+  setTransactionSearchStatus(
+    "This transaction is not present in this snapshot.",
+    "absent",
+  );
+  detailStatus.textContent = "Not present in this snapshot";
+  detailTransaction.replaceChildren(detailValue("txid", txid));
+  const message = document.createElement("p");
+  message.className = "detail-error";
+  message.textContent =
+    "Atlas did not observe this transaction in the selected node's current mempool snapshot.";
+  detailTransaction.append(message);
+  detailRules.replaceChildren();
+  renderSampleTable();
+  scheduleTerrainRender();
+  replaceViewUrl();
+};
+
 const loadTransactionDetail = async (
   transaction: MempoolTransaction,
 ): Promise<void> => {
@@ -349,14 +434,36 @@ const loadTransactionDetail = async (
     return;
   }
   const sequence = ++detailSequence;
+  const transactionSelection: InspectorSelection = {
+    kind: "region",
+    regionKey: terrainRegionKey(transaction),
+  };
+  const selectionChanged = !selectionsMatch(
+    selectedInspector,
+    transactionSelection,
+  );
+  selectedInspector = transactionSelection;
   selectedTransactionId = transaction.txid;
+  nodeViewState = {
+    source: selectedSourceId,
+    selection: transactionSelection,
+    txid: transaction.txid,
+  };
+  transactionSearchInput.value = transaction.txid;
+  setTransactionSearchStatus("Present in this snapshot.", "found");
   detailStatus.textContent = "Loading rule evidence…";
   detailTransaction.replaceChildren(
     detailValue("txid", transaction.txid),
     detailValue("wtxid", transaction.wtxid),
   );
   detailRules.replaceChildren();
-  renderSampleTable();
+  if (selectionChanged) {
+    renderInspector();
+  } else {
+    renderSampleTable();
+  }
+  scheduleTerrainRender();
+  replaceViewUrl();
   try {
     const detail = await fetchTransactionDetail(
       snapshot.source_id,
@@ -426,11 +533,23 @@ const renderSampleTable = (): void => {
     return;
   }
   const population = populationForSelection(currentSnapshot, selectedInspector);
-  const sample = population?.transactions.slice(0, 8) ?? [];
+  const largest = population?.transactions.slice(0, 8) ?? [];
+  const selected =
+    population === null || selectedTransactionId === null
+      ? undefined
+      : population.transactions.find(
+          ({ txid }) => txid === selectedTransactionId,
+        );
+  const pinsSelected =
+    selected !== undefined &&
+    !largest.some(({ txid }) => txid === selected.txid);
+  const sample = pinsSelected ? [selected, ...largest.slice(0, 7)] : largest;
   sampleSummary.textContent =
     population === null || population.count === 0
       ? "No matches"
-      : `Largest ${countFormat.format(sample.length)} of ${countFormat.format(population.count)}`;
+      : pinsSelected
+        ? `Selected + ${countFormat.format(sample.length - 1)} largest of ${countFormat.format(population.count)}`
+        : `Largest ${countFormat.format(sample.length)} of ${countFormat.format(population.count)}`;
 
   const rows = sample.map((transaction) => {
     const row = document.createElement("tr");
@@ -761,6 +880,7 @@ const renderTerrainFrame = (): void => {
     terrainMode,
     selectedInspector,
     terrainLayout,
+    selectedTransactionId,
   );
   renderTerrainRegions(terrainLayout);
   terrainCanvas.setAttribute(
@@ -868,11 +988,13 @@ const selectInspector = (
 ): void => {
   const changed = !selectionsMatch(selectedInspector, inspector);
   selectedInspector = inspector;
+  nodeViewState = { ...nodeViewState, selection: inspector };
   if (changed) {
     clearDetail("Choose a sample");
   }
   renderInspector();
   scheduleTerrainRender();
+  replaceViewUrl();
   if (loadSample && currentSnapshot !== null) {
     const first = populationForSelection(currentSnapshot, selectedInspector)
       ?.transactions[0];
@@ -901,11 +1023,15 @@ const renderClassification = (snapshot: MempoolSnapshot): void => {
   terrainSummary.textContent = `${snapshot.bip110_summary.evaluator_id} ${snapshot.bip110_summary.evaluator_version} classified this source snapshot. Each transaction appears once. Complete violations use exact rule-combination buckets; proven violations with unresolved checks remain separate. Bucket frames preserve readability, while tile area uses the selected metric.`;
 };
 
-const renderResponse = (response: SourceSnapshotResponse): void => {
+const renderResponse = (
+  response: SourceSnapshotResponse,
+  requestedState: NodeViewState,
+): void => {
   const { source, snapshot } = response;
   sourceLabel.textContent = source.source_label;
   sourceId.textContent = source.source_id;
   pageStatus.dataset.state = source.availability;
+  sourceSelect.value = source.source_id;
 
   if (snapshot === null) {
     currentSnapshot = null;
@@ -927,7 +1053,27 @@ const renderResponse = (response: SourceSnapshotResponse): void => {
     coverageIncomplete.textContent = "0";
     coverageUnclassified.textContent = "0";
     filterSummary.textContent = "No snapshot loaded.";
-    clearDetail("Choose a sample");
+    selectedInspector =
+      requestedState.selection ??
+      ({ kind: "rule", rule: "element_size" } as const);
+    nodeViewState = {
+      source: source.source_id,
+      selection: requestedState.selection,
+      txid: requestedState.txid,
+    };
+    transactionSearchInput.value = requestedState.txid ?? "";
+    clearDetail(
+      requestedState.txid === null
+        ? "Choose a sample"
+        : "No snapshot available",
+      false,
+    );
+    setTransactionSearchStatus(
+      requestedState.txid === null
+        ? "Search this snapshot by txid."
+        : "No snapshot is available to search yet.",
+      requestedState.txid === null ? undefined : "absent",
+    );
     renderInspector();
     if (source.availability === "error") {
       statusTitle.textContent = "Node snapshot unavailable";
@@ -941,6 +1087,7 @@ const renderResponse = (response: SourceSnapshotResponse): void => {
         "The first complete mempool snapshot is being collected.";
       feeAgeEmpty.textContent = terrainEmpty.textContent;
     }
+    replaceViewUrl();
     return;
   }
 
@@ -959,8 +1106,25 @@ const renderResponse = (response: SourceSnapshotResponse): void => {
   terrainEmpty.hidden = snapshot.transaction_count !== 0;
   terrainEmpty.textContent = "This snapshot contains an empty mempool.";
   const initialRule = chooseInitialRule(snapshot);
-  selectedInspector = { kind: "rule", rule: initialRule };
-  clearDetail("Choose a sample");
+  const requestedTransaction =
+    requestedState.txid === null
+      ? undefined
+      : transactionById.get(requestedState.txid);
+  selectedInspector =
+    requestedTransaction !== undefined
+      ? {
+          kind: "region",
+          regionKey: terrainRegionKey(requestedTransaction),
+        }
+      : (requestedState.selection ?? { kind: "rule", rule: initialRule });
+  nodeViewState = {
+    source: source.source_id,
+    selection: selectedInspector,
+    txid: requestedState.txid,
+  };
+  transactionSearchInput.value = requestedState.txid ?? "";
+  clearDetail("Choose a sample", false);
+  setTransactionSearchStatus("Search this snapshot by txid.");
   renderClassification(snapshot);
   renderInspector();
   applyFilters();
@@ -973,44 +1137,174 @@ const renderResponse = (response: SourceSnapshotResponse): void => {
     statusDetail.textContent = `Observed ${new Date(snapshot.observed_at_ms).toLocaleString()}. Browser refresh does not trigger a node poll.`;
   }
   scheduleTerrainRender();
+  replaceViewUrl();
 
-  const first = rulePopulation(snapshot.transactions, initialRule)
-    .transactions[0];
-  if (first !== undefined) {
-    void loadTransactionDetail(first);
+  if (requestedTransaction !== undefined) {
+    void loadTransactionDetail(requestedTransaction);
+  } else if (requestedState.txid !== null) {
+    showAbsentTransaction(requestedState.txid);
   }
 };
 
-const chooseSource = async (): Promise<string> => {
+const discoverSources = async (): Promise<void> => {
   const response = await fetchSources();
   if (response.sources.length === 0) {
     throw new Error("Atlas has no configured Bitcoin source");
   }
-  const requested = new URLSearchParams(window.location.search).get("source");
-  if (
-    requested !== null &&
-    response.sources.some((source) => source.source_id === requested)
-  ) {
-    return requested;
+  configuredSources = response.sources;
+  const options = configuredSources.map((source) => {
+    const option = document.createElement("option");
+    option.value = source.source_id;
+    option.textContent = source.source_label;
+    return option;
+  });
+  sourceSelect.replaceChildren(...options);
+  selectedSourceId =
+    configuredSources.find(
+      ({ source_id: source }) => source === initialViewState.source,
+    )?.source_id ??
+    configuredSources[0]?.source_id ??
+    null;
+  if (selectedSourceId === null) {
+    throw new Error("Atlas has no configured Bitcoin source");
   }
-  return response.sources[0]?.source_id ?? "";
+  sourceSelect.value = selectedSourceId;
+  sourceSelect.disabled = configuredSources.length < 2;
+  updateCompareLink();
 };
 
 const loadSnapshot = async (): Promise<void> => {
+  const requestedSourceId = selectedSourceId;
+  if (requestedSourceId === null) {
+    return;
+  }
+  const ticket = snapshotLifecycle.begin();
   refreshButton.disabled = true;
   refreshButton.textContent = "Loading…";
   try {
-    selectedSourceId ??= await chooseSource();
-    renderResponse(await fetchSourceSnapshot(selectedSourceId));
+    const response = await fetchSourceSnapshot(
+      requestedSourceId,
+      ticket.signal,
+    );
+    if (
+      !snapshotLifecycle.isCurrent(ticket) ||
+      selectedSourceId !== requestedSourceId
+    ) {
+      return;
+    }
+    renderResponse(response, nodeViewState);
   } catch (error) {
+    if (!snapshotLifecycle.isCurrent(ticket)) {
+      return;
+    }
     pageStatus.dataset.state = "error";
     statusTitle.textContent = "Atlas website unavailable";
     statusDetail.textContent =
       error instanceof Error ? error.message : "Unable to load snapshot";
   } finally {
+    if (snapshotLifecycle.isCurrent(ticket)) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = "Refresh";
+    }
+  }
+};
+
+const initialize = async (): Promise<void> => {
+  refreshButton.disabled = true;
+  sourceSelect.disabled = true;
+  try {
+    await discoverSources();
+    nodeViewState = { ...nodeViewState, source: selectedSourceId };
+    selectedInspector =
+      nodeViewState.selection ??
+      ({ kind: "rule", rule: "element_size" } as const);
+    transactionSearchInput.value = nodeViewState.txid ?? "";
+    replaceViewUrl();
+    await loadSnapshot();
+  } catch (error) {
+    pageStatus.dataset.state = "error";
+    statusTitle.textContent = "Atlas website unavailable";
+    statusDetail.textContent =
+      error instanceof Error ? error.message : "Unable to load snapshot";
     refreshButton.disabled = false;
     refreshButton.textContent = "Refresh";
   }
+};
+
+const prepareForSourceLoad = (source: SourceSummary): void => {
+  nodeViewState = {
+    source: source.source_id,
+    selection: null,
+    txid: null,
+  };
+  currentSnapshot = null;
+  transactionById = new Map();
+  filteredTransactions = [];
+  terrainLayout = null;
+  terrainStage.hidden = true;
+  feeAgeStage.hidden = true;
+  terrainEmpty.hidden = false;
+  feeAgeEmpty.hidden = false;
+  terrainEmpty.textContent = "Loading this node's current snapshot.";
+  feeAgeEmpty.textContent = terrainEmpty.textContent;
+  sourceLabel.textContent = source.source_label;
+  sourceId.textContent = source.source_id;
+  observedValue.textContent = "Loading";
+  tipValue.textContent = "Loading";
+  transactionCount.textContent = "Loading";
+  totalVsize.textContent = "Loading";
+  compatibleCount.textContent = "0";
+  indeterminateCount.textContent = "0";
+  violatingCount.textContent = "0";
+  coverageComplete.textContent = "0";
+  coverageIncomplete.textContent = "0";
+  coverageUnclassified.textContent = "0";
+  filterSummary.textContent = "No snapshot loaded.";
+  selectedInspector = { kind: "rule", rule: "element_size" };
+  clearDetail("Choose a sample");
+  renderInspector();
+  pageStatus.dataset.state = "waiting";
+  statusTitle.textContent = "Loading node snapshot";
+  statusDetail.textContent = `Reading the latest complete snapshot for ${source.source_label}.`;
+  replaceViewUrl();
+};
+
+const searchForTransaction = (): void => {
+  const raw = transactionSearchInput.value.trim();
+  const params = new URLSearchParams({ txid: raw });
+  const txid = parseNodeViewState(params).txid;
+  if (txid === null) {
+    setTransactionSearchStatus(
+      "Enter a complete 64-character hexadecimal transaction ID.",
+      "error",
+    );
+    return;
+  }
+  transactionSearchInput.value = txid;
+  if (currentSnapshot === null) {
+    nodeViewState = { ...nodeViewState, txid };
+    selectedTransactionId = null;
+    detailSequence += 1;
+    detailStatus.textContent = "No snapshot available";
+    detailTransaction.replaceChildren(detailValue("txid", txid));
+    detailRules.replaceChildren();
+    setTransactionSearchStatus(
+      "No snapshot is available to search yet.",
+      "absent",
+    );
+    replaceViewUrl();
+    return;
+  }
+  const transaction = transactionById.get(txid);
+  if (transaction === undefined) {
+    showAbsentTransaction(txid);
+    return;
+  }
+  selectInspector(
+    { kind: "region", regionKey: terrainRegionKey(transaction) },
+    false,
+  );
+  void loadTransactionDetail(transaction);
 };
 
 terrainTab.addEventListener("click", () => {
@@ -1192,7 +1486,29 @@ resetFilters.addEventListener("click", () => {
   applyFilters();
 });
 
+sourceSelect.addEventListener("change", () => {
+  const nextSource = configuredSources.find(
+    ({ source_id: source }) => source === sourceSelect.value,
+  );
+  if (nextSource === undefined || nextSource.source_id === selectedSourceId) {
+    return;
+  }
+  selectedSourceId = nextSource.source_id;
+  snapshotLifecycle.invalidate();
+  prepareForSourceLoad(nextSource);
+  void loadSnapshot();
+});
+
+transactionSearch.addEventListener("submit", (event) => {
+  event.preventDefault();
+  searchForTransaction();
+});
+
 refreshButton.addEventListener("click", () => {
+  if (selectedSourceId === null) {
+    void initialize();
+    return;
+  }
   void loadSnapshot();
 });
 
@@ -1201,4 +1517,4 @@ new ResizeObserver(scheduleFeeAgeRender).observe(feeAgeCanvas);
 
 selectLens(selectedLens);
 renderInspector();
-void loadSnapshot();
+void initialize();

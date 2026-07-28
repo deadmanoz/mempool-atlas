@@ -4,6 +4,7 @@ import {
   assessmentRegionKey,
   compareCurrentSnapshots,
   comparisonPolicyPopulation,
+  lookupComparisonTransaction,
   policyFilterCount,
   requireLoadedSnapshot,
   type LoadedSourceSnapshot,
@@ -177,6 +178,57 @@ describe("compareCurrentSnapshots", () => {
     });
     expect(comparison.totals.common_left_vsize).toBe(100);
     expect(comparison.totals.common_right_vsize).toBe(120);
+  });
+
+  it("looks up source-local entries across every sorted membership region", () => {
+    const comparison = compareCurrentSnapshots(
+      loadedSource(
+        "core",
+        [
+          transaction(1, 100),
+          transaction(2, 200),
+          transaction(4, 300),
+          transaction(8, 800),
+        ],
+        1_700_000_001_000,
+      ),
+      loadedSource(
+        "knots",
+        [
+          transaction(1, 110),
+          transaction(3, 300),
+          transaction(4, 440),
+          transaction(9, 900),
+        ],
+        1_700_000_002_000,
+      ),
+    );
+
+    expect(lookupComparisonTransaction(comparison, txid(1))).toEqual({
+      region: "common",
+      index: 0,
+      entry: comparison.common[0],
+    });
+    expect(lookupComparisonTransaction(comparison, txid(8))).toEqual({
+      region: "left_only",
+      index: 1,
+      entry: comparison.left_only[1],
+    });
+    expect(lookupComparisonTransaction(comparison, txid(9))).toEqual({
+      region: "right_only",
+      index: 1,
+      entry: comparison.right_only[1],
+    });
+    expect(
+      lookupComparisonTransaction(comparison, txid(4))?.entry,
+    ).toMatchObject({
+      left: { vsize: 300 },
+      right: { vsize: 440 },
+      same_wtxid: true,
+    });
+    expect(lookupComparisonTransaction(comparison, txid(5))).toBeNull();
+    expect(lookupComparisonTransaction(comparison, txid(0))).toBeNull();
+    expect(lookupComparisonTransaction(comparison, txid(10))).toBeNull();
   });
 
   it("rejects comparing a source with itself or an unavailable snapshot", () => {

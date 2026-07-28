@@ -295,6 +295,73 @@ h3 {
   box-shadow: 0 0 0 3px rgba(244, 111, 147, 0.12);
 }
 
+.exploration-bar {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.55fr) minmax(0, 1.45fr);
+  gap: 0.75rem;
+  margin: 0.65rem 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  background: rgba(10, 21, 29, 0.95);
+}
+
+.exploration-field,
+.transaction-search {
+  display: grid;
+  align-content: start;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.exploration-field > span,
+.transaction-search > label {
+  color: var(--faint);
+  font-size: 0.62rem;
+  font-weight: 750;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.exploration-field select,
+.transaction-search input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.35rem;
+  padding: 0.42rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.25rem;
+  background: #0b1a23;
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.transaction-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem;
+}
+
+.transaction-search-row button {
+  min-width: 4.6rem;
+}
+
+.transaction-search > span {
+  min-height: 1rem;
+  color: var(--faint);
+  font-size: 0.63rem;
+  line-height: 1.4;
+}
+
+.transaction-search > span[data-state="found"] {
+  color: var(--cyan);
+}
+
+.transaction-search > span[data-state="absent"],
+.transaction-search > span[data-state="error"] {
+  color: var(--amber);
+}
+
 .lens-toolbar {
   display: flex;
   align-items: center;
@@ -1308,6 +1375,28 @@ tr.selected td {
   line-height: 1.4;
 }
 
+.source-card-link {
+  display: inline-flex;
+  margin-top: 0.65rem;
+  color: var(--cyan);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+}
+
+.source-card-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.18rem;
+}
+
+.comparison-transaction-search {
+  padding: 0.7rem 0.85rem;
+  border-top: 1px solid var(--border);
+  background: #09161e;
+}
+
 .sampling-panel {
   padding: 0.65rem 0.85rem;
   border-top: 1px solid var(--border);
@@ -1741,6 +1830,10 @@ tr.selected td {
     justify-content: flex-start;
   }
 
+  .exploration-bar {
+    grid-template-columns: 1fr;
+  }
+
   .workspace {
     grid-template-columns: 1fr;
   }
@@ -1782,6 +1875,14 @@ tr.selected td {
   .status-strip {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+
+  .transaction-search-row {
+    grid-template-columns: 1fr;
+  }
+
+  .transaction-search-row button {
+    width: 100%;
   }
 
   .source-picker-row {

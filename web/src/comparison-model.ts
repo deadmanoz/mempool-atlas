@@ -1,6 +1,7 @@
 import {
-  violationSignature,
+  terrainRegionKey,
   type StatusRegionKey,
+  type TerrainRegionKey,
   type ViolationSignatureKey,
 } from "./terrain";
 import type {
@@ -23,6 +24,12 @@ export interface ComparedTransaction {
   left: MempoolTransaction | null;
   right: MempoolTransaction | null;
   same_wtxid: boolean | null;
+}
+
+export interface ComparisonTransactionLookup {
+  region: ComparisonRegionKey;
+  index: number;
+  entry: ComparedTransaction;
 }
 
 export interface ComparisonTotals {
@@ -180,6 +187,50 @@ export const comparisonRegionEntries = (
   region: ComparisonRegionKey,
 ): ComparedTransaction[] => comparison[region];
 
+const findComparedTransaction = (
+  entries: readonly ComparedTransaction[],
+  txid: string,
+): { index: number; entry: ComparedTransaction } | null => {
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const entry = entries[middle];
+    if (entry === undefined) {
+      return null;
+    }
+    if (entry.txid < txid) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  const candidate = entries[low];
+  return candidate?.txid === txid ? { index: low, entry: candidate } : null;
+};
+
+/**
+ * Locate one txid across the three independently sorted comparison regions.
+ * This keeps lookup logarithmic without retaining a second union-sized index.
+ */
+export const lookupComparisonTransaction = (
+  comparison: CurrentComparison,
+  txid: string,
+): ComparisonTransactionLookup | null => {
+  const regions: readonly ComparisonRegionKey[] = [
+    "common",
+    "left_only",
+    "right_only",
+  ];
+  for (const region of regions) {
+    const match = findComparedTransaction(comparison[region], txid);
+    if (match !== null) {
+      return { region, ...match };
+    }
+  }
+  return null;
+};
+
 export const sourceEntry = (
   entry: ComparedTransaction,
   side: ComparisonSide,
@@ -197,20 +248,7 @@ export const policySideForRegion = (
 
 export const assessmentRegionKey = (
   transaction: MempoolTransaction,
-): StatusRegionKey | ViolationSignatureKey => {
-  const assessment = transaction.bip110;
-  if (assessment === null) {
-    return "unclassified";
-  }
-  if (assessment.status !== "violating") {
-    return assessment.status;
-  }
-  const signature = violationSignature(assessment);
-  if (signature === null) {
-    throw new Error("Violating assessment is missing its rule signature");
-  }
-  return signature.key;
-};
+): TerrainRegionKey => terrainRegionKey(transaction);
 
 const filterMatches = (
   transaction: MempoolTransaction,

@@ -302,6 +302,28 @@ export const violationSignature = (
   };
 };
 
+/**
+ * Return the canonical terrain region for one source-local transaction.
+ * Status regions remain explicit, while violating assessments are keyed by
+ * their complete proven and unknown rule sets.
+ */
+export const terrainRegionKey = (
+  transaction: MempoolTransaction,
+): TerrainRegionKey => {
+  const assessment = transaction.bip110;
+  if (assessment === null) {
+    return "unclassified";
+  }
+  if (assessment.status !== "violating") {
+    return assessment.status;
+  }
+  const signature = violationSignature(assessment);
+  if (signature === null) {
+    throw new Error("Violating assessment is missing its rule signature");
+  }
+  return signature.key;
+};
+
 export const signatureLabel = (signature: ViolationSignature): string => {
   const rules = signature.violatedRules
     .map((rule) => `R${terrainRule(rule).number}`)
@@ -954,6 +976,7 @@ export const paintTerrain = (
   context: CanvasRenderingContext2D,
   layout: TerrainLayout,
   selection: TerrainSelection,
+  selectedTxid: string | null = null,
 ): void => {
   context.clearRect(0, 0, layout.width, layout.height);
   context.fillStyle = "#071018";
@@ -1003,6 +1026,7 @@ export const paintTerrain = (
   const regionsByKey = new Map(
     layout.regions.map((region) => [region.key, region]),
   );
+  let selectedGlyph: TerrainGlyph | null = null;
   for (const glyph of layout.glyphs) {
     const region = regionsByKey.get(glyph.regionKey);
     if (region === undefined) {
@@ -1022,8 +1046,21 @@ export const paintTerrain = (
       glyph.rect.width,
       glyph.rect.height,
     );
+    if (glyph.txid === selectedTxid) {
+      selectedGlyph = glyph;
+    }
   }
   context.globalAlpha = 1;
+  if (selectedGlyph !== null) {
+    context.strokeStyle = "#f7ff6a";
+    context.lineWidth = 2.5;
+    context.strokeRect(
+      selectedGlyph.rect.x,
+      selectedGlyph.rect.y,
+      selectedGlyph.rect.width,
+      selectedGlyph.rect.height,
+    );
+  }
 };
 
 export const renderTerrain = (
@@ -1032,6 +1069,7 @@ export const renderTerrain = (
   mode: TerrainMode,
   selection: TerrainSelection,
   previousLayout: TerrainLayout | null = null,
+  selectedTxid: string | null = null,
 ): TerrainLayout => {
   const bounds = canvas.getBoundingClientRect();
   const width = Math.max(1, bounds.width);
@@ -1055,6 +1093,6 @@ export const renderTerrain = (
     previousLayout.mode === mode
       ? previousLayout
       : createTerrainLayout(transactions, width, height, mode);
-  paintTerrain(context, layout, selection);
+  paintTerrain(context, layout, selection, selectedTxid);
   return layout;
 };

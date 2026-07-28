@@ -418,6 +418,8 @@ and renders:
   section and bucket frames;
 - overlapping marginal rule filters, status- and combination-bucket selection,
   representative transactions, and on-demand typed detail;
+- a configured-source selector, current-snapshot txid search, canonical URL
+  state, and a visible focus ring for the selected transaction;
 - a fee-rate-by-age Canvas as a secondary lens with client-side filters.
 
 The browser derives each violating bucket from the compact assessment already
@@ -441,7 +443,13 @@ or viewport changes invalidate that geometry. Adaptive label and inset space
 keeps a positive glyph area even for rare observed buckets.
 
 The UI performs no automatic full-snapshot polling. Manual refresh fetches the
-current server copy and does not initiate node collection.
+current server copy and does not initiate node collection. Node URL state
+contains the source, one mutually exclusive rule or region selection, and an
+optional txid. A valid txid search selects the transaction's canonical terrain
+region and detail; a well-formed txid absent from the snapshot remains explicit
+in the URL and search result. Ordinary refresh restores valid selection, while
+a user-initiated source change clears it. Source loads use request-generation
+guards so a slower obsolete response cannot replace a newer selection.
 
 Both snapshot and detail parsing require a non-negative
 `classification_revision`. While loading detail, the browser also holds the
@@ -471,6 +479,15 @@ geometry keyed by comparison identity, viewport dimensions, and device pixel
 ratio. A region-scoped virtual listbox makes every transaction keyboard-
 reachable without creating one DOM element per glyph. The browser retains no
 combined server projection or comparison history.
+
+Comparison URL state contains an atomic distinct source pair, membership
+region, source-local policy side, policy filter, and optional txid. A txid
+lookup binary-searches the three independently sorted membership regions and
+does not allocate a second union-sized index. Found transactions normalize the
+view to their actual region and an available source-local policy side. A
+well-formed absent txid remains explicit. Ordinary refresh preserves valid
+state, while an intentional pair change clears it. Source cards link back to
+the corresponding node view.
 
 The service defaults to a five-minute membership-round interval. A bounded
 classification slice may finish before a due round takes the shared gate, but

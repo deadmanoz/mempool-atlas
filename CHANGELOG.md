@@ -19,6 +19,10 @@ All notable changes to Mempool Atlas will be documented in this file.
   snapshots into present-in-both and two symmetric observed-only regions,
   preserves source-local witness variants and policy assessments, and stores no
   server-side comparison projection or history.
+- Make node and comparison exploration addressable with a visible source
+  selector, current-snapshot txid search, source-specific product links, and
+  canonical URL state that survives sharing and refresh without adding server
+  state.
 - Encode each published snapshot response once and share its immutable bytes
   across readers so concurrent requests cannot multiply large serialization
   work and memory allocation.

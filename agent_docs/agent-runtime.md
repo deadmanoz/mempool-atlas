@@ -326,6 +326,16 @@ a single virtual listbox option exposes every region transaction to bounded
 keyboard navigation without a transaction-sized DOM. The browser stores no
 history.
 
+Both products serialize exploration state into canonical query parameters.
+The node view records its source, one rule or terrain-region selection, and an
+optional txid. The comparison records an atomic distinct source pair,
+membership region, source-local policy side, policy filter, and optional txid.
+Transaction search is current-snapshot lookup only. Comparison lookup binary-
+searches the three sorted regions instead of retaining a duplicate union index.
+Ordinary refresh preserves valid state, while a user source or pair change
+clears the prior selection. A well-formed txid absent from the current snapshot
+remains explicit rather than becoming a fabricated assessment.
+
 After each membership, policy-progress, or failure transition, Atlas serializes
 the complete snapshot response once on a blocking worker. It atomically stores
 the resulting immutable `Bytes` with the structured snapshot. Requests clone

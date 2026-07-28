@@ -136,13 +136,19 @@ The primary website is a classification terrain:
 - coverage makes incomplete enrichment and evaluator unknowns visible;
 - selecting a rule or any terrain bucket opens representative transactions
   and typed evidence;
+- a visible source selector exposes every configured node, while txid search
+  jumps to a transaction's canonical terrain region and keeps the selected
+  glyph and inspector addressable;
 - first rejection remains transaction-detail metadata and never chooses the
   transaction's terrain bucket;
 - the original fee-rate by age view remains available as a secondary lens.
 
 The browser never contacts the Bitcoin node and its refresh button does not
 trigger a new RPC poll. It only fetches the latest snapshot already held by
-Atlas.
+Atlas. Node URLs canonically encode the source, selected rule or terrain region,
+and transaction. Refresh preserves valid exploration state, and a well-formed
+txid that is absent from the current snapshot remains visible as an explicit
+search result rather than being silently discarded.
 
 The comparison page is a separate product surface. It fetches two complete
 source snapshots and merges their sorted transaction IDs in the browser. Every
@@ -154,6 +160,13 @@ both source-local witness variants and assessments. Pair changes abort obsolete
 full-snapshot reads. Selection-only paints reuse Canvas geometry, and a bounded
 virtual transaction navigator makes every region entry keyboard-reachable
 without adding one DOM node per transaction.
+
+Comparison URLs canonically encode the source pair, membership region,
+source-local policy side, policy filter, and transaction. Each source summary
+links back to its node view, and txid search locates a transaction across the
+three sorted membership regions without retaining a duplicate union-sized
+index. Refresh preserves valid comparison state, while an intentional source-
+pair change clears the prior investigation.
 
 Membership differences are observations, not rejection evidence. The page does
 not infer filtering, relay causality, or relative permissiveness from absence in

@@ -153,6 +153,10 @@ Use `just` targets whenever one exists:
 - Preserve a positive glyph area for every populated terrain region, including
   rare status and partial buckets. Reuse geometry for selection-only paints and
   invalidate it when snapshot membership, size mode, or viewport changes.
+- Keep node and comparison exploration in canonical URL state. Preserve valid
+  state across ordinary refresh, clear it on intentional source or pair
+  changes, and keep a well-formed absent txid explicit without manufacturing an
+  assessment.
 - Enforce `ATLAS_MAX_MEMPOOL_ENTRIES` before and during verbose decoding.
 - Keep every integer exactly representable by browser JSON numbers.
 - Treat received, present, rejected, and classified as independent claims.
@@ -275,6 +279,10 @@ Use `just` targets whenever one exists:
   paints reuse identity- and viewport-bound geometry. Keep transaction-level
   keyboard access virtual and bounded instead of creating one DOM node per
   transaction.
+- Node URLs encode source, one rule or terrain region, and an optional txid.
+  Comparison URLs encode an atomic distinct pair, membership region, policy
+  side, policy filter, and optional txid. Comparison txid lookup must not retain
+  a second union-sized index.
 - Browser refresh fetches the latest server copy. It does not trigger an RPC
   poll.
 - A restart discards current state by design and waits for the first new
