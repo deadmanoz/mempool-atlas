@@ -1,10 +1,10 @@
 import {
   terrainRegionKey,
-  type StatusRegionKey,
   type TerrainRegionKey,
   type ViolationSignatureKey,
 } from "./terrain";
 import type {
+  Bip110Status,
   MempoolSnapshot,
   MempoolTransaction,
   RuleId,
@@ -13,6 +13,7 @@ import type {
 
 export type ComparisonSide = "left" | "right";
 export type ComparisonRegionKey = "common" | "left_only" | "right_only";
+export type ComparisonPolicyStatus = Bip110Status | "unclassified";
 
 export interface LoadedSourceSnapshot {
   source: SourceSnapshotResponse["source"];
@@ -57,7 +58,7 @@ export interface CurrentComparison {
 export type ComparisonPolicyFilter =
   | { kind: "all" }
   | { kind: "rule"; rule: RuleId }
-  | { kind: "status"; status: StatusRegionKey }
+  | { kind: "status"; status: ComparisonPolicyStatus }
   | { kind: "signature"; signature: ViolationSignatureKey };
 
 export interface ComparisonPopulation {
@@ -250,6 +251,10 @@ export const assessmentRegionKey = (
   transaction: MempoolTransaction,
 ): TerrainRegionKey => terrainRegionKey(transaction);
 
+export const comparisonPolicyStatus = (
+  transaction: MempoolTransaction,
+): ComparisonPolicyStatus => transaction.bip110?.status ?? "unclassified";
+
 const filterMatches = (
   transaction: MempoolTransaction,
   filter: ComparisonPolicyFilter,
@@ -261,7 +266,7 @@ const filterMatches = (
     return transaction.bip110?.violated_rules.includes(filter.rule) ?? false;
   }
   if (filter.kind === "status") {
-    return assessmentRegionKey(transaction) === filter.status;
+    return comparisonPolicyStatus(transaction) === filter.status;
   }
   return assessmentRegionKey(transaction) === filter.signature;
 };

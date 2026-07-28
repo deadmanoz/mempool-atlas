@@ -124,6 +124,44 @@
       </section>
 
       <section
+        id="comparison-policy-matrix"
+        class="comparison-policy-matrix"
+        aria-labelledby="comparison-policy-matrix-heading"
+        hidden
+      >
+        <div class="comparison-policy-matrix-heading">
+          <div>
+            <p class="eyebrow">Policy questions</p>
+            <h2 id="comparison-policy-matrix-heading">
+              Where do current policy outcomes differ?
+            </h2>
+          </div>
+          <p>
+            Each row is one source-local assessment population. Transactions
+            present in both snapshots appear once for each source.
+          </p>
+        </div>
+        <div class="comparison-policy-matrix-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Population</th>
+                <th scope="col">Compatible</th>
+                <th scope="col">Would violate deployed policy</th>
+                <th scope="col">Indeterminate</th>
+                <th scope="col">Not classified</th>
+              </tr>
+            </thead>
+            <tbody id="comparison-policy-matrix-body"></tbody>
+          </table>
+        </div>
+        <p class="comparison-policy-matrix-note">
+          Violation totals include complete and partly unresolved assessments.
+          Rule-combination controls show only exact assessments.
+        </p>
+      </section>
+
+      <section
         id="comparison-regions"
         class="comparison-region-controls"
         aria-label="Membership regions"

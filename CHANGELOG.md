@@ -19,6 +19,10 @@ All notable changes to Mempool Atlas will be documented in this file.
   snapshots into present-in-both and two symmetric observed-only regions,
   preserves source-local witness variants and policy assessments, and stores no
   server-side comparison projection or history.
+- Lead comparison with a browser-derived four-row policy matrix that keeps
+  observed-only and common populations source-local, conserves compatible,
+  violating, indeterminate, and unclassified totals, and links aggregate or
+  exact rule-combination questions into the existing addressable explorer.
 - Make node and comparison exploration addressable with a visible source
   selector, current-snapshot txid search, source-specific product links, and
   canonical URL state that survives sharing and refresh without adding server

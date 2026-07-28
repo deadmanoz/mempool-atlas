@@ -68,6 +68,18 @@ Within the three membership regions it reuses the exact complete and partial
 BIP-110 bucket semantics from the node viewer. Browser refresh reads already
 published state and never triggers node RPC.
 
+The comparison begins with a count-only policy matrix derived in one browser
+pass over the three membership arrays. It shows four source-local rows:
+left-only assessed by the left source, common assessed by the left source,
+common assessed by the right source, and right-only assessed by the right
+source. Each row partitions its population into compatible, violating,
+indeterminate, and unclassified. Violating includes exact and partly unresolved
+assessments. At most three dominant exact rule combinations are shown per row,
+ordered by count and then canonical signature, with hidden combination and
+transaction totals made explicit. Matrix controls drive the existing canonical
+region, source-side, policy-filter, sample, and inspector transition rather than
+creating a second comparison state.
+
 Changing a source pair aborts obsolete snapshot and detail requests and guards
 against late results. Canvas geometry is reused for selection-only paints and
 invalidated by replacement data, viewport size, or device pixel ratio. A

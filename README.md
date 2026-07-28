@@ -22,7 +22,7 @@ flowchart TB
     policy -->|"generation and revision guard"| current
     current --> api["Source-scoped current-snapshot API"]
     current --> web["Single-node terrain"]
-    browser["Browser"] --> compare["Two-snapshot membership comparison"]
+    browser["Browser"] --> compare["Two-snapshot membership comparison<br/>source-local policy matrix"]
     api --> compare
     browser --> web
     browser --> api
@@ -151,15 +151,27 @@ txid that is absent from the current snapshot remains visible as an explicit
 search result rather than being silently discarded.
 
 The comparison page is a separate product surface. It fetches two complete
-source snapshots and merges their sorted transaction IDs in the browser. Every
-transaction appears once in one of three regions: present in both sampled
-snapshots, observed only in the left snapshot, or observed only in the right
-snapshot. The page shows both collection windows, observation skew, chain-tip
-agreement, freshness, and source-specific totals. Common transaction IDs retain
-both source-local witness variants and assessments. Pair changes abort obsolete
-full-snapshot reads. Selection-only paints reuse Canvas geometry, and a bounded
-virtual transaction navigator makes every region entry keyboard-reachable
-without adding one DOM node per transaction.
+source snapshots and merges their sorted transaction IDs in the browser. In the
+membership partition and Canvas, every transaction appears once in one of three
+regions: present in both sampled snapshots, observed only in the left snapshot,
+or observed only in the right snapshot. The page shows both collection windows,
+observation skew, chain-tip agreement, freshness, and source-specific totals.
+Common transaction IDs retain both source-local witness variants and
+assessments. Pair changes abort obsolete full-snapshot reads. Selection-only
+paints reuse Canvas geometry, and a bounded virtual transaction navigator makes
+every region entry keyboard-reachable without adding one DOM node per
+transaction.
+
+A policy matrix leads that page with four source-local populations: left-only
+assessed by the left source, common assessed by the left source, common assessed
+by the right source, and right-only assessed by the right source. Each row
+conserves compatible, violating, indeterminate, and unclassified totals. The
+violating total includes exact and partly unresolved assessments, while bounded
+dominant rule-combination controls include exact assessments only. At most three
+controls appear per row, ordered by count and then canonical signature, with
+hidden exact combinations and transactions reported explicitly. Activating a
+cell or combination updates the existing membership region, policy source,
+filter, sample, inspector, and canonical URL as one transition.
 
 Comparison URLs canonically encode the source pair, membership region,
 source-local policy side, policy filter, and transaction. Each source summary

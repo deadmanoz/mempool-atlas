@@ -86,6 +86,7 @@ describe("comparison policy filter URL state", () => {
     ["all", { kind: "all" }],
     ["rule:tapscript_op_if", { kind: "rule", rule: "tapscript_op_if" }],
     ["status:compatible", { kind: "status", status: "compatible" }],
+    ["status:violating", { kind: "status", status: "violating" }],
     [
       "signature:partial:2:40",
       { kind: "signature", signature: "partial:02:40" },
@@ -135,7 +136,7 @@ describe("comparison URL state", () => {
   it("drops invalid independent fields", () => {
     expect(
       parseComparisonViewState(
-        "?left=core&right=knots&region=neither&side=middle&filter=status:violating&txid=nope",
+        "?left=core&right=knots&region=neither&side=middle&filter=status:violation&txid=nope",
       ),
     ).toEqual({
       left: "core",
@@ -145,6 +146,15 @@ describe("comparison URL state", () => {
       filter: { kind: "all" },
       txid: null,
     });
+  });
+
+  it("round-trips the aggregate violating filter without widening node regions", () => {
+    const query =
+      "left=core&right=knots&region=common&side=right&filter=status%3Aviolating";
+    expect(serializeComparisonViewState(parseComparisonViewState(query))).toBe(
+      query,
+    );
+    expect(parseNodeViewState("?region=violating").selection).toBeNull();
   });
 
   it("serializes a canonical query and omits the default filter", () => {

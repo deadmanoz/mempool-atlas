@@ -20,6 +20,13 @@ import {
   moveComparisonCursor,
 } from "./comparison-navigation";
 import {
+  buildComparisonPolicyMatrix,
+  comparisonPolicyMatrixTarget,
+  type ComparisonPolicyMatrixRow,
+  type ComparisonPolicyMatrixSelection,
+  type ComparisonPolicyMatrixStatus,
+} from "./comparison-policy-matrix";
+import {
   compareCurrentSnapshots,
   comparisonPolicyPopulation,
   comparisonRegionEntries,
@@ -30,6 +37,7 @@ import {
   sourceEntry,
   type ComparedTransaction,
   type ComparisonPolicyFilter,
+  type ComparisonPolicyStatus,
   type ComparisonRegionKey,
   type ComparisonSide,
   type CurrentComparison,
@@ -92,6 +100,10 @@ const samplingSummary = requiredElement<HTMLElement>("sampling-summary");
 const chainSummary = requiredElement<HTMLElement>("chain-summary");
 const samplingTimeline = requiredElement<HTMLElement>("sampling-timeline");
 const samplingNote = requiredElement<HTMLElement>("sampling-note");
+const policyMatrix = requiredElement<HTMLElement>("comparison-policy-matrix");
+const policyMatrixBody = requiredElement<HTMLTableSectionElement>(
+  "comparison-policy-matrix-body",
+);
 const regionControls = requiredElement<HTMLElement>("comparison-regions");
 const comparisonStage = requiredElement<HTMLElement>("comparison-stage");
 const comparisonCanvas =
@@ -835,13 +847,185 @@ const filtersMatch = (
   if (left.kind === "status") {
     return (
       left.status ===
-      (right as { kind: "status"; status: StatusRegionKey }).status
+      (right as { kind: "status"; status: ComparisonPolicyStatus }).status
     );
   }
   return (
     left.signature ===
     (right as { kind: "signature"; signature: ViolationSignatureKey }).signature
   );
+};
+
+const matrixRowCopy = (
+  row: ComparisonPolicyMatrixRow,
+): { label: string; detail: string } => ({
+  label:
+    row.region === "common"
+      ? "Present in both snapshots"
+      : `Observed only in ${row.sourceLabel}`,
+  detail: `Assessed by ${row.sourceLabel} · ${formatTxidCount(row.populationCount)}`,
+});
+
+const matrixStatusLabel = (status: ComparisonPolicyMatrixStatus): string => {
+  if (status === "compatible") {
+    return "Compatible";
+  }
+  if (status === "violating") {
+    return "Would violate deployed policy";
+  }
+  if (status === "indeterminate") {
+    return "Indeterminate";
+  }
+  return "Not classified";
+};
+
+const setMatrixControlMetadata = (
+  button: HTMLButtonElement,
+  row: ComparisonPolicyMatrixRow,
+  selection: ComparisonPolicyMatrixSelection,
+): void => {
+  button.dataset.matrixRegion = row.region;
+  button.dataset.matrixSide = row.side;
+  button.dataset.matrixFilterKind = selection.kind;
+  button.dataset.matrixFilterValue =
+    selection.kind === "status" ? selection.status : selection.signature;
+  button.setAttribute("aria-pressed", "false");
+  button.addEventListener("click", () => {
+    transitionComparisonView({
+      ...currentViewState(),
+      ...comparisonPolicyMatrixTarget(row, selection),
+    });
+  });
+};
+
+const matrixStatusCell = (
+  row: ComparisonPolicyMatrixRow,
+  status: ComparisonPolicyMatrixStatus,
+): HTMLTableCellElement => {
+  const cell = document.createElement("td");
+  cell.className = "comparison-policy-cell";
+  cell.dataset.status = status;
+  const count = row.statusCounts[status];
+  const copy = matrixRowCopy(row);
+  if (count === 0) {
+    const zero = document.createElement("span");
+    zero.className = "comparison-policy-zero";
+    zero.textContent = "0";
+    cell.append(zero);
+  } else {
+    const selection: ComparisonPolicyMatrixSelection = {
+      kind: "status",
+      status,
+    };
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "comparison-policy-status-button";
+    button.setAttribute(
+      "aria-label",
+      `${copy.label}, assessed by ${row.sourceLabel}, ${matrixStatusLabel(status)}: ${formatTxidCount(count)}`,
+    );
+    const total = document.createElement("strong");
+    total.textContent = countFormat.format(count);
+    const unit = document.createElement("span");
+    unit.textContent = count === 1 ? "transaction" : "transactions";
+    button.append(total, unit);
+    setMatrixControlMetadata(button, row, selection);
+    cell.append(button);
+  }
+
+  if (status !== "violating" || count === 0) {
+    return cell;
+  }
+
+  const exactSummary = document.createElement("p");
+  exactSummary.className = "comparison-policy-cell-note";
+  exactSummary.textContent = `${countFormat.format(row.exactViolationCount)} exact · ${countFormat.format(row.partialViolationCount)} partly unresolved`;
+  cell.append(exactSummary);
+
+  if (row.dominantExactCombinations.length > 0) {
+    const combinations = document.createElement("div");
+    combinations.className = "comparison-policy-exact";
+    for (const combination of row.dominantExactCombinations) {
+      const selection: ComparisonPolicyMatrixSelection = {
+        kind: "signature",
+        signature: combination.signature.key,
+      };
+      const label = signatureLabel(combination.signature);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "comparison-policy-signature";
+      button.textContent = `${label} · ${countFormat.format(combination.count)}`;
+      button.setAttribute(
+        "aria-label",
+        `${copy.label}, assessed by ${row.sourceLabel}, exact ${label}: ${formatTxidCount(combination.count)}`,
+      );
+      setMatrixControlMetadata(button, row, selection);
+      combinations.append(button);
+    }
+    cell.append(combinations);
+  }
+
+  if (row.exactCombinationOverflow.combinationCount > 0) {
+    const overflow = document.createElement("p");
+    overflow.className = "comparison-policy-cell-note";
+    overflow.textContent = `Plus ${formatTxidCount(row.exactCombinationOverflow.transactionCount)} across ${countFormat.format(row.exactCombinationOverflow.combinationCount)} more exact combinations`;
+    cell.append(overflow);
+  }
+  return cell;
+};
+
+const syncPolicyMatrixSelection = (): void => {
+  for (const button of policyMatrixBody.querySelectorAll<HTMLButtonElement>(
+    "button[data-matrix-filter-kind]",
+  )) {
+    const targetMatches =
+      button.dataset.matrixRegion === selectedRegion &&
+      button.dataset.matrixSide === activePolicySide();
+    const filterMatchesButton =
+      (button.dataset.matrixFilterKind === "status" &&
+        policyFilter.kind === "status" &&
+        button.dataset.matrixFilterValue === policyFilter.status) ||
+      (button.dataset.matrixFilterKind === "signature" &&
+        policyFilter.kind === "signature" &&
+        button.dataset.matrixFilterValue === policyFilter.signature);
+    button.setAttribute(
+      "aria-pressed",
+      String(targetMatches && filterMatchesButton),
+    );
+  }
+};
+
+const renderPolicyMatrix = (current: CurrentComparison): void => {
+  const matrix = buildComparisonPolicyMatrix(current);
+  const statuses: readonly ComparisonPolicyMatrixStatus[] = [
+    "compatible",
+    "violating",
+    "indeterminate",
+    "unclassified",
+  ];
+  const rows = matrix.rows.map((row) => {
+    const element = document.createElement("tr");
+    element.dataset.side = row.side;
+    const heading = document.createElement("th");
+    heading.scope = "row";
+    const label = document.createElement("span");
+    label.className = "comparison-policy-row-label";
+    const title = document.createElement("strong");
+    const detail = document.createElement("span");
+    const copy = matrixRowCopy(row);
+    title.textContent = copy.label;
+    detail.textContent = copy.detail;
+    label.append(title, detail);
+    heading.append(label);
+    element.append(
+      heading,
+      ...statuses.map((status) => matrixStatusCell(row, status)),
+    );
+    return element;
+  });
+  policyMatrixBody.replaceChildren(...rows);
+  policyMatrix.hidden = false;
+  syncPolicyMatrixSelection();
 };
 
 const choosePolicyFilter = (filter: ComparisonPolicyFilter): void => {
@@ -1287,6 +1471,7 @@ const renderComparison = (current: CurrentComparison): void => {
   renderSourceCard(leftSourceCard, "Source A", current.left);
   renderSourceCard(rightSourceCard, "Source B", current.right);
   renderSampling(current);
+  renderPolicyMatrix(current);
   renderRegionControls(current);
   unionCount.textContent = `${countFormat.format(current.totals.union_count)} txids`;
   comparisonStage.hidden = current.totals.union_count === 0;
@@ -1332,6 +1517,7 @@ const transitionComparisonView = (requested: ComparisonViewState): void => {
 
   const applied = applyLoadedView(current, requested);
   renderRegionControls(current);
+  syncPolicyMatrixSelection();
   renderTransactionNavigator();
   renderInspector();
   updateQuery();
@@ -1353,6 +1539,8 @@ const resetComparisonView = (message: string): void => {
   comparisonEmpty.textContent = message;
   samplingPanel.hidden = true;
   samplingTimeline.replaceChildren();
+  policyMatrix.hidden = true;
+  policyMatrixBody.replaceChildren();
   resetSourceCard(leftSourceCard, "Source A", leftSourceId, message);
   resetSourceCard(rightSourceCard, "Source B", rightSourceId, message);
   resetRegionControls();

@@ -302,6 +302,21 @@ describe("comparison policy semantics", () => {
     ).toEqual([txid(3)]);
   });
 
+  it("matches exact and partial assessments with the aggregate violating filter", () => {
+    expect(
+      comparisonPolicyPopulation(comparison, "common", "left", {
+        kind: "status",
+        status: "violating",
+      }).entries.map(({ txid: id }) => id),
+    ).toEqual([txid(1), txid(2), txid(3)]);
+    expect(
+      policyFilterCount(comparison, "common", "right", {
+        kind: "status",
+        status: "violating",
+      }),
+    ).toBe(2);
+  });
+
   it("keeps marginal rule filters overlapping and source-local", () => {
     expect(
       policyFilterCount(comparison, "common", "left", {

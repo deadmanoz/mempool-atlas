@@ -1,5 +1,6 @@
 import type {
   ComparisonPolicyFilter,
+  ComparisonPolicyStatus,
   ComparisonRegionKey,
   ComparisonSide,
 } from "./comparison-model";
@@ -63,6 +64,11 @@ const statusRegion = (value: string): StatusRegionKey | null =>
     ? value
     : null;
 
+const comparisonPolicyStatus = (
+  value: string,
+): ComparisonPolicyStatus | null =>
+  value === "violating" ? value : statusRegion(value);
+
 const encodedMask = (value: string): string | null => {
   if (!/^[0-9a-f]{1,2}$/i.test(value)) {
     return null;
@@ -122,7 +128,7 @@ export const parseComparisonPolicyFilter = (
     return rule === null ? { kind: "all" } : { kind: "rule", rule };
   }
   if (kind === "status") {
-    const status = statusRegion(payload);
+    const status = comparisonPolicyStatus(payload);
     return status === null ? { kind: "all" } : { kind: "status", status };
   }
   if (kind === "signature") {
@@ -145,7 +151,7 @@ export const serializeComparisonPolicyFilter = (
     return rule === null ? null : `rule:${rule}`;
   }
   if (filter.kind === "status") {
-    const status = statusRegion(filter.status);
+    const status = comparisonPolicyStatus(filter.status);
     return status === null ? null : `status:${status}`;
   }
   const signature = violationSignature(filter.signature);

@@ -40,7 +40,8 @@ remains a separate product.
   process lifecycle.
 - `web/` contains two product entries. The node viewer validates and renders
   one complete snapshot. The comparison page fetches two independent current
-  snapshots and derives their sorted membership partition in the browser.
+  snapshots, derives their sorted membership partition, and leads with a
+  source-local policy matrix in the browser.
 
 Production reuses the existing WireGuard-only node RPC proxy. No Atlas process,
 agent, database, queue, retained history, ZMQ subscriber, container, or new
@@ -150,6 +151,14 @@ Use `just` targets whenever one exists:
 - Place each transaction once in the terrain. Rule filters are marginal and
   overlap, while `primary_rule` remains detail metadata and never chooses a
   terrain bucket.
+- Derive the comparison policy matrix as four count-only source-local rows in
+  one pass over the disjoint membership arrays. Common txids contribute once to
+  each source row. Conserve compatible, violating, indeterminate, and
+  unclassified totals per row. Include exact and partial violations in the
+  aggregate violating status, but include only exact signatures in at most
+  three dominant combination controls per row. Sort by count descending and
+  then canonical signature, and retain hidden combination and transaction
+  counts.
 - Preserve a positive glyph area for every populated terrain region, including
   rare status and partial buckets. Reuse geometry for selection-only paints and
   invalidate it when snapshot membership, size mode, or viewport changes.
@@ -272,9 +281,14 @@ Use `just` targets whenever one exists:
   classification cache is a service-wide total divided among them. Each
   source's pending-script ceiling is no larger than its share, while the
   existing 256 MiB absolute pending ceiling remains.
-- The comparison page places each txid once into present-in-both, observed-only-
-  left, or observed-only-right. A common txid retains both source-local entries
-  and explicitly exposes different witness variants.
+- The comparison membership partition places each txid once into
+  present-in-both, observed-only-left, or observed-only-right. A common txid
+  retains both source-local entries and explicitly exposes different witness
+  variants.
+- Comparison matrix controls atomically select region, source-local policy side,
+  aggregate status or exact signature filter, and clear txid through the
+  canonical view-state transition. Keep partial counts informative unless the
+  product gains an explicit partial-only filter.
 - Pair changes abort obsolete snapshot and detail reads. Selection-only Canvas
   paints reuse identity- and viewport-bound geometry. Keep transaction-level
   keyboard access virtual and bounded instead of creating one DOM node per

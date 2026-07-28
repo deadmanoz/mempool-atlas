@@ -463,15 +463,28 @@ a stale terrain tile.
 The separate comparison entry discovers sources and requires two with complete
 snapshots. It fetches both ordinary source-scoped responses concurrently,
 validates each independently, then merge-joins their txid-sorted transaction
-vectors in O(n+m) browser work. Each txid is placed exactly once into one of
-three symmetric regions: present in both sampled snapshots, observed only in
-the left snapshot, or observed only in the right snapshot. Common entries keep
-both source-local transactions, including both `wtxid` values and compact
-policy assessments.
+vectors in O(n+m) browser work. In the membership partition, each txid is placed
+exactly once into one of three symmetric regions: present in both sampled
+snapshots, observed only in the left snapshot, or observed only in the right
+snapshot. Common entries keep both source-local transactions, including both
+`wtxid` values and compact policy assessments.
 
 The comparison exposes collection windows, observation skew, chain-tip
-agreement, freshness, source-local exact and partial policy buckets,
-overlapping marginal rule filters, and on-demand detail. A differing witness
+agreement, freshness, a source-local policy matrix, exact and partial policy
+buckets, overlapping marginal rule filters, and on-demand detail. The matrix is
+derived in one pass over the three disjoint membership arrays. It produces four
+count-only rows: left-only assessed by the left source, common assessed by the
+left source, common assessed by the right source, and right-only assessed by the
+right source. Each row partitions its population into compatible, violating,
+indeterminate, and unclassified. Aggregate violating counts include exact and
+partly unresolved assessments. Bounded dominant combination controls use only
+exact signatures. At most three appear per row, sorted by count and then
+canonical signature, with hidden combination and transaction totals retained.
+
+Every matrix action uses the same comparison view-state transition as the
+terrain and inspector. It atomically selects the membership region,
+source-local policy side, and aggregate status or exact signature filter, clears
+transaction selection, and updates the canonical URL. A differing witness
 variant is shown explicitly and never causes one source's assessment to replace
 the other's. Changing the source pair aborts obsolete full-snapshot and detail
 requests and still guards against late results. Selection-only paints reuse

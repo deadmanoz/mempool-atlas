@@ -321,8 +321,16 @@ Comparison has no server projection endpoint. It fetches two existing source
 snapshot responses, validates them independently, and merge-joins their sorted
 transaction vectors in the browser. It keeps common entries source-local,
 aborts obsolete pair and detail requests after selection changes, and still
-rejects late results. Selection-only Canvas paints reuse cached geometry, while
-a single virtual listbox option exposes every region transaction to bounded
+rejects late results. `web/src/comparison-policy-matrix.ts` derives a one-pass,
+count-only policy matrix before the terrain. It summarizes left-only-left,
+common-left, common-right, and right-only-right assessment populations. Its four
+statuses conserve each row. Aggregate
+violating includes exact and partly unresolved assessments, while its bounded
+dominant signature controls are exact-only and deterministically ordered.
+Matrix actions reuse the canonical comparison transition and therefore update
+region, policy side, filter, sample, inspector, and URL together while clearing
+the selected txid. Selection-only Canvas paints reuse cached geometry, while a
+single virtual listbox option exposes every region transaction to bounded
 keyboard navigation without a transaction-sized DOM. The browser stores no
 history.
 

@@ -1471,6 +1471,188 @@ tr.selected td {
   line-height: 1.45;
 }
 
+.comparison-policy-matrix {
+  margin-bottom: 0.65rem;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.comparison-policy-matrix-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.72rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.comparison-policy-matrix-heading h2 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.comparison-policy-matrix-heading > p {
+  max-width: 34rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.comparison-policy-matrix-scroll {
+  overflow-x: auto;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.comparison-policy-matrix table {
+  width: 100%;
+  min-width: 850px;
+  border-spacing: 0;
+  border-collapse: separate;
+}
+
+.comparison-policy-matrix th,
+.comparison-policy-matrix td {
+  padding: 0.62rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  text-align: left;
+}
+
+.comparison-policy-matrix tr:last-child > * {
+  border-bottom: 0;
+}
+
+.comparison-policy-matrix tr > *:last-child {
+  border-right: 0;
+}
+
+.comparison-policy-matrix thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #0d202a;
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.comparison-policy-matrix th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  width: 15.5rem;
+  min-width: 15.5rem;
+  background: #0a171f;
+}
+
+.comparison-policy-matrix thead th:first-child {
+  z-index: 3;
+  background: #0d202a;
+}
+
+.comparison-policy-matrix tbody tr[data-side="left"] th {
+  box-shadow: inset 3px 0 0 #7f9be2;
+}
+
+.comparison-policy-matrix tbody tr[data-side="right"] th {
+  box-shadow: inset 3px 0 0 #d97ab8;
+}
+
+.comparison-policy-row-label {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.comparison-policy-row-label strong {
+  font-size: 0.72rem;
+}
+
+.comparison-policy-row-label span {
+  color: var(--muted);
+  font-size: 0.61rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.comparison-policy-cell {
+  min-width: 8rem;
+}
+
+.comparison-policy-cell[data-status="violating"] {
+  min-width: 17rem;
+}
+
+.comparison-policy-status-button {
+  display: grid;
+  width: 100%;
+  min-height: 3.1rem;
+  align-content: center;
+  gap: 0.08rem;
+  padding: 0.45rem 0.55rem;
+  text-align: left;
+}
+
+.comparison-policy-status-button strong {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.92rem;
+}
+
+.comparison-policy-status-button span {
+  color: var(--muted);
+  font-size: 0.56rem;
+}
+
+.comparison-policy-status-button[aria-pressed="true"],
+.comparison-policy-signature[aria-pressed="true"] {
+  border-color: var(--cyan);
+  background: var(--cyan-soft);
+  color: var(--cyan);
+}
+
+.comparison-policy-zero {
+  display: grid;
+  min-height: 3.1rem;
+  place-items: center start;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.comparison-policy-exact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.32rem;
+  margin-top: 0.42rem;
+}
+
+.comparison-policy-signature {
+  min-height: 1.75rem;
+  padding: 0.24rem 0.4rem;
+  font-size: 0.58rem;
+}
+
+.comparison-policy-cell-note {
+  margin: 0.36rem 0 0;
+  color: var(--muted);
+  font-size: 0.56rem;
+  line-height: 1.4;
+}
+
+.comparison-policy-matrix-note {
+  margin: 0;
+  padding: 0.55rem 0.85rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.61rem;
+  line-height: 1.45;
+}
+
 .comparison-region-controls {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
@@ -1838,12 +2020,14 @@ tr.selected td {
     grid-template-columns: 1fr;
   }
 
-  .comparison-controls-heading {
+  .comparison-controls-heading,
+  .comparison-policy-matrix-heading {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .comparison-controls-heading > p {
+  .comparison-controls-heading > p,
+  .comparison-policy-matrix-heading > p {
     text-align: left;
   }
 
@@ -1904,6 +2088,15 @@ tr.selected td {
   .sampling-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .comparison-policy-matrix th:first-child {
+    width: 13rem;
+    min-width: 13rem;
+  }
+
+  .comparison-policy-matrix tbody th:first-child {
+    position: static;
   }
 
   .comparison-region-controls {
