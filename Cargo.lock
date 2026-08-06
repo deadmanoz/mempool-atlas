@@ -581,7 +581,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3662a38d341d77efecb73caf01420cfa5aa63c0253fd7bc05289ef9f6616e1bf"
 dependencies = [
  "base64 0.13.1",
- "minreq",
+ "minreq 2.14.1",
  "serde",
  "serde_json",
 ]
@@ -636,7 +636,7 @@ dependencies = [
  "bytes",
  "clap",
  "corepc-client",
- "minreq",
+ "minreq 3.0.0",
  "serde",
  "serde_json",
  "thiserror",
@@ -682,6 +682,12 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "minreq"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "659579df697b372ef9e36f02fcbb41f6d6f157dcec7db9c9618fa0f23cf0fc20"
 
 [[package]]
 name = "mio"

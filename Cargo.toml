@@ -18,7 +18,7 @@ bytes = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 # Branch: deadmanoz/corepc:fix-client-30s-timeout, based on corepc-client 0.8.0.
 corepc-client = { git = "https://github.com/deadmanoz/corepc", rev = "d57fd1f133aab9dc2be6769eec56bbbc20f3722a", features = ["client-sync"] }
-minreq = "2.14"
+minreq = "3.0"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
