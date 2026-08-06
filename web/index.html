@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Explore independent transaction classifications across one periodically observed Bitcoin node mempool."
+    />
+    <title>Mempool Atlas · Transaction Classifications</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="atlas-header">
+        <div class="brand-block">
+          <span class="brand-mark" aria-hidden="true">MA</span>
+          <div>
+            <div class="brand-title-row">
+              <h1>Mempool Atlas</h1>
+              <span id="atlas-version" class="atlas-version">v…</span>
+            </div>
+            <p>Transaction Classifications</p>
+            <nav class="product-nav" aria-label="Mempool Atlas products">
+              <a href="./" aria-current="page">Node</a>
+              <a id="compare-link" href="./compare/">Compare</a>
+            </nav>
+          </div>
+        </div>
+
+        <dl class="header-facts" aria-label="Current snapshot">
+          <div>
+            <dt>Source</dt>
+            <dd>
+              <strong id="source-label">Loading</strong>
+              <code id="source-id">unknown</code>
+            </dd>
+          </div>
+          <div>
+            <dt>Snapshot</dt>
+            <dd id="observed-value">Waiting</dd>
+          </div>
+          <div>
+            <dt>Height</dt>
+            <dd id="tip-value">Unknown</dd>
+          </div>
+          <div>
+            <dt>Transactions</dt>
+            <dd>
+              <span id="transaction-count">Waiting</span>
+              <small id="total-vsize">Waiting</small>
+            </dd>
+          </div>
+        </dl>
+
+        <button id="refresh" class="refresh-button" type="button">
+          Refresh
+        </button>
+      </header>
+
+      <section
+        id="page-status"
+        class="status-strip"
+        data-state="waiting"
+        aria-live="polite"
+      >
+        <span class="status-light" aria-hidden="true"></span>
+        <strong id="status-title">Connecting to Atlas</strong>
+        <span id="status-detail">Loading the configured source.</span>
+      </section>
+
+      <aside
+        id="honesty-banner"
+        class="honesty-banner"
+        data-tone="stale"
+        aria-live="polite"
+        hidden
+      >
+        <span class="honesty-icon" aria-hidden="true">⚠</span>
+        <p id="honesty-message"></p>
+      </aside>
+
+      <section class="exploration-bar" aria-label="Explore current snapshot">
+        <label class="exploration-field">
+          <span>Node</span>
+          <select id="source-select" aria-label="Node source"></select>
+        </label>
+        <form id="transaction-search" class="transaction-search" role="search">
+          <label for="transaction-search-input">Transaction</label>
+          <div class="transaction-search-row">
+            <input
+              id="transaction-search-input"
+              name="txid"
+              type="search"
+              inputmode="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Paste a transaction ID"
+            />
+            <button type="submit">Find</button>
+          </div>
+          <span id="transaction-search-status" aria-live="polite"
+            >Search this snapshot by txid.</span
+          >
+        </form>
+      </section>
+
+      <section class="lens-toolbar" aria-label="View controls">
+        <div class="toolbar-group">
+          <span class="toolbar-label">Lens</span>
+          <div class="segmented" role="tablist" aria-label="Mempool lens">
+            <button
+              id="overview-tab"
+              role="tab"
+              tabindex="0"
+              aria-selected="true"
+              aria-controls="overview-view"
+              type="button"
+            >
+              Classifications
+            </button>
+            <button
+              id="terrain-tab"
+              role="tab"
+              tabindex="-1"
+              aria-selected="false"
+              aria-controls="terrain-view"
+              type="button"
+            >
+              Buckets
+            </button>
+            <button
+              id="fee-age-tab"
+              role="tab"
+              tabindex="-1"
+              aria-selected="false"
+              aria-controls="fee-age-view"
+              type="button"
+            >
+              Fee rate × age
+            </button>
+          </div>
+        </div>
+
+        <label class="classification-lens-field toolbar-classifier">
+          <span>Classifier</span>
+          <select
+            id="classification-lens-select"
+            aria-label="Transaction classifier"
+          ></select>
+        </label>
+
+        <div class="coverage-block">
+          <div
+            id="classification-lifecycle"
+            class="classification-lifecycle"
+            data-state="waiting"
+            aria-live="polite"
+          >
+            <strong id="classification-state">Waiting</strong>
+            <span id="classification-progress"
+              >Classification starts after the first complete snapshot.</span
+            >
+          </div>
+          <div
+            class="coverage-legend"
+            aria-label="Evaluator coverage"
+            aria-hidden="true"
+            hidden
+          >
+            <span class="toolbar-label">Coverage</span>
+            <span
+              ><i class="legend-dot complete" aria-hidden="true"></i>Complete
+              <strong id="coverage-complete">0</strong></span
+            >
+            <span
+              ><i class="legend-dot incomplete" aria-hidden="true"></i
+              >Incomplete <strong id="coverage-incomplete">0</strong></span
+            >
+            <span
+              ><i class="legend-dot unclassified" aria-hidden="true"></i
+              ><span id="coverage-unclassified-label"
+                >Assessment unavailable</span
+              >
+              <strong id="coverage-unclassified">0</strong></span
+            >
+          </div>
+        </div>
+      </section>
+
+      <div class="workspace">
+        <section class="terrain-panel" aria-label="Mempool visualisation">
+          <div
+            id="overview-view"
+            role="tabpanel"
+            aria-labelledby="overview-tab"
+          >
+            <div class="terrain-heading classification-heading">
+              <div>
+                <p class="eyebrow">Independent classifier lenses</p>
+                <h2>Transaction overview</h2>
+              </div>
+            </div>
+            <div id="classification-method" class="classification-method">
+              <strong>Waiting for classifier catalog</strong>
+              <span
+                >Atlas publishes the available lenses with each snapshot.</span
+              >
+            </div>
+            <p id="classification-empty" class="empty-state">
+              The first complete mempool snapshot is being collected.
+            </p>
+            <div
+              id="classification-labels"
+              class="classification-labels"
+              aria-label="Classifier labels"
+            ></div>
+            <p id="classification-summary" class="visual-summary">
+              Labels within a multi-label classifier can overlap. Atlas does not
+              combine independent classifier taxonomies.
+            </p>
+          </div>
+
+          <div
+            id="terrain-view"
+            role="tabpanel"
+            aria-labelledby="terrain-tab"
+            hidden
+          >
+            <div class="terrain-heading">
+              <div>
+                <p id="terrain-eyebrow" class="eyebrow">
+                  Selected classifier lens
+                </p>
+                <h2 id="terrain-title">Transaction buckets</h2>
+              </div>
+              <dl class="terrain-totals" aria-label="Classification totals">
+                <div id="terrain-total-a" data-tone="complete">
+                  <dt id="terrain-total-a-label">Complete</dt>
+                  <dd id="terrain-total-a-count">0</dd>
+                </div>
+                <div id="terrain-total-b" data-tone="partial">
+                  <dt id="terrain-total-b-label">Partial</dt>
+                  <dd id="terrain-total-b-count">0</dd>
+                </div>
+                <div id="terrain-total-c" data-tone="unavailable">
+                  <dt id="terrain-total-c-label">Unavailable</dt>
+                  <dd id="terrain-total-c-count">0</dd>
+                </div>
+              </dl>
+            </div>
+
+            <p id="terrain-empty" class="empty-state">
+              The first complete mempool snapshot is being collected.
+            </p>
+            <div id="terrain-stage" class="terrain-stage" hidden>
+              <canvas
+                id="terrain-canvas"
+                tabindex="0"
+                aria-describedby="terrain-summary"
+              ></canvas>
+              <div
+                id="terrain-regions"
+                class="terrain-regions"
+                aria-label="Classification regions"
+              ></div>
+            </div>
+            <p id="terrain-summary" class="visual-summary">
+              Bucket area summarizes the selected classifier. Choose a bucket to
+              inspect its population.
+            </p>
+          </div>
+
+          <div
+            id="fee-age-view"
+            role="tabpanel"
+            aria-labelledby="fee-age-tab"
+            hidden
+          >
+            <div class="terrain-heading">
+              <div>
+                <p class="eyebrow">Secondary lens</p>
+                <h2>Fee rate × age</h2>
+              </div>
+              <p id="filter-summary" class="panel-summary">
+                No snapshot loaded.
+              </p>
+            </div>
+
+            <form id="filters" class="filter-grid">
+              <label>
+                <span>Minimum fee rate</span>
+                <span class="input-with-unit">
+                  <input
+                    id="minimum-fee-rate"
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value="0"
+                  />
+                  <small>sat/vB</small>
+                </span>
+              </label>
+              <label>
+                <span>Newest transactions</span>
+                <select id="maximum-age">
+                  <option value="all">Any age</option>
+                  <option value="600000">Last 10 minutes</option>
+                  <option value="3600000">Last hour</option>
+                  <option value="21600000">Last 6 hours</option>
+                  <option value="86400000">Last 24 hours</option>
+                  <option value="259200000">Last 3 days</option>
+                </select>
+              </label>
+              <label>
+                <span>Minimum transaction size</span>
+                <span class="input-with-unit">
+                  <input
+                    id="minimum-vsize"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value="0"
+                  />
+                  <small>vB</small>
+                </span>
+              </label>
+              <div class="filter-actions">
+                <button class="primary-action" type="submit">Apply</button>
+                <button id="reset-filters" type="button">Reset</button>
+              </div>
+            </form>
+
+            <p id="fee-age-empty" class="empty-state">
+              The first complete mempool snapshot is being collected.
+            </p>
+            <div id="fee-age-stage" class="canvas-wrap" hidden>
+              <canvas id="mempool-canvas" role="img"></canvas>
+            </div>
+            <p id="visual-summary" class="visual-summary"></p>
+          </div>
+        </section>
+
+        <aside class="inspector-panel" aria-labelledby="inspector-name">
+          <div class="inspector-heading">
+            <div>
+              <p id="inspector-eyebrow" class="eyebrow">Classifier lens</p>
+              <h2 id="inspector-name">Choose a classifier label</h2>
+            </div>
+            <span id="inspector-badge" class="policy-badge">Classifier</span>
+          </div>
+
+          <p id="inspector-description" class="rule-description">
+            Select a classifier label or bucket to inspect its population.
+          </p>
+          <p id="inspector-note" class="policy-note">
+            Each classifier declares its method, evidence boundary, and
+            limitations independently.
+          </p>
+
+          <div class="mode-row">
+            <span class="toolbar-label">Area represents</span>
+            <div class="segmented compact" aria-label="Bucket area metric">
+              <button id="mode-count" type="button" aria-pressed="true">
+                Count
+              </button>
+              <button id="mode-vsize" type="button" aria-pressed="false">
+                vsize
+              </button>
+            </div>
+          </div>
+
+          <dl class="population-metrics">
+            <div>
+              <dt>Transactions</dt>
+              <dd id="rule-count">0</dd>
+            </div>
+            <div>
+              <dt>Virtual size</dt>
+              <dd id="rule-vsize">0 vB</dd>
+            </div>
+            <div>
+              <dt>Snapshot share</dt>
+              <dd id="rule-share">0%</dd>
+            </div>
+          </dl>
+
+          <details class="inspector-disclosure filter-disclosure">
+            <summary>
+              <span>Labels &amp; rules</span>
+              <small>Optional filters</small>
+            </summary>
+            <nav
+              id="rule-list"
+              class="rule-list"
+              aria-label="Classifier label filters"
+            ></nav>
+            <p id="rule-overlap-note" class="rule-overlap-note">
+              Label totals may overlap within the selected classifier.
+            </p>
+          </details>
+
+          <details
+            id="sample-disclosure"
+            class="inspector-disclosure sample-section"
+          >
+            <summary>
+              <span id="sample-heading">Sample transactions</span>
+              <small id="sample-summary">No matches</small>
+            </summary>
+            <div class="disclosure-content">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Transaction</th>
+                      <th id="sample-classification-heading" scope="col">
+                        Classification
+                      </th>
+                      <th scope="col">vsize</th>
+                      <th scope="col">Fee rate</th>
+                    </tr>
+                  </thead>
+                  <tbody id="rule-transactions"></tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+
+          <details
+            id="transaction-disclosure"
+            class="inspector-disclosure detail-section"
+          >
+            <summary>
+              <span id="detail-heading">Selected transaction</span>
+              <small id="detail-status">Choose a sample</small>
+            </summary>
+            <div class="disclosure-content">
+              <div id="detail-transaction" class="detail-transaction"></div>
+              <div id="detail-classifiers" class="detail-classifiers"></div>
+              <ol id="detail-rules" class="detail-rules"></ol>
+            </div>
+          </details>
+        </aside>
+      </div>
+
+      <section
+        id="snapshot-distributions"
+        class="distribution-panel"
+        aria-label="Snapshot distributions"
+      >
+        <div class="terrain-heading">
+          <div>
+            <p class="eyebrow">Snapshot distributions</p>
+            <h2>Composition, fees, size &amp; age</h2>
+          </div>
+          <p class="panel-summary">
+            One node's current view. Absence from this mempool is not evidence
+            of rejection.
+          </p>
+        </div>
+        <p id="distribution-empty" class="empty-state">
+          The first complete mempool snapshot is being collected.
+        </p>
+        <div id="distribution-grid" class="distribution-grid" hidden>
+          <article
+            class="distribution-card"
+            aria-label="Composition by classifier lens"
+          >
+            <h3>Composition by lens</h3>
+            <p id="composition-note" class="distribution-note">Waiting</p>
+            <div id="composition-bars" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" aria-label="Fee-rate spectrum">
+            <h3>Fee structure</h3>
+            <p id="spectrum-note" class="distribution-note">Waiting</p>
+            <div id="spectrum-chart" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" aria-label="Ancestor fee rate">
+            <h3>Ancestor fee rate</h3>
+            <p id="package-note" class="distribution-note">Waiting</p>
+            <div id="package-chart" class="spectrum-wrap"></div>
+          </article>
+          <article
+            class="distribution-card"
+            aria-label="Joint fee-rate and size density"
+          >
+            <h3>Fee rate × size</h3>
+            <p id="joint-note" class="distribution-note">Waiting</p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>128k+</span><span>2k</span><span>64</span>
+              </div>
+              <div id="joint-chart" class="joint-chart-wrap">
+                <canvas
+                  id="joint-canvas"
+                  role="img"
+                  aria-label="Joint fee-rate and virtual-size density with marginal distributions"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" aria-label="Bucket by age mosaic">
+            <h3>Bucket × age</h3>
+            <p id="mosaic-note" class="distribution-note">Waiting</p>
+            <div id="mosaic-chart" class="mosaic-wrap"></div>
+          </article>
+          <article class="distribution-card" aria-label="Data carriage">
+            <h3>Data carriage</h3>
+            <p id="data-note" class="distribution-note">Waiting</p>
+            <div id="data-chart" class="spectrum-wrap"></div>
+          </article>
+          <article
+            class="distribution-card"
+            aria-label="Inputs by outputs density"
+          >
+            <h3>Inputs × outputs</h3>
+            <p id="complexity-note" class="distribution-note">Waiting</p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>1k+</span><span>32</span><span>1</span>
+              </div>
+              <div id="complexity-chart" class="joint-chart-wrap">
+                <canvas
+                  id="complexity-canvas"
+                  role="img"
+                  aria-label="Input-count by output-count density with marginal distributions"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" aria-label="Mempool entanglement">
+            <h3>Entanglement</h3>
+            <p id="entanglement-note" class="distribution-note">Waiting</p>
+            <div id="entanglement-bars" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" aria-label="Total output value">
+            <h3>Total output value</h3>
+            <p id="value-note" class="distribution-note">Waiting</p>
+            <div id="value-chart" class="spectrum-wrap"></div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

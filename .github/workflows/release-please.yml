@@ -1,0 +1,366 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Atlas starts as one root commit whose source metadata is already 1.0.0.
+      # A one-time published v1.0.0 release anchors that exact commit before
+      # automated release PRs are allowed to advance the version.
+      - name: Require root v1.0.0 release
+        id: bootstrap
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CURRENT_MAIN_SHA: ${{ github.sha }}
+        run: |
+          if ! release="$(gh release view v1.0.0 \
+            --repo "$REPO" \
+            --json tagName,isDraft,isPrerelease 2>/dev/null)"; then
+            echo "::warning::Publish v1.0.0 from the single root commit before enabling automated releases"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag_name="$(printf '%s' "$release" | jq -r .tagName)"
+          is_draft="$(printf '%s' "$release" | jq -r .isDraft)"
+          is_prerelease="$(printf '%s' "$release" | jq -r .isPrerelease)"
+          commit="$(gh api "repos/$REPO/commits/v1.0.0")"
+          commit_sha="$(printf '%s' "$commit" | jq -r .sha)"
+          parent_count="$(printf '%s' "$commit" | jq '.parents | length')"
+          comparison="$(gh api "repos/$REPO/compare/$commit_sha...$CURRENT_MAIN_SHA")"
+          comparison_status="$(printf '%s' "$comparison" | jq -r .status)"
+          merge_base_sha="$(printf '%s' "$comparison" | jq -r .merge_base_commit.sha)"
+          if [ "$tag_name" != "v1.0.0" ] || [ "$is_draft" != "false" ] || \
+            [ "$is_prerelease" != "false" ] || [ "$parent_count" != "0" ] || \
+            [ -z "$commit_sha" ] || [ "$commit_sha" = "null" ] || \
+            [ "$merge_base_sha" != "$commit_sha" ] || \
+            { [ "$comparison_status" != "ahead" ] && [ "$comparison_status" != "identical" ]; }; then
+            echo "::error::v1.0.0 must be a published, non-prerelease release of main's single root commit"
+            exit 1
+          fi
+          echo "root_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      # Serialized historical runs must not update a release PR after main has
+      # advanced. The current queued run will synchronize it instead.
+      - name: Require current release base
+        id: base
+        if: ${{ steps.bootstrap.outputs.ready == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.ref_name }}
+          EXPECTED_BASE_SHA: ${{ github.sha }}
+        run: |
+          live_base_sha="$(gh api "repos/$REPO/commits/$BASE_BRANCH" --jq .sha)"
+          if [ "$live_base_sha" = "$EXPECTED_BASE_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::$BASE_BRANCH advanced before release synchronization; leaving the current release PR untouched"
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Release Please creates draft PRs. Redraft an existing canonical PR
+      # before updating it so reviewers never observe an unvalidated new head.
+      - name: Draft pending release PR
+        if: ${{ steps.base.outputs.current == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          release_branch="release-please--branches--$BASE_BRANCH"
+          prs="$(gh pr list \
+            --repo "$REPO" \
+            --head "$release_branch" \
+            --base "$BASE_BRANCH" \
+            --state open \
+            --json number,headRefName,baseRefName,isDraft,isCrossRepository)"
+          prs="$(printf '%s' "$prs" | jq '[.[] | select(.isCrossRepository == false)]')"
+          count="$(printf '%s' "$prs" | jq 'length')"
+          if [ "$count" -gt 1 ]; then
+            echo "found multiple canonical release PR candidates" >&2
+            exit 1
+          fi
+          if [ "$count" -eq 1 ]; then
+            number="$(printf '%s' "$prs" | jq -r '.[0].number')"
+            head_ref="$(printf '%s' "$prs" | jq -r '.[0].headRefName')"
+            base_ref="$(printf '%s' "$prs" | jq -r '.[0].baseRefName')"
+            is_draft="$(printf '%s' "$prs" | jq -r '.[0].isDraft')"
+            if [ "$head_ref" != "$release_branch" ] || [ "$base_ref" != "$BASE_BRANCH" ]; then
+              echo "release PR identity is not canonical" >&2
+              exit 1
+            fi
+            if [ "$is_draft" = "false" ]; then
+              gh pr ready "$number" --repo "$REPO" --undo
+            fi
+          fi
+
+      - name: Run Release Please
+        id: release
+        if: ${{ steps.base.outputs.current == 'true' }}
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Resolve release PR
+        id: release_pr
+        if: ${{ steps.release.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          release_branch="release-please--branches--$BASE_BRANCH"
+          prs="$(gh pr list \
+            --repo "$REPO" \
+            --head "$release_branch" \
+            --base "$BASE_BRANCH" \
+            --state open \
+            --json number,headRefName,baseRefName,headRefOid,isDraft,title,isCrossRepository)"
+          prs="$(printf '%s' "$prs" | jq '[.[] | select(.isCrossRepository == false)]')"
+          count="$(printf '%s' "$prs" | jq 'length')"
+          if [ "$count" -gt 1 ]; then
+            echo "found multiple canonical release PR candidates" >&2
+            exit 1
+          fi
+          if [ "$count" -eq 0 ]; then
+            echo "has_release_pr=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "has_release_pr=true" >> "$GITHUB_OUTPUT"
+          echo "number=$(printf '%s' "$prs" | jq -r '.[0].number')" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(printf '%s' "$prs" | jq -r '.[0].headRefOid')" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release PR identity
+        id: identity
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          PR_NUMBER: ${{ steps.release_pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.ref_name }}
+          EXPECTED_HEAD_SHA: ${{ steps.release_pr.outputs.head_sha }}
+        run: |
+          release_branch="release-please--branches--$BASE_BRANCH"
+          details="$(gh pr view "$PR_NUMBER" \
+            --repo "$REPO" \
+            --json headRefName,baseRefName,headRefOid,isDraft,title,isCrossRepository)"
+          head_ref="$(printf '%s' "$details" | jq -r .headRefName)"
+          base_ref="$(printf '%s' "$details" | jq -r .baseRefName)"
+          head_sha="$(printf '%s' "$details" | jq -r .headRefOid)"
+          is_draft="$(printf '%s' "$details" | jq -r .isDraft)"
+          title="$(printf '%s' "$details" | jq -r .title)"
+          cross_repository="$(printf '%s' "$details" | jq -r .isCrossRepository)"
+          title_prefix="chore($BASE_BRANCH): release "
+          if [ "$cross_repository" != "false" ] || [ "$head_ref" != "$release_branch" ] || \
+            [ "$base_ref" != "$BASE_BRANCH" ] || [ "$head_sha" != "$EXPECTED_HEAD_SHA" ] || \
+            [ "$is_draft" != "true" ]; then
+            echo "::error::release PR identity or draft state is invalid"
+            exit 1
+          fi
+          case "$title" in
+            "$title_prefix"*) version="${title#"$title_prefix"}" ;;
+            *)
+              echo "::error::release PR title must match '${title_prefix}X.Y.Z'"
+              exit 1
+              ;;
+          esac
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+            [ "$title" != "${title_prefix}${version}" ]; then
+            echo "::error::release PR title must match '${title_prefix}X.Y.Z' exactly"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
+      - name: Require stable release base
+        id: stable
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          PR_NUMBER: ${{ steps.release_pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.ref_name }}
+          EXPECTED_BASE_SHA: ${{ github.sha }}
+          EXPECTED_HEAD_SHA: ${{ steps.release_pr.outputs.head_sha }}
+        run: |
+          live_base_sha="$(gh api "repos/$REPO/commits/$BASE_BRANCH" --jq .sha)"
+          if [ "$live_base_sha" != "$EXPECTED_BASE_SHA" ]; then
+            echo "::error::$BASE_BRANCH advanced during release generation; leaving the PR draft"
+            exit 1
+          fi
+          mergeable="UNKNOWN"
+          for attempt in 1 2 3 4 5; do
+            details="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid,mergeable)"
+            head_sha="$(printf '%s' "$details" | jq -r .headRefOid)"
+            mergeable="$(printf '%s' "$details" | jq -r .mergeable)"
+            [ "$mergeable" != "UNKNOWN" ] && break
+            echo "mergeable is UNKNOWN on attempt $attempt; retrying"
+            sleep 5
+          done
+          behind_by="$(gh api "repos/$REPO/compare/$EXPECTED_BASE_SHA...$EXPECTED_HEAD_SHA" --jq .behind_by)"
+          if [ "$head_sha" != "$EXPECTED_HEAD_SHA" ] || [ "$mergeable" != "MERGEABLE" ] || \
+            [ "$behind_by" != "0" ]; then
+            echo "::error::release head is not a current, mergeable child of the triggering base"
+            exit 1
+          fi
+
+      - name: Validate generated release diff
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          PR_NUMBER: ${{ steps.release_pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          EXPECTED_HEAD_SHA: ${{ steps.release_pr.outputs.head_sha }}
+        run: |
+          live_head_sha="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq .headRefOid)"
+          [ "$live_head_sha" = "$EXPECTED_HEAD_SHA" ] || {
+            echo "::error::release PR head changed before diff validation"
+            exit 1
+          }
+          files="$(gh api --paginate --slurp "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100")"
+          observed="$(printf '%s' "$files" | jq -c '[.[][] | {filename, status}] | sort_by(.filename)')"
+          expected='[{"filename":".release-please-manifest.json","status":"modified"},{"filename":"CHANGELOG.md","status":"modified"},{"filename":"Cargo.lock","status":"modified"},{"filename":"Cargo.toml","status":"modified"}]'
+          if [ "$observed" != "$expected" ]; then
+            echo "::error::release PR changed unexpected files or statuses: $observed"
+            exit 1
+          fi
+
+      - name: Check out validated release head
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.release_pr.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Rust
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.0
+          components: clippy, rustfmt
+
+      - name: Set up Node.js
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up just
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
+
+      - name: Validate generated release head
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        env:
+          EXPECTED_VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          ./scripts/check-release-head.sh \
+            --base-sha "${{ github.sha }}" \
+            --expected-version "$EXPECTED_VERSION"
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+          npm --prefix web ci
+          just lint
+          just test
+          just build
+          git diff --exit-code
+
+      - name: Verify release PR head
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          PR_NUMBER: ${{ steps.release_pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          EXPECTED_HEAD_SHA: ${{ steps.release_pr.outputs.head_sha }}
+        run: |
+          checked_out_sha="$(git rev-parse HEAD)"
+          live_head_sha="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq .headRefOid)"
+          if [ "$checked_out_sha" != "$EXPECTED_HEAD_SHA" ] || [ "$live_head_sha" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "::error::release PR head changed during validation"
+            exit 1
+          fi
+
+      - name: Publish validated release PR
+        if: ${{ steps.release_pr.outputs.has_release_pr == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          APPROVAL_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.release_pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.ref_name }}
+          EXPECTED_BASE_SHA: ${{ github.sha }}
+          EXPECTED_HEAD_SHA: ${{ steps.release_pr.outputs.head_sha }}
+          VALIDATED_TITLE: ${{ steps.identity.outputs.title }}
+        run: |
+          redraft=true
+          restore_draft() {
+            if [ "$redraft" = "true" ]; then
+              gh pr ready "$PR_NUMBER" --repo "$REPO" --undo >/dev/null 2>&1 || true
+            fi
+          }
+          trap restore_draft EXIT
+
+          strict="$(gh api "repos/$REPO/branches/$BASE_BRANCH/protection/required_status_checks" --jq .strict)"
+          [ "$strict" = "true" ] || {
+            echo "::error::$BASE_BRANCH must enforce strict required status checks"
+            exit 1
+          }
+          gh pr merge --help | grep -q -- '--match-head-commit' || {
+            echo "::error::gh pr merge does not support --match-head-commit"
+            exit 1
+          }
+
+          validate_live_identity() {
+            live_base_sha="$(gh api "repos/$REPO/commits/$BASE_BRANCH" --jq .sha)"
+            details="$(gh pr view "$PR_NUMBER" \
+              --repo "$REPO" \
+              --json headRefName,baseRefName,headRefOid,title,isCrossRepository)"
+            [ "$live_base_sha" = "$EXPECTED_BASE_SHA" ] && \
+              [ "$(printf '%s' "$details" | jq -r .headRefName)" = "release-please--branches--$BASE_BRANCH" ] && \
+              [ "$(printf '%s' "$details" | jq -r .baseRefName)" = "$BASE_BRANCH" ] && \
+              [ "$(printf '%s' "$details" | jq -r .headRefOid)" = "$EXPECTED_HEAD_SHA" ] && \
+              [ "$(printf '%s' "$details" | jq -r .title)" = "$VALIDATED_TITLE" ] && \
+              [ "$(printf '%s' "$details" | jq -r .isCrossRepository)" = "false" ]
+          }
+
+          validate_live_identity || {
+            echo "::error::release PR identity drifted before publication"
+            exit 1
+          }
+          gh pr ready "$PR_NUMBER" --repo "$REPO"
+          GH_TOKEN="$APPROVAL_TOKEN" gh pr review "$PR_NUMBER" \
+            --repo "$REPO" \
+            --approve \
+            --body "Automated approval for validated release PR."
+          validate_live_identity || {
+            echo "::error::release PR identity drifted after approval"
+            exit 1
+          }
+          gh pr merge "$PR_NUMBER" \
+            --repo "$REPO" \
+            --auto \
+            --squash \
+            --delete-branch \
+            --match-head-commit "$EXPECTED_HEAD_SHA" \
+            --subject "$VALIDATED_TITLE (#$PR_NUMBER)"
+          redraft=false

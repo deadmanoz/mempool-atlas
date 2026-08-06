@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Compare complete current mempool snapshots from two independently observed Bitcoin nodes."
+    />
+    <title>Mempool Atlas · Current Comparison</title>
+  </head>
+  <body>
+    <main class="shell comparison-shell">
+      <header class="atlas-header comparison-header">
+        <div class="brand-block">
+          <span class="brand-mark" aria-hidden="true">MA</span>
+          <div>
+            <div class="brand-title-row">
+              <h1>Mempool Atlas</h1>
+              <span id="atlas-version" class="atlas-version">v…</span>
+            </div>
+            <p>Current Comparison</p>
+            <nav class="product-nav" aria-label="Mempool Atlas products">
+              <a href="../">Node</a>
+              <a href="./" aria-current="page">Compare</a>
+            </nav>
+          </div>
+        </div>
+        <div class="comparison-heading-copy">
+          <strong>Two independent snapshots</strong>
+          <span
+            >Current membership only. Observations remain source-local.</span
+          >
+        </div>
+        <button id="comparison-refresh" class="refresh-button" type="button">
+          Refresh
+        </button>
+      </header>
+
+      <section
+        id="comparison-status"
+        class="status-strip"
+        data-state="waiting"
+        aria-live="polite"
+      >
+        <span class="status-light" aria-hidden="true"></span>
+        <strong id="comparison-status-title">Discovering sources</strong>
+        <span id="comparison-status-detail"
+          >Loading configured Bitcoin nodes.</span
+        >
+      </section>
+
+      <section
+        class="comparison-controls"
+        aria-labelledby="source-pair-heading"
+      >
+        <div class="comparison-controls-heading">
+          <div>
+            <p class="eyebrow">Current source pair</p>
+            <h2 id="source-pair-heading">Choose two node snapshots</h2>
+          </div>
+          <p>
+            Browser refresh reads Atlas memory. It does not trigger a node poll.
+          </p>
+        </div>
+        <div class="source-picker-row">
+          <label>
+            <span>Source A</span>
+            <select id="left-source" aria-label="Source A"></select>
+          </label>
+          <button
+            id="swap-sources"
+            class="swap-sources"
+            type="button"
+            aria-label="Swap source A and source B"
+          >
+            Swap
+          </button>
+          <label>
+            <span>Source B</span>
+            <select id="right-source" aria-label="Source B"></select>
+          </label>
+        </div>
+        <div class="source-card-grid">
+          <article id="left-source-card" class="source-card" data-side="left">
+            <p>Source A</p>
+            <h3>Waiting</h3>
+          </article>
+          <article id="right-source-card" class="source-card" data-side="right">
+            <p>Source B</p>
+            <h3>Waiting</h3>
+          </article>
+        </div>
+        <form
+          id="comparison-transaction-search"
+          class="transaction-search comparison-transaction-search"
+          role="search"
+        >
+          <label for="comparison-transaction-search-input">Transaction</label>
+          <div class="transaction-search-row">
+            <input
+              id="comparison-transaction-search-input"
+              name="txid"
+              type="search"
+              inputmode="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Find a txid in either snapshot"
+            />
+            <button type="submit">Find</button>
+          </div>
+          <span id="comparison-transaction-search-status" aria-live="polite"
+            >Search the current membership union.</span
+          >
+        </form>
+        <div id="sampling-panel" class="sampling-panel" hidden>
+          <div class="sampling-heading">
+            <div>
+              <span class="toolbar-label">Sampling</span>
+              <strong id="sampling-summary">Waiting</strong>
+            </div>
+            <span id="chain-summary">Chain tips unknown</span>
+          </div>
+          <div id="sampling-timeline" class="sampling-timeline"></div>
+          <p id="sampling-note"></p>
+        </div>
+      </section>
+
+      <section
+        id="comparison-distributions"
+        class="comparison-distributions"
+        aria-label="Source-local distributions"
+        hidden
+      >
+        <div class="comparison-distributions-heading">
+          <div>
+            <p class="eyebrow">Source-local distributions</p>
+            <h2>How does each current mempool look?</h2>
+          </div>
+          <div
+            class="segmented compact distribution-scope"
+            role="group"
+            aria-label="Distribution population scope"
+          >
+            <button id="dist-scope-all" type="button" aria-pressed="true">
+              All
+            </button>
+            <button id="dist-scope-common" type="button" aria-pressed="false">
+              Present in both
+            </button>
+            <button id="dist-scope-left" type="button" aria-pressed="false">
+              Only A
+            </button>
+            <button id="dist-scope-right" type="button" aria-pressed="false">
+              Only B
+            </button>
+          </div>
+          <p>
+            Each panel summarizes the selected population of one source's
+            current snapshot on shared axes, weighted by virtual size. Absence
+            from one source is not evidence of rejection.
+          </p>
+        </div>
+        <div class="comparison-distribution-grid">
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-comp-left-title">Composition by lens · Source A</h3>
+            <p class="distribution-note">
+              Virtual-size share per independent classifier lens.
+            </p>
+            <div id="composition-left" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-comp-right-title">Composition by lens · Source B</h3>
+            <p class="distribution-note">
+              Virtual-size share per independent classifier lens.
+            </p>
+            <div id="composition-right" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-spectrum-left-title">Fee structure · Source A</h3>
+            <p class="distribution-note">
+              Stacked virtual size per log fee-rate bin by script-profile group.
+            </p>
+            <div id="spectrum-left" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-spectrum-right-title">Fee structure · Source B</h3>
+            <p class="distribution-note">
+              Stacked virtual size per log fee-rate bin by script-profile group.
+            </p>
+            <div id="spectrum-right" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-package-left-title">Ancestor fee rate · Source A</h3>
+            <p class="distribution-note">
+              Delta-adjusted ancestor fees over ancestor virtual size.
+            </p>
+            <div id="package-left" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-package-right-title">Ancestor fee rate · Source B</h3>
+            <p class="distribution-note">
+              Delta-adjusted ancestor fees over ancestor virtual size.
+            </p>
+            <div id="package-right" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-joint-left-title">Fee rate × size · Source A</h3>
+            <p class="distribution-note">
+              Virtual-size density with marginals, normalized within this
+              source.
+            </p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>128k+</span><span>2k</span><span>64</span>
+              </div>
+              <div id="joint-left" class="joint-chart-wrap">
+                <canvas
+                  id="joint-left-canvas"
+                  role="img"
+                  aria-label="Source A joint fee-rate and virtual-size density"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-joint-right-title">Fee rate × size · Source B</h3>
+            <p class="distribution-note">
+              Virtual-size density with marginals, normalized within this
+              source.
+            </p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>128k+</span><span>2k</span><span>64</span>
+              </div>
+              <div id="joint-right" class="joint-chart-wrap">
+                <canvas
+                  id="joint-right-canvas"
+                  role="img"
+                  aria-label="Source B joint fee-rate and virtual-size density"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-mosaic-left-title">Bucket × age · Source A</h3>
+            <p class="distribution-note">
+              Column width is each script-profile group's virtual-size share;
+              cells split the group by age at observation.
+            </p>
+            <div id="mosaic-left" class="mosaic-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-mosaic-right-title">Bucket × age · Source B</h3>
+            <p class="distribution-note">
+              Column width is each script-profile group's virtual-size share;
+              cells split the group by age at observation.
+            </p>
+            <div id="mosaic-right" class="mosaic-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-data-left-title">Data carriage · Source A</h3>
+            <p class="distribution-note">
+              OP_RETURN carried bytes by data-protocols group, virtual-size
+              weighted.
+            </p>
+            <div id="data-left" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-data-right-title">Data carriage · Source B</h3>
+            <p class="distribution-note">
+              OP_RETURN carried bytes by data-protocols group, virtual-size
+              weighted.
+            </p>
+            <div id="data-right" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-complexity-left-title">Inputs × outputs · Source A</h3>
+            <p class="distribution-note">
+              Virtual-size density across input and output counts, normalized
+              within this source.
+            </p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>1k+</span><span>32</span><span>1</span>
+              </div>
+              <div id="complexity-left" class="joint-chart-wrap">
+                <canvas
+                  id="complexity-left-canvas"
+                  role="img"
+                  aria-label="Source A input-count by output-count density"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-complexity-right-title">
+              Inputs × outputs · Source B
+            </h3>
+            <p class="distribution-note">
+              Virtual-size density across input and output counts, normalized
+              within this source.
+            </p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>1k+</span><span>32</span><span>1</span>
+              </div>
+              <div id="complexity-right" class="joint-chart-wrap">
+                <canvas
+                  id="complexity-right-canvas"
+                  role="img"
+                  aria-label="Source B input-count by output-count density"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-entanglement-left-title">Entanglement · Source A</h3>
+            <p class="distribution-note">
+              Unconfirmed mempool relatives reported by this source.
+            </p>
+            <div id="entanglement-left" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-entanglement-right-title">Entanglement · Source B</h3>
+            <p class="distribution-note">
+              Unconfirmed mempool relatives reported by this source.
+            </p>
+            <div id="entanglement-right" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-value-left-title">Total output value · Source A</h3>
+            <p class="distribution-note">
+              Total output value per transaction by script-profile group.
+            </p>
+            <div id="value-left" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-value-right-title">Total output value · Source B</h3>
+            <p class="distribution-note">
+              Total output value per transaction by script-profile group.
+            </p>
+            <div id="value-right" class="spectrum-wrap"></div>
+          </article>
+        </div>
+      </section>
+
+      <section
+        id="comparison-policy-matrix"
+        class="comparison-policy-matrix"
+        aria-labelledby="comparison-policy-matrix-heading"
+        hidden
+      >
+        <div class="comparison-policy-matrix-heading">
+          <div>
+            <p class="eyebrow">Policy questions</p>
+            <h2 id="comparison-policy-matrix-heading">
+              Where do current policy outcomes differ?
+            </h2>
+          </div>
+          <p>
+            Each row is one source-local membership population partitioned by
+            policy result. Transactions present in both snapshots appear once
+            for each source.
+          </p>
+        </div>
+        <div class="comparison-policy-matrix-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Population</th>
+                <th scope="col">Compatible</th>
+                <th scope="col">Would violate deployed policy</th>
+                <th scope="col">Indeterminate</th>
+                <th scope="col">Unassessed</th>
+              </tr>
+            </thead>
+            <tbody id="comparison-policy-matrix-body"></tbody>
+          </table>
+        </div>
+        <p class="comparison-policy-matrix-note">
+          Violation totals include complete and partly unresolved assessments.
+          Rule-combination controls show only exact assessments. Unassessed
+          transactions are pending while their source is classifying and
+          unavailable after its pass completes or pauses.
+        </p>
+      </section>
+
+      <section
+        id="comparison-regions"
+        class="comparison-region-controls"
+        aria-label="Membership regions"
+      >
+        <button type="button" data-region="left_only" aria-pressed="false">
+          <span>Observed only in source A</span>
+          <strong>0</strong>
+          <small>0 vB</small>
+        </button>
+        <button type="button" data-region="common" aria-pressed="true">
+          <span>Present in both snapshots</span>
+          <strong>0</strong>
+          <small>0 vB in each source</small>
+        </button>
+        <button type="button" data-region="right_only" aria-pressed="false">
+          <span>Observed only in source B</span>
+          <strong>0</strong>
+          <small>0 vB</small>
+        </button>
+      </section>
+
+      <div class="workspace comparison-workspace">
+        <section
+          class="terrain-panel"
+          aria-label="Current membership comparison"
+        >
+          <div class="terrain-heading comparison-terrain-heading">
+            <div>
+              <p class="eyebrow">Current membership union</p>
+              <h2>Snapshot overlap</h2>
+            </div>
+            <dl class="comparison-union-total">
+              <div>
+                <dt>Union</dt>
+                <dd id="union-count">0 txids</dd>
+              </div>
+            </dl>
+          </div>
+          <p id="comparison-empty" class="empty-state">
+            Choose two sources with complete snapshots.
+          </p>
+          <div id="comparison-stage" class="comparison-stage" hidden>
+            <canvas
+              id="comparison-canvas"
+              tabindex="0"
+              role="img"
+              aria-describedby="comparison-visual-summary comparison-navigator-instructions"
+            ></canvas>
+          </div>
+          <div
+            id="comparison-transaction-navigator"
+            class="comparison-transaction-navigator"
+            hidden
+          >
+            <div class="comparison-navigator-heading">
+              <span class="toolbar-label">Keyboard transaction navigator</span>
+              <span id="comparison-navigator-summary">No transactions</span>
+            </div>
+            <div
+              id="comparison-transaction-listbox"
+              class="comparison-transaction-listbox"
+              role="listbox"
+              tabindex="0"
+              aria-label="Transactions in the selected membership region"
+              aria-activedescendant="comparison-active-transaction"
+              aria-describedby="comparison-navigator-instructions"
+            >
+              <div
+                id="comparison-active-transaction"
+                class="comparison-active-transaction"
+                role="option"
+                aria-selected="true"
+                aria-live="polite"
+              >
+                <code id="comparison-navigator-txid">Waiting</code>
+                <span id="comparison-navigator-variant"></span>
+              </div>
+            </div>
+            <p id="comparison-navigator-instructions">
+              Use arrow keys to visit every transaction in this region, Home or
+              End to jump, Page Up or Page Down to move by 100, and Enter to
+              inspect the current transaction.
+            </p>
+          </div>
+          <p id="comparison-visual-summary" class="visual-summary">
+            Each transaction ID appears once: present in both snapshots,
+            observed only in source A snapshot, or observed only in source B
+            snapshot.
+          </p>
+        </section>
+
+        <aside
+          class="inspector-panel comparison-inspector"
+          aria-labelledby="region-name"
+        >
+          <div class="inspector-heading">
+            <div>
+              <p id="region-eyebrow" class="eyebrow">Membership region</p>
+              <h2 id="region-name">Present in both snapshots</h2>
+            </div>
+            <span class="policy-badge">Current snapshots</span>
+          </div>
+          <p id="region-description" class="rule-description">
+            Transaction IDs observed in both independently sampled mempools.
+          </p>
+          <p class="policy-note">
+            Presence and absence describe these two sampled mempools only. They
+            do not establish why the memberships differ.
+          </p>
+
+          <div id="policy-source-row" class="mode-row">
+            <span class="toolbar-label">Policy source</span>
+            <div
+              class="segmented compact"
+              aria-label="Policy classification source"
+            >
+              <button id="policy-left" type="button" aria-pressed="true">
+                Source A
+              </button>
+              <button id="policy-right" type="button" aria-pressed="false">
+                Source B
+              </button>
+            </div>
+          </div>
+
+          <dl class="population-metrics comparison-population-metrics">
+            <div>
+              <dt>Matches</dt>
+              <dd id="comparison-match-count">0</dd>
+            </div>
+            <div>
+              <dt>Virtual size</dt>
+              <dd id="comparison-match-vsize">0 vB</dd>
+            </div>
+            <div>
+              <dt>Union share</dt>
+              <dd id="comparison-match-share">0%</dd>
+            </div>
+          </dl>
+
+          <section
+            class="comparison-policy-section"
+            aria-labelledby="marginal-rules-heading"
+          >
+            <div class="section-heading">
+              <h3 id="marginal-rules-heading">Marginal rule filters</h3>
+              <button id="clear-policy-filter" type="button">Show all</button>
+            </div>
+            <nav
+              id="comparison-rule-list"
+              class="rule-list"
+              aria-label="BIP-110 marginal rule filters"
+            ></nav>
+            <p class="rule-overlap-note">
+              Rule totals overlap. Exact and partial combinations remain
+              separate below.
+            </p>
+          </section>
+
+          <section
+            class="comparison-bucket-section"
+            aria-labelledby="policy-buckets-heading"
+          >
+            <div class="section-heading">
+              <h3 id="policy-buckets-heading">Observed policy buckets</h3>
+              <span id="policy-bucket-summary">No snapshot</span>
+            </div>
+            <div id="policy-buckets" class="policy-bucket-list"></div>
+          </section>
+
+          <section
+            class="sample-section"
+            aria-labelledby="comparison-sample-heading"
+          >
+            <div class="section-heading">
+              <h3 id="comparison-sample-heading">Sample transactions</h3>
+              <span id="comparison-sample-summary">No matches</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Transaction</th>
+                    <th scope="col">Source A policy</th>
+                    <th scope="col">Source B policy</th>
+                    <th scope="col">Variant</th>
+                  </tr>
+                </thead>
+                <tbody id="comparison-transactions"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section
+            class="detail-section"
+            aria-labelledby="comparison-detail-heading"
+          >
+            <div class="section-heading">
+              <h3 id="comparison-detail-heading">Selected transaction</h3>
+              <span id="comparison-detail-status">Choose a sample</span>
+            </div>
+            <div id="comparison-detail" class="comparison-detail"></div>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <script type="module" src="/src/comparison-main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+.DS_Store
+.editorconfig
+.env
+.env.*
+!.env.example
+
+/target/
+/var/
+
+# Local source configuration. It carries RPC addresses, usernames, and
+# credential filenames, so it must never reach a commit.
+/config/sources.json
+/config/sources.*.json
+!/config/sources.example.json
+
+# Named RPC password files, wherever they are kept.
+*.password
+
+/web/node_modules/
+/web/dist/
+/web/coverage/
+/web/playwright-report/
+/web/test-results/
+
+.claude/

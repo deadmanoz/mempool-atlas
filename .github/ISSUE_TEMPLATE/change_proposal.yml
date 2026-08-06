@@ -1,0 +1,55 @@
+name: Change proposal
+description: Propose a behavioural, classifier, or interface change.
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Agree the scope and semantics here before writing code. Mempool Atlas is
+        deliberately memory-only and current-state only, so proposals that add a
+        database, queue, delta protocol, history, or a server-side combined
+        mempool are out of scope by design.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is currently unclear, missing, or misleading, and for whom.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The change you want, and how it would be presented or exposed.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - New or changed classifier lens
+        - Classifier rule, threshold, or evidence change
+        - Viewer presentation or interaction
+        - API or snapshot schema
+        - Deployment and operations
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: semantics
+    attributes:
+      label: Semantics and limits
+      description: >
+        For classifier work, state what the result would prove and what it would
+        not. Say which facts are required, what happens when they are missing,
+        and why the result is not a claim about rejection or relay causality.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

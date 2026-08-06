@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in the service, classifiers, or viewer behaves incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never include node addresses, RPC credentials, or private infrastructure
+        details. Redact them before pasting logs or configuration.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: Describe the incorrect behaviour and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >
+        The steps that produce it. For viewer issues, include the URL state
+        (source, classifier, filter, transaction) since those are addressable.
+    validations:
+      required: true
+
+  - type: input
+    id: revision
+    attributes:
+      label: Revision
+      description: Commit hash or release tag.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Membership polling and RPC
+        - Classification and lifecycle
+        - BIP-110 evaluation
+        - API and caching
+        - Node viewer
+        - Comparison view
+        - Deployment and operations
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >
+        Bitcoin node implementation and version, Rust version, Node.js version,
+        operating system, and browser where relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant Atlas output, with addresses and credentials removed.
+      render: text

@@ -1,0 +1,28 @@
+{
+  "name": "mempool-atlas-web",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run --exclude 'e2e/**'",
+    "test:e2e": "playwright test",
+    "check": "prettier --check . && tsc --noEmit",
+    "format": "prettier --write .",
+    "clean": "rm -rf dist coverage node_modules/.vite",
+    "audit": "npm audit --audit-level=moderate"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "happy-dom": "^20.11.1",
+    "prettier": "^3.9.6",
+    "typescript": "~7.0.2",
+    "vite": "^8.2.0",
+    "vitest": "^4.1.10"
+  }
+}
