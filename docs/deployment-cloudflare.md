@@ -225,7 +225,8 @@ Cloudflare rules are active:
 just smoke-public https://atlas.example.com node-a
 ```
 
-It verifies source discovery, hidden public health paths, Cloudflare routing,
+It verifies the source discovery status, cache policy, and required semantic
+Atlas version, plus hidden public health paths, Cloudflare routing,
 compression, cache eligibility, the snapshot cache policy, and conditional
 `304` behavior. Rate-limit actions and direct-origin isolation require separate
 staging and firewall checks.

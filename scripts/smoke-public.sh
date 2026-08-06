@@ -65,6 +65,11 @@ if [[ $(require_header cache-control "$temp_dir/sources.headers") != no-store ]]
     printf 'source discovery must remain non-cacheable\n' >&2
     exit 1
 fi
+if ! grep -Eq '"atlas_version"[[:space:]]*:[[:space:]]*"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?"' \
+    "$temp_dir/sources.json"; then
+    printf 'source discovery is missing a valid atlas_version\n' >&2
+    exit 1
+fi
 
 health_status=$(curl --silent --show-error --max-time 30 \
     --output /dev/null --write-out '%{http_code}' "$base_url/healthz")
