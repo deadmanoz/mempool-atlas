@@ -1,7 +1,21 @@
+import {
+  createBucketTerrainLayout,
+  hitTestBucketTerrain,
+  paintBucketTerrain,
+  type BucketTerrainGlyph,
+  type BucketTerrainHit,
+  type BucketTerrainLayout,
+  type BucketTerrainMode,
+  type BucketTerrainRect,
+  type BucketTerrainRegion,
+  type BucketTerrainSection,
+  type BucketTerrainSectionGroup,
+} from "./bucket-terrain";
+import { prepareCanvasBacking } from "./canvas-backing";
 import type { Bip110Assessment, MempoolTransaction, RuleId } from "./types";
 import { RULE_IDS } from "./types";
 
-export type TerrainMode = "count" | "vsize";
+export type TerrainMode = BucketTerrainMode;
 export type RuleMask = number;
 export type ExactSignatureKey = `exact:${string}`;
 export type PartialSignatureKey = `partial:${string}:${string}`;
@@ -109,42 +123,17 @@ export interface ViolationSignature {
   foundationRule: RuleId | null;
 }
 
-export interface TerrainRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-export interface TerrainSection {
-  key: TerrainSectionKey;
-  rect: TerrainRect;
-  contentRect: TerrainRect;
-  transactionCount: number;
-  totalVsize: number;
-  weight: number;
-  labelHeight: number;
-}
-
-export interface TerrainRegion {
-  key: TerrainRegionKey;
-  sectionKey: TerrainSectionKey;
-  signature: ViolationSignature | null;
-  rect: TerrainRect;
-  contentRect: TerrainRect;
-  transactionCount: number;
-  totalVsize: number;
-  weight: number;
-  labelHeight: number;
-}
-
-export interface TerrainGlyph {
-  txid: string;
-  regionKey: TerrainRegionKey;
-  sectionKey: TerrainSectionKey;
-  rect: TerrainRect;
-  vsize: number;
-}
+export type TerrainRect = BucketTerrainRect;
+export type TerrainSection = BucketTerrainSection<TerrainSectionKey>;
+export type TerrainRegion = BucketTerrainRegion<
+  TerrainSectionKey,
+  TerrainRegionKey,
+  ViolationSignature | null
+>;
+export type TerrainGlyph = BucketTerrainGlyph<
+  TerrainSectionKey,
+  TerrainRegionKey
+>;
 
 export interface ClassificationTotals {
   compatible: { count: number; vsize: number };
@@ -178,27 +167,20 @@ export interface StatusPopulation {
   totalShare: number;
 }
 
-export interface TerrainLayout {
-  width: number;
-  height: number;
-  mode: TerrainMode;
-  sections: TerrainSection[];
-  regions: TerrainRegion[];
-  glyphs: TerrainGlyph[];
+export interface TerrainLayout extends BucketTerrainLayout<
+  TerrainSectionKey,
+  TerrainRegionKey,
+  ViolationSignature | null
+> {
   totals: ClassificationTotals;
 }
 
-export type TerrainHit =
-  | { kind: "transaction"; glyph: TerrainGlyph }
-  | { kind: "region"; region: TerrainRegion }
-  | null;
+export type TerrainHit = BucketTerrainHit<
+  TerrainSectionKey,
+  TerrainRegionKey,
+  ViolationSignature | null
+>;
 
-const SECTION_GAP = 4;
-const SECTION_LABEL_HEIGHT = 42;
-const REGION_GAP = 3;
-const REGION_LABEL_HEIGHT = 36;
-const GLYPH_GAP = 0.75;
-const MIN_CONTENT_EXTENT = 0.5;
 const RULE_MASK_LIMIT = (1 << RULE_IDS.length) - 1;
 
 const RULE_BITS = new Map<RuleId, RuleMask>(
@@ -354,7 +336,7 @@ const inverseGrayRank = (mask: RuleMask): number => {
   return rank & RULE_MASK_LIMIT;
 };
 
-const compareSignatures = (
+export const compareViolationSignatures = (
   left: ViolationSignature,
   right: ViolationSignature,
 ): number => {
@@ -413,7 +395,9 @@ export const signaturePopulations = (
     }
   }
   return [...groups.values()]
-    .sort((left, right) => compareSignatures(left.signature, right.signature))
+    .sort((left, right) =>
+      compareViolationSignatures(left.signature, right.signature),
+    )
     .map(({ signature, transactions: selected }) => {
       const sorted = sortTransactions(selected);
       return {
@@ -471,216 +455,25 @@ export const incompleteViolationPopulation = (
   };
 };
 
-const insetRect = (rect: TerrainRect, inset: number): TerrainRect => ({
-  x: rect.x + inset,
-  y: rect.y + inset,
-  width: Math.max(0, rect.width - inset * 2),
-  height: Math.max(0, rect.height - inset * 2),
-});
-
-const adaptiveInsetRect = (
-  rect: TerrainRect,
-  preferredInset: number,
-): TerrainRect => {
-  const maximumInset = Math.max(
-    0,
-    Math.min(rect.width, rect.height) / 2 - MIN_CONTENT_EXTENT / 2,
-  );
-  return insetRect(rect, Math.min(preferredInset, maximumInset));
-};
-
-const adaptiveLabelHeight = (
-  availableHeight: number,
-  preferredHeight: number,
-  proportionalHeight: number,
-): number =>
-  Math.max(
-    0,
-    Math.min(
-      preferredHeight,
-      availableHeight * proportionalHeight,
-      availableHeight - MIN_CONTENT_EXTENT,
-    ),
-  );
-
-interface WeightedItem<Key extends string> {
-  key: Key;
-  weight: number;
-}
-
-const splitWeightedRegions = <Key extends string>(
-  items: readonly WeightedItem<Key>[],
-  rect: TerrainRect,
-): Map<Key, TerrainRect> => {
-  const result = new Map<Key, TerrainRect>();
-  const stack: Array<{
-    start: number;
-    end: number;
-    rect: TerrainRect;
-  }> = [{ start: 0, end: items.length, rect }];
-  const prefix = [0];
-  for (const item of items) {
-    prefix.push((prefix.at(-1) ?? 0) + item.weight);
-  }
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (current === undefined || current.start >= current.end) {
-      continue;
-    }
-    if (current.end - current.start === 1) {
-      const item = items[current.start];
-      if (item !== undefined) {
-        result.set(item.key, current.rect);
-      }
-      continue;
-    }
-
-    const total = (prefix[current.end] ?? 0) - (prefix[current.start] ?? 0);
-    const halfway = (prefix[current.start] ?? 0) + total / 2;
-    let split = current.start + 1;
-    while (
-      split < current.end - 1 &&
-      (prefix[split] ?? Number.POSITIVE_INFINITY) < halfway
-    ) {
-      split += 1;
-    }
-    const firstWeight = (prefix[split] ?? 0) - (prefix[current.start] ?? 0);
-    const ratio = total === 0 ? 0.5 : firstWeight / total;
-    const splitVertically = current.rect.width >= current.rect.height;
-    const firstRect: TerrainRect = splitVertically
-      ? { ...current.rect, width: current.rect.width * ratio }
-      : { ...current.rect, height: current.rect.height * ratio };
-    const secondRect: TerrainRect = splitVertically
-      ? {
-          x: current.rect.x + firstRect.width,
-          y: current.rect.y,
-          width: current.rect.width - firstRect.width,
-          height: current.rect.height,
-        }
-      : {
-          x: current.rect.x,
-          y: current.rect.y + firstRect.height,
-          width: current.rect.width,
-          height: current.rect.height - firstRect.height,
-        };
-    stack.push({ start: split, end: current.end, rect: secondRect });
-    stack.push({ start: current.start, end: split, rect: firstRect });
-  }
-  return result;
-};
-
-const packTransactions = (
-  transactions: readonly MempoolTransaction[],
-  rect: TerrainRect,
-  regionKey: TerrainRegionKey,
-  sectionKey: TerrainSectionKey,
-  mode: TerrainMode,
-): TerrainGlyph[] => {
-  if (transactions.length === 0 || rect.width <= 0 || rect.height <= 0) {
-    return [];
-  }
-  const weights = transactions.map((transaction) =>
-    mode === "count" ? 1 : transaction.vsize,
-  );
-  const prefix = [0];
-  for (const weight of weights) {
-    prefix.push((prefix.at(-1) ?? 0) + weight);
-  }
-  const glyphs: TerrainGlyph[] = [];
-  const stack: Array<{
-    start: number;
-    end: number;
-    rect: TerrainRect;
-  }> = [{ start: 0, end: transactions.length, rect }];
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (current === undefined || current.start >= current.end) {
-      continue;
-    }
-    if (current.end - current.start === 1) {
-      const transaction = transactions[current.start];
-      if (transaction !== undefined) {
-        const adaptiveGap = Math.min(
-          GLYPH_GAP,
-          current.rect.width * 0.08,
-          current.rect.height * 0.08,
-        );
-        glyphs.push({
-          txid: transaction.txid,
-          regionKey,
-          sectionKey,
-          rect: insetRect(current.rect, adaptiveGap),
-          vsize: transaction.vsize,
-        });
-      }
-      continue;
-    }
-
-    const total = (prefix[current.end] ?? 0) - (prefix[current.start] ?? 0);
-    const halfway = (prefix[current.start] ?? 0) + total / 2;
-    let low = current.start + 1;
-    let high = current.end - 1;
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      if ((prefix[middle] ?? 0) < halfway) {
-        low = middle + 1;
-      } else {
-        high = middle;
-      }
-    }
-    const split = Math.min(current.end - 1, Math.max(current.start + 1, low));
-    const firstWeight = (prefix[split] ?? 0) - (prefix[current.start] ?? 0);
-    const ratio = total === 0 ? 0.5 : firstWeight / total;
-    const splitVertically = current.rect.width >= current.rect.height;
-    const firstRect: TerrainRect = splitVertically
-      ? { ...current.rect, width: current.rect.width * ratio }
-      : { ...current.rect, height: current.rect.height * ratio };
-    const secondRect: TerrainRect = splitVertically
-      ? {
-          x: current.rect.x + firstRect.width,
-          y: current.rect.y,
-          width: current.rect.width - firstRect.width,
-          height: current.rect.height,
-        }
-      : {
-          x: current.rect.x,
-          y: current.rect.y + firstRect.height,
-          width: current.rect.width,
-          height: current.rect.height - firstRect.height,
-        };
-    stack.push({ start: split, end: current.end, rect: secondRect });
-    stack.push({ start: current.start, end: split, rect: firstRect });
-  }
-  return glyphs;
-};
-
-const metric = (
-  transactions: readonly MempoolTransaction[],
-  mode: TerrainMode,
-): number => (mode === "count" ? transactions.length : sumVsize(transactions));
-
-interface TerrainGroup {
-  key: TerrainRegionKey;
-  sectionKey: TerrainSectionKey;
-  signature: ViolationSignature | null;
-  transactions: MempoolTransaction[];
-}
-
-interface SectionGroup {
-  key: TerrainSectionKey;
-  transactions: MempoolTransaction[];
-  regions: TerrainGroup[];
-}
-
 const terrainGroups = (
   transactions: readonly MempoolTransaction[],
-): SectionGroup[] => {
+): BucketTerrainSectionGroup<
+  TerrainSectionKey,
+  TerrainRegionKey,
+  ViolationSignature | null
+>[] => {
   const compatible: MempoolTransaction[] = [];
   const indeterminate: MempoolTransaction[] = [];
   const unclassified: MempoolTransaction[] = [];
-  const signatures = new Map<ViolationSignatureKey, TerrainGroup>();
+  const signatures = new Map<
+    ViolationSignatureKey,
+    {
+      key: ViolationSignatureKey;
+      sectionKey: TerrainSectionKey;
+      signature: ViolationSignature;
+      transactions: MempoolTransaction[];
+    }
+  >();
 
   for (const transaction of transactions) {
     const assessment = transaction.bip110;
@@ -718,7 +511,7 @@ const terrainGroups = (
   }
 
   const signatureGroups = [...signatures.values()].sort((left, right) =>
-    compareSignatures(
+    compareViolationSignatures(
       left.signature as ViolationSignature,
       right.signature as ViolationSignature,
     ),
@@ -729,7 +522,11 @@ const terrainGroups = (
   const incomplete = signatureGroups.filter(
     ({ sectionKey }) => sectionKey === "violating_incomplete",
   );
-  const groups: SectionGroup[] = [];
+  const groups: BucketTerrainSectionGroup<
+    TerrainSectionKey,
+    TerrainRegionKey,
+    ViolationSignature | null
+  >[] = [];
   const pushStatus = (
     key: "compatible" | "indeterminate" | "unclassified",
     entries: MempoolTransaction[],
@@ -748,6 +545,7 @@ const terrainGroups = (
           transactions: entries,
         },
       ],
+      nested: false,
     });
   };
 
@@ -758,6 +556,7 @@ const terrainGroups = (
       key: "violating_exact",
       transactions: exact.flatMap(({ transactions: entries }) => entries),
       regions: exact,
+      nested: true,
     });
   }
   if (incomplete.length > 0) {
@@ -765,41 +564,11 @@ const terrainGroups = (
       key: "violating_incomplete",
       transactions: incomplete.flatMap(({ transactions: entries }) => entries),
       regions: incomplete,
+      nested: true,
     });
   }
   pushStatus("unclassified", unclassified);
   return groups;
-};
-
-const sectionLayoutWeights = (
-  groups: readonly SectionGroup[],
-  mode: TerrainMode,
-): number[] => {
-  const weights = groups.map((group) =>
-    Math.cbrt(metric(group.transactions, mode)),
-  );
-  const violatingIndexes = groups.flatMap((group, index) =>
-    group.key === "violating_exact" || group.key === "violating_incomplete"
-      ? [index]
-      : [],
-  );
-  const violatingWeight = violatingIndexes.reduce(
-    (total, index) => total + (weights[index] ?? 0),
-    0,
-  );
-  const otherWeight = weights.reduce((total, weight, index) => {
-    return violatingIndexes.includes(index) ? total : total + weight;
-  }, 0);
-  if (violatingWeight > 0 && otherWeight > 0) {
-    const requiredForVisibility = (otherWeight * 0.32) / 0.68;
-    if (violatingWeight < requiredForVisibility) {
-      const scale = requiredForVisibility / violatingWeight;
-      for (const index of violatingIndexes) {
-        weights[index] = (weights[index] ?? 0) * scale;
-      }
-    }
-  }
-  return weights;
 };
 
 export const createTerrainLayout = (
@@ -807,144 +576,21 @@ export const createTerrainLayout = (
   width: number,
   height: number,
   mode: TerrainMode,
-): TerrainLayout => {
-  const safeWidth = Math.max(1, width);
-  const safeHeight = Math.max(1, height);
-  const groups = terrainGroups(transactions);
-  const layoutWeights = sectionLayoutWeights(groups, mode);
-  const sectionRects = splitWeightedRegions(
-    groups.map((group, index) => ({
-      key: group.key,
-      weight: layoutWeights[index] ?? 1,
-    })),
-    { x: 0, y: 0, width: safeWidth, height: safeHeight },
-  );
-
-  const sections: TerrainSection[] = [];
-  const regions: TerrainRegion[] = [];
-  const glyphs: TerrainGlyph[] = [];
-
-  for (const group of groups) {
-    const rawRect = sectionRects.get(group.key) ?? {
-      x: 0,
-      y: 0,
-      width: 0,
-      height: 0,
-    };
-    const rect = adaptiveInsetRect(rawRect, SECTION_GAP / 2);
-    const sectionLabelHeight = adaptiveLabelHeight(
-      rect.height,
-      SECTION_LABEL_HEIGHT,
-      0.16,
-    );
-    const contentRect = adaptiveInsetRect(
-      {
-        x: rect.x,
-        y: rect.y + sectionLabelHeight,
-        width: rect.width,
-        height: Math.max(0, rect.height - sectionLabelHeight),
-      },
-      2,
-    );
-    const section: TerrainSection = {
-      key: group.key,
-      rect,
-      contentRect,
-      transactionCount: group.transactions.length,
-      totalVsize: sumVsize(group.transactions),
-      weight: metric(group.transactions, mode),
-      labelHeight: sectionLabelHeight,
-    };
-    sections.push(section);
-
-    const nested =
-      group.key === "violating_exact" || group.key === "violating_incomplete";
-    const regionWeights = group.regions.map((region) => ({
-      key: region.key,
-      weight: nested
-        ? Math.sqrt(metric(region.transactions, mode))
-        : metric(region.transactions, mode),
-    }));
-    const regionRects = nested
-      ? splitWeightedRegions(regionWeights, contentRect)
-      : new Map<TerrainRegionKey, TerrainRect>([
-          [group.regions[0]?.key ?? "unclassified", contentRect],
-        ]);
-
-    for (const regionGroup of group.regions) {
-      const rawRegionRect = regionRects.get(regionGroup.key) ?? contentRect;
-      const regionRect = nested
-        ? adaptiveInsetRect(rawRegionRect, REGION_GAP / 2)
-        : rawRegionRect;
-      const regionLabelHeight = nested
-        ? adaptiveLabelHeight(regionRect.height, REGION_LABEL_HEIGHT, 0.2)
-        : 0;
-      const regionContentRect = adaptiveInsetRect(
-        {
-          x: regionRect.x,
-          y: regionRect.y + regionLabelHeight,
-          width: regionRect.width,
-          height: Math.max(0, regionRect.height - regionLabelHeight),
-        },
-        3,
-      );
-      const region: TerrainRegion = {
-        key: regionGroup.key,
-        sectionKey: group.key,
-        signature: regionGroup.signature,
-        rect: regionRect,
-        contentRect: regionContentRect,
-        transactionCount: regionGroup.transactions.length,
-        totalVsize: sumVsize(regionGroup.transactions),
-        weight: metric(regionGroup.transactions, mode),
-        labelHeight: regionLabelHeight,
-      };
-      regions.push(region);
-      for (const glyph of packTransactions(
-        regionGroup.transactions,
-        regionContentRect,
-        regionGroup.key,
-        group.key,
-        mode,
-      )) {
-        glyphs.push(glyph);
-      }
-    }
-  }
-
-  return {
-    width: safeWidth,
-    height: safeHeight,
+): TerrainLayout => ({
+  ...createBucketTerrainLayout(
+    terrainGroups(transactions),
+    width,
+    height,
     mode,
-    sections,
-    regions,
-    glyphs,
-    totals: classificationTotals(transactions),
-  };
-};
-
-const containsPoint = (rect: TerrainRect, x: number, y: number): boolean =>
-  x >= rect.x &&
-  x <= rect.x + rect.width &&
-  y >= rect.y &&
-  y <= rect.y + rect.height;
+  ),
+  totals: classificationTotals(transactions),
+});
 
 export const hitTestTerrain = (
   layout: TerrainLayout,
   x: number,
   y: number,
-): TerrainHit => {
-  const region = layout.regions.find(({ rect }) => containsPoint(rect, x, y));
-  if (region === undefined) {
-    return null;
-  }
-  for (const glyph of layout.glyphs) {
-    if (glyph.regionKey === region.key && containsPoint(glyph.rect, x, y)) {
-      return { kind: "transaction", glyph };
-    }
-  }
-  return { kind: "region", region };
-};
+): TerrainHit => hitTestBucketTerrain(layout, x, y);
 
 const regionColor = (region: TerrainRegion): string => {
   if (region.key === "compatible") {
@@ -977,91 +623,25 @@ export const paintTerrain = (
   layout: TerrainLayout,
   selection: TerrainSelection,
   selectedTxid: string | null = null,
-): void => {
-  context.clearRect(0, 0, layout.width, layout.height);
-  context.fillStyle = "#071018";
-  context.fillRect(0, 0, layout.width, layout.height);
-
-  for (const section of layout.sections) {
-    context.fillStyle = "#0a161e";
-    context.fillRect(
-      section.rect.x,
-      section.rect.y,
-      section.rect.width,
-      section.rect.height,
-    );
-    context.strokeStyle = "#2a3b48";
-    context.lineWidth = 1;
-    context.strokeRect(
-      section.rect.x,
-      section.rect.y,
-      section.rect.width,
-      section.rect.height,
-    );
-  }
-
-  for (const region of layout.regions) {
-    const selected = regionMatchesSelection(region, selection);
-    context.fillStyle = "#0d1922";
-    context.fillRect(
-      region.rect.x,
-      region.rect.y,
-      region.rect.width,
-      region.rect.height,
-    );
-    context.strokeStyle = selected
-      ? "#6ef2f0"
-      : region.signature?.completeness === "partial"
-        ? "#9a7735"
-        : "#243744";
-    context.lineWidth = selected ? 1.75 : 1;
-    context.strokeRect(
-      region.rect.x,
-      region.rect.y,
-      region.rect.width,
-      region.rect.height,
-    );
-  }
-
-  const regionsByKey = new Map(
-    layout.regions.map((region) => [region.key, region]),
+): void =>
+  paintBucketTerrain(
+    context,
+    layout,
+    {
+      color: regionColor,
+      selected: (region) => regionMatchesSelection(region, selection),
+      partial: (region) => region.signature?.completeness === "partial",
+      glyphOpacity: (region, selected) =>
+        region.signature === null
+          ? 0.82
+          : selected
+            ? 1
+            : selection.kind === "rule"
+              ? 0.46
+              : 0.7,
+    },
+    selectedTxid,
   );
-  let selectedGlyph: TerrainGlyph | null = null;
-  for (const glyph of layout.glyphs) {
-    const region = regionsByKey.get(glyph.regionKey);
-    if (region === undefined) {
-      continue;
-    }
-    context.fillStyle = regionColor(region);
-    if (region.signature === null) {
-      context.globalAlpha = 0.82;
-    } else if (regionMatchesSelection(region, selection)) {
-      context.globalAlpha = 1;
-    } else {
-      context.globalAlpha = selection.kind === "rule" ? 0.46 : 0.7;
-    }
-    context.fillRect(
-      glyph.rect.x,
-      glyph.rect.y,
-      glyph.rect.width,
-      glyph.rect.height,
-    );
-    if (glyph.txid === selectedTxid) {
-      selectedGlyph = glyph;
-    }
-  }
-  context.globalAlpha = 1;
-  if (selectedGlyph !== null) {
-    context.strokeStyle = "#f7ff6a";
-    context.lineWidth = 2.5;
-    context.strokeRect(
-      selectedGlyph.rect.x,
-      selectedGlyph.rect.y,
-      selectedGlyph.rect.width,
-      selectedGlyph.rect.height,
-    );
-  }
-};
 
 export const renderTerrain = (
   canvas: HTMLCanvasElement,
@@ -1071,21 +651,7 @@ export const renderTerrain = (
   previousLayout: TerrainLayout | null = null,
   selectedTxid: string | null = null,
 ): TerrainLayout => {
-  const bounds = canvas.getBoundingClientRect();
-  const width = Math.max(1, bounds.width);
-  const height = Math.max(1, bounds.height);
-  const scale = Math.max(1, window.devicePixelRatio || 1);
-  const pixelWidth = Math.round(width * scale);
-  const pixelHeight = Math.round(height * scale);
-  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-    canvas.width = pixelWidth;
-    canvas.height = pixelHeight;
-  }
-  const context = canvas.getContext("2d");
-  if (context === null) {
-    throw new Error("Canvas rendering is not available");
-  }
-  context.setTransform(scale, 0, 0, scale, 0, 0);
+  const { context, width, height } = prepareCanvasBacking(canvas, "subpixel");
   const layout =
     previousLayout !== null &&
     previousLayout.width === width &&

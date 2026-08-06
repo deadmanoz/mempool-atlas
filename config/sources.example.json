@@ -1,0 +1,18 @@
+{
+  "sources": [
+    {
+      "source_id": "node-a",
+      "source_label": "Bitcoin node A",
+      "rpc_url": "http://127.0.0.1:8332/",
+      "rpc_username": "atlas",
+      "rpc_password_credential": "node-a.password"
+    },
+    {
+      "source_id": "node-b",
+      "source_label": "Bitcoin node B",
+      "rpc_url": "http://127.0.0.1:18332/",
+      "rpc_username": "atlas",
+      "rpc_password_credential": "node-b.password"
+    }
+  ]
+}

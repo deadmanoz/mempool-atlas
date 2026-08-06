@@ -124,6 +124,227 @@
       </section>
 
       <section
+        id="comparison-distributions"
+        class="comparison-distributions"
+        aria-label="Source-local distributions"
+        hidden
+      >
+        <div class="comparison-distributions-heading">
+          <div>
+            <p class="eyebrow">Source-local distributions</p>
+            <h2>How does each current mempool look?</h2>
+          </div>
+          <div
+            class="segmented compact distribution-scope"
+            role="group"
+            aria-label="Distribution population scope"
+          >
+            <button id="dist-scope-all" type="button" aria-pressed="true">
+              All
+            </button>
+            <button id="dist-scope-common" type="button" aria-pressed="false">
+              Present in both
+            </button>
+            <button id="dist-scope-left" type="button" aria-pressed="false">
+              Only A
+            </button>
+            <button id="dist-scope-right" type="button" aria-pressed="false">
+              Only B
+            </button>
+          </div>
+          <p>
+            Each panel summarizes the selected population of one source's
+            current snapshot on shared axes, weighted by virtual size. Absence
+            from one source is not evidence of rejection.
+          </p>
+        </div>
+        <div class="comparison-distribution-grid">
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-comp-left-title">Composition by lens · Source A</h3>
+            <p class="distribution-note">
+              Virtual-size share per independent classifier lens.
+            </p>
+            <div id="composition-left" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-comp-right-title">Composition by lens · Source B</h3>
+            <p class="distribution-note">
+              Virtual-size share per independent classifier lens.
+            </p>
+            <div id="composition-right" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-spectrum-left-title">Fee structure · Source A</h3>
+            <p class="distribution-note">
+              Stacked virtual size per log fee-rate bin by script-profile group.
+            </p>
+            <div id="spectrum-left" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-spectrum-right-title">Fee structure · Source B</h3>
+            <p class="distribution-note">
+              Stacked virtual size per log fee-rate bin by script-profile group.
+            </p>
+            <div id="spectrum-right" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-package-left-title">Package fee rate · Source A</h3>
+            <p class="distribution-note">
+              Effective ancestor fee rate: delta-adjusted package fees over
+              package virtual size.
+            </p>
+            <div id="package-left" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-package-right-title">Package fee rate · Source B</h3>
+            <p class="distribution-note">
+              Effective ancestor fee rate: delta-adjusted package fees over
+              package virtual size.
+            </p>
+            <div id="package-right" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-joint-left-title">Fee rate × size · Source A</h3>
+            <p class="distribution-note">
+              Virtual-size density with marginals, normalized within this
+              source.
+            </p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>128k+</span><span>2k</span><span>64</span>
+              </div>
+              <div id="joint-left" class="joint-chart-wrap">
+                <canvas
+                  id="joint-left-canvas"
+                  role="img"
+                  aria-label="Source A joint fee-rate and virtual-size density"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-joint-right-title">Fee rate × size · Source B</h3>
+            <p class="distribution-note">
+              Virtual-size density with marginals, normalized within this
+              source.
+            </p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>128k+</span><span>2k</span><span>64</span>
+              </div>
+              <div id="joint-right" class="joint-chart-wrap">
+                <canvas
+                  id="joint-right-canvas"
+                  role="img"
+                  aria-label="Source B joint fee-rate and virtual-size density"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-mosaic-left-title">Bucket × age · Source A</h3>
+            <p class="distribution-note">
+              Column width is each script-profile group's virtual-size share;
+              cells split the group by age at observation.
+            </p>
+            <div id="mosaic-left" class="mosaic-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-mosaic-right-title">Bucket × age · Source B</h3>
+            <p class="distribution-note">
+              Column width is each script-profile group's virtual-size share;
+              cells split the group by age at observation.
+            </p>
+            <div id="mosaic-right" class="mosaic-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-data-left-title">Data carriage · Source A</h3>
+            <p class="distribution-note">
+              OP_RETURN payload bytes by data-protocols group, virtual-size
+              weighted.
+            </p>
+            <div id="data-left" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-data-right-title">Data carriage · Source B</h3>
+            <p class="distribution-note">
+              OP_RETURN payload bytes by data-protocols group, virtual-size
+              weighted.
+            </p>
+            <div id="data-right" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-complexity-left-title">Inputs × outputs · Source A</h3>
+            <p class="distribution-note">
+              Virtual-size density across input and output counts, normalized
+              within this source.
+            </p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>1k+</span><span>32</span><span>1</span>
+              </div>
+              <div id="complexity-left" class="joint-chart-wrap">
+                <canvas
+                  id="complexity-left-canvas"
+                  role="img"
+                  aria-label="Source A input-count by output-count density"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-complexity-right-title">
+              Inputs × outputs · Source B
+            </h3>
+            <p class="distribution-note">
+              Virtual-size density across input and output counts, normalized
+              within this source.
+            </p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>1k+</span><span>32</span><span>1</span>
+              </div>
+              <div id="complexity-right" class="joint-chart-wrap">
+                <canvas
+                  id="complexity-right-canvas"
+                  role="img"
+                  aria-label="Source B input-count by output-count density"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-entanglement-left-title">Entanglement · Source A</h3>
+            <p class="distribution-note">
+              Unconfirmed mempool relatives reported by this source.
+            </p>
+            <div id="entanglement-left" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-entanglement-right-title">Entanglement · Source B</h3>
+            <p class="distribution-note">
+              Unconfirmed mempool relatives reported by this source.
+            </p>
+            <div id="entanglement-right" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="left">
+            <h3 id="dist-value-left-title">Value moved · Source A</h3>
+            <p class="distribution-note">
+              Total output value per transaction by script-profile group.
+            </p>
+            <div id="value-left" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" data-side="right">
+            <h3 id="dist-value-right-title">Value moved · Source B</h3>
+            <p class="distribution-note">
+              Total output value per transaction by script-profile group.
+            </p>
+            <div id="value-right" class="spectrum-wrap"></div>
+          </article>
+        </div>
+      </section>
+
+      <section
         id="comparison-policy-matrix"
         class="comparison-policy-matrix"
         aria-labelledby="comparison-policy-matrix-heading"
@@ -137,8 +358,9 @@
             </h2>
           </div>
           <p>
-            Each row is one source-local assessment population. Transactions
-            present in both snapshots appear once for each source.
+            Each row is one source-local membership population partitioned by
+            policy result. Transactions present in both snapshots appear once
+            for each source.
           </p>
         </div>
         <div class="comparison-policy-matrix-scroll">
@@ -149,7 +371,7 @@
                 <th scope="col">Compatible</th>
                 <th scope="col">Would violate deployed policy</th>
                 <th scope="col">Indeterminate</th>
-                <th scope="col">Not classified</th>
+                <th scope="col">Unassessed</th>
               </tr>
             </thead>
             <tbody id="comparison-policy-matrix-body"></tbody>
@@ -157,7 +379,9 @@
         </div>
         <p class="comparison-policy-matrix-note">
           Violation totals include complete and partly unresolved assessments.
-          Rule-combination controls show only exact assessments.
+          Rule-combination controls show only exact assessments. Unassessed
+          transactions are pending while their source is classifying and
+          unavailable after its pass completes or pauses.
         </p>
       </section>
 

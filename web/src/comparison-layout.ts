@@ -4,6 +4,7 @@ import {
   type ComparisonRegionKey,
   type CurrentComparison,
 } from "./comparison-model";
+import { prepareCanvasBacking } from "./canvas-backing";
 
 export interface ComparisonRect {
   x: number;
@@ -321,10 +322,10 @@ export const renderComparisonCanvas = (
   activeTransactionId: string | null,
   cached: ComparisonGeometry | null,
 ): ComparisonCanvasRenderResult => {
-  const bounds = canvas.getBoundingClientRect();
-  const width = Math.max(1, Math.round(bounds.width));
-  const height = Math.max(1, Math.round(bounds.height));
-  const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
+  const { context, width, height, pixelRatio } = prepareCanvasBacking(
+    canvas,
+    "whole-pixel",
+  );
   const result = resolveComparisonGeometry(
     comparison,
     width,
@@ -332,19 +333,6 @@ export const renderComparisonCanvas = (
     pixelRatio,
     cached,
   );
-  const backingWidth = Math.round(width * pixelRatio);
-  const backingHeight = Math.round(height * pixelRatio);
-  if (canvas.width !== backingWidth) {
-    canvas.width = backingWidth;
-  }
-  if (canvas.height !== backingHeight) {
-    canvas.height = backingHeight;
-  }
-  const context = canvas.getContext("2d");
-  if (context === null) {
-    throw new Error("Canvas 2D rendering is unavailable");
-  }
-  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   paintComparison(
     context,
     result.geometry.layout,

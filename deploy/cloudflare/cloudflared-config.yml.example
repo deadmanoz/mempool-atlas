@@ -1,0 +1,14 @@
+# Copy to /etc/cloudflared/config.yml on the Atlas origin host.
+# Replace both placeholders without committing the resulting file.
+tunnel: TUNNEL_UUID
+credentials-file: /etc/cloudflared/TUNNEL_UUID.json
+
+ingress:
+  - hostname: atlas.example.com
+    path: ^/(healthz|readyz)$
+    service: http_status:404
+  - hostname: atlas.example.com
+    service: http://127.0.0.1:3101
+    originRequest:
+      connectTimeout: 10s
+  - service: http_status:404

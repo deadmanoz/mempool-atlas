@@ -1,103 +1,31 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  assessmentRegionKey,
   compareCurrentSnapshots,
-  comparisonPolicyPopulation,
   lookupComparisonTransaction,
-  policyFilterCount,
   requireLoadedSnapshot,
-  type LoadedSourceSnapshot,
 } from "./comparison-model";
+import { loadedSource } from "./comparison-test-fixtures";
+import { mempoolTransaction, txid } from "./test-fixtures";
 import type {
   Bip110Assessment,
-  Bip110Summary,
-  MempoolSnapshot,
   MempoolTransaction,
-  RuleId,
   SourceSnapshotResponse,
 } from "./types";
-
-const txid = (value: number): string => value.toString(16).padStart(64, "0");
 
 const transaction = (
   value: number,
   vsize: number,
   bip110: Bip110Assessment | null = null,
   wtxid = txid(value),
-): MempoolTransaction => ({
-  txid: txid(value),
-  wtxid,
-  vsize,
-  fee_sats: vsize * 2,
-  entered_at_ms: 1_699_999_000_000 + value,
-  bip110,
-});
-
-const bip110Summary = (
-  transactions: readonly MempoolTransaction[],
-): Bip110Summary => ({
-  evaluator_id: "rdts-rules",
-  evaluator_version: "0.1.0",
-  scope: "knots_mempool_policy",
-  compatible_count: transactions.filter(
-    ({ bip110 }) => bip110?.status === "compatible",
-  ).length,
-  violating_count: transactions.filter(
-    ({ bip110 }) => bip110?.status === "violating",
-  ).length,
-  indeterminate_count: transactions.filter(
-    ({ bip110 }) => bip110?.status === "indeterminate",
-  ).length,
-  unclassified_count: transactions.filter(({ bip110 }) => bip110 === null)
-    .length,
-});
-
-const loadedSource = (
-  sourceId: string,
-  transactions: MempoolTransaction[],
-  observedAtMs: number,
-): LoadedSourceSnapshot => {
-  const snapshot: MempoolSnapshot = {
-    source_id: sourceId,
-    source_label: sourceId.toUpperCase(),
-    collection_started_at_ms: observedAtMs - 1_000,
-    collection_completed_at_ms: observedAtMs,
-    collection_duration_ms: 1_000,
-    observed_at_ms: observedAtMs,
-    classification_revision: 3,
-    chain_tip: { height: 900_000, hash: "00".repeat(32) },
-    transaction_count: transactions.length,
-    total_vsize: transactions.reduce((total, entry) => total + entry.vsize, 0),
-    bip110_summary: bip110Summary(transactions),
-    transactions,
-  };
-  return {
-    source: {
-      source_id: sourceId,
-      source_label: sourceId.toUpperCase(),
-      availability: "ready",
-      poll_interval_seconds: 300,
-      last_poll_started_at_ms: observedAtMs - 1_000,
-      snapshot_observed_at_ms: observedAtMs,
-      chain_tip: snapshot.chain_tip,
-      transaction_count: snapshot.transaction_count,
-      total_vsize: snapshot.total_vsize,
-      last_error: null,
-    },
-    snapshot,
-  };
-};
-
-const violating = (
-  violatedRules: RuleId[],
-  unknownRules: RuleId[] = [],
-): Bip110Assessment => ({
-  status: "violating",
-  primary_rule: violatedRules[0] ?? null,
-  violated_rules: violatedRules,
-  unknown_rules: unknownRules,
-});
+): MempoolTransaction =>
+  mempoolTransaction(value, {
+    wtxid,
+    vsize,
+    fee_sats: vsize * 2,
+    entered_at_ms: 1_699_999_000_000 + value,
+    bip110,
+  });
 
 describe("compareCurrentSnapshots", () => {
   it("merge-joins sorted membership into three disjoint regions", () => {
@@ -246,101 +174,12 @@ describe("compareCurrentSnapshots", () => {
         chain_tip: null,
         transaction_count: null,
         total_vsize: null,
+        classification: null,
       },
       snapshot: null,
     };
     expect(() => requireLoadedSnapshot(waiting)).toThrow(
       "has no complete mempool snapshot",
     );
-  });
-});
-
-describe("comparison policy semantics", () => {
-  const exactR2R7 = violating(["element_size", "tapscript_op_if"]);
-  const exactR7 = violating(["tapscript_op_if"]);
-  const partialR2UnknownR7 = violating(["element_size"], ["tapscript_op_if"]);
-
-  const comparison = compareCurrentSnapshots(
-    loadedSource(
-      "core",
-      [
-        transaction(1, 100, exactR2R7),
-        transaction(2, 200, exactR7),
-        transaction(3, 300, partialR2UnknownR7),
-      ],
-      1_700_000_001_000,
-    ),
-    loadedSource(
-      "knots",
-      [
-        transaction(1, 110, exactR7),
-        transaction(2, 210, exactR7),
-        transaction(3, 310, null),
-      ],
-      1_700_000_002_000,
-    ),
-  );
-
-  it("keeps exact R2 + R7 separate from R7-only and partial buckets", () => {
-    expect(assessmentRegionKey(comparison.common[0]!.left!)).toBe("exact:42");
-    expect(assessmentRegionKey(comparison.common[1]!.left!)).toBe("exact:40");
-    expect(assessmentRegionKey(comparison.common[2]!.left!)).toBe(
-      "partial:02:40",
-    );
-
-    expect(
-      comparisonPolicyPopulation(comparison, "common", "left", {
-        kind: "signature",
-        signature: "exact:42",
-      }).entries.map(({ txid: id }) => id),
-    ).toEqual([txid(1)]);
-    expect(
-      comparisonPolicyPopulation(comparison, "common", "left", {
-        kind: "signature",
-        signature: "partial:02:40",
-      }).entries.map(({ txid: id }) => id),
-    ).toEqual([txid(3)]);
-  });
-
-  it("matches exact and partial assessments with the aggregate violating filter", () => {
-    expect(
-      comparisonPolicyPopulation(comparison, "common", "left", {
-        kind: "status",
-        status: "violating",
-      }).entries.map(({ txid: id }) => id),
-    ).toEqual([txid(1), txid(2), txid(3)]);
-    expect(
-      policyFilterCount(comparison, "common", "right", {
-        kind: "status",
-        status: "violating",
-      }),
-    ).toBe(2);
-  });
-
-  it("keeps marginal rule filters overlapping and source-local", () => {
-    expect(
-      policyFilterCount(comparison, "common", "left", {
-        kind: "rule",
-        rule: "element_size",
-      }),
-    ).toBe(2);
-    expect(
-      policyFilterCount(comparison, "common", "left", {
-        kind: "rule",
-        rule: "tapscript_op_if",
-      }),
-    ).toBe(2);
-    expect(
-      policyFilterCount(comparison, "common", "right", {
-        kind: "rule",
-        rule: "element_size",
-      }),
-    ).toBe(0);
-    expect(
-      comparisonPolicyPopulation(comparison, "common", "right", {
-        kind: "status",
-        status: "unclassified",
-      }).count,
-    ).toBe(1);
   });
 });

@@ -13,13 +13,14 @@ import {
 const TXID = "ab".repeat(32);
 
 describe("node URL state", () => {
-  it("parses source, rule, and transaction state", () => {
+  it("parses source, classifier, rule, and transaction state", () => {
     expect(
       parseNodeViewState(
-        `?source=core&rule=element_size&txid=${TXID}&ignored=value`,
+        `?source=core&classifier=data_protocols&rule=element_size&txid=${TXID}&ignored=value`,
       ),
     ).toEqual({
       source: "core",
+      classifier: "data_protocols",
       selection: { kind: "rule", rule: "element_size" },
       txid: TXID,
     });
@@ -39,7 +40,12 @@ describe("node URL state", () => {
   it("drops a conflicting rule and region without disturbing the txid", () => {
     expect(
       parseNodeViewState(`?rule=element_size&region=exact:02&txid=${TXID}`),
-    ).toEqual({ source: null, selection: null, txid: TXID });
+    ).toEqual({
+      source: null,
+      classifier: null,
+      selection: null,
+      txid: TXID,
+    });
   });
 
   it("drops malformed, duplicated, and out-of-range values", () => {
@@ -47,7 +53,12 @@ describe("node URL state", () => {
       parseNodeViewState(
         "?source=..&source=core&rule=not-a-rule&region=exact:80&txid=1234",
       ),
-    ).toEqual({ source: null, selection: null, txid: null });
+    ).toEqual({
+      source: null,
+      classifier: null,
+      selection: null,
+      txid: null,
+    });
   });
 
   it("accepts uppercase hex txids and serializes canonical state in order", () => {
@@ -60,16 +71,20 @@ describe("node URL state", () => {
     expect(
       serializeNodeViewState({
         source: "core",
+        classifier: "data_protocols",
         selection: { kind: "region", regionKey: "exact:2" },
         txid: TXID.toUpperCase(),
       }),
-    ).toBe(`source=core&region=exact%3A02&txid=${TXID}`);
+    ).toBe(
+      `source=core&classifier=data_protocols&region=exact%3A02&txid=${TXID}`,
+    );
   });
 
   it("omits structurally invalid values while serializing", () => {
     expect(
       serializeNodeViewState({
         source: "..",
+        classifier: "Not Valid",
         selection: {
           kind: "region",
           regionKey: "partial:00:40",

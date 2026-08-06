@@ -4,91 +4,98 @@ All notable changes to Mempool Atlas will be documented in this file.
 
 ## [Unreleased]
 
-- Rebuild Mempool Atlas as a single central service that periodically pulls
-  complete mempools from a bounded configured source set over existing private
-  WireGuard RPC paths, retains only the latest successful snapshot per source
-  in memory, exposes a small source-scoped API, and serves the website.
-- Coordinate one to four sources under one RPC work gate: poll complete
-  membership sequentially in deterministic rounds, isolate source failures,
-  and advance successful source-local classification generations fairly in
-  bounded round-robin slices.
-- Bracket every membership observation with matching chain-tip reads and expose
-  its collection start, completion, and duration so comparisons show sampling
-  skew instead of implying simultaneous observations.
-- Add a separate browser-derived comparison page that merge-joins two current
-  snapshots into present-in-both and two symmetric observed-only regions,
-  preserves source-local witness variants and policy assessments, and stores no
-  server-side comparison projection or history.
-- Lead comparison with a browser-derived four-row policy matrix that keeps
-  observed-only and common populations source-local, conserves compatible,
-  violating, indeterminate, and unclassified totals, and links aggregate or
-  exact rule-combination questions into the existing addressable explorer.
-- Make node and comparison exploration addressable with a visible source
-  selector, current-snapshot txid search, source-specific product links, and
-  canonical URL state that survives sharing and refresh without adding server
-  state.
-- Encode each published snapshot response once and share its immutable bytes
-  across readers so concurrent requests cannot multiply large serialization
-  work and memory allocation.
-- Restore the single-node Canvas swim view with fee-rate, age, and virtual-size
-  filters plus a bounded transaction inspector.
-- Make the BIP-110 classification terrain the primary view, with count and
-  virtual-size modes, explicit coverage, canonical exact buckets for complete
-  violating assessments, separate partial buckets for proven violations with
-  unresolved checks, overlapping marginal rule filters, and per-transaction
-  rule evidence. Retain fee-rate by age as a secondary lens and first rejection
-  as transaction-detail metadata.
-- Add a pure seven-rule RDTS evaluator with separate consensus and deployed
-  Knots mempool-policy modes, deterministic primary rejection, all proven
-  violations, and typed unknown facts.
-- Publish complete membership independently from policy work, then resolve the
-  current generation through bounded concurrent candidate and script-fact
-  waves before evaluation.
-- Preserve missing, null, and value JSON-RPC results through an Atlas-owned
-  policy transport, cap each classification body before parsing, reconcile
-  concurrent responses by request ID, and keep malformed omissions out of
-  terminal missing facts.
-- Keep each admitted, verified raw transaction pending across same-generation
-  fact waves so bounded work continues fairly without refetching the candidate.
-- Reserve typed missing script facts for successful null-shaped
-  `gettxout(..., false)` responses from the trusted Bitcoin Core endpoint when
-  the outpoint is known not to be a current mempool parent. Keep an ambiguous
-  null fallback after parent-raw failure, capacity deferral, unscheduled work,
-  and failed collection as bounded operational state with an unclassified
-  `bip110: null`.
-- Reuse exact surviving `txid` and `wtxid` classifications and current outputs,
-  retain positive confirmed `OutPoint` scripts across generations under bounded
-  eviction, and never cache nulls or failures.
-- Evaluate P2SH redeemScript pushes, exact P2SH-P2WPKH and P2SH-P2WSH spends,
-  and P2SH-wrapped witness versions 1 through 16 according to deployed Knots
-  mempool policy.
-- Bound classification with a configurable candidate-window size, RPC lanes,
-  auxiliary script-cache admission, and retained pending-script admission while
-  retaining no history.
-- Cap each candidate window at 8,192 variants and a 256 MiB candidate-raw
-  estimate, each mempool-parent wave at 8,192 transactions and a 256 MiB
-  estimate, and each confirmed-prevout fact wave at a 256 MiB aggregate
-  estimate. Use 65,536 unique required prevouts as the per-window target with
-  one byte-bounded singleton exception.
-- Drive classification with explicit continue, complete, paused, and stale
-  outcomes; continue after fact-only progress without publishing a revision,
-  defer only candidates that exhaust two attempts for one fact source in a
-  bounded pending window, pause only on systemic RPC failure, and reject
-  superseded results before they can update current state or shared positive
-  facts.
-- Count generation-local candidate deferrals separately from systemic pauses so
-  operators can distinguish poison facts and capacity pressure from a broken
-  RPC path.
-- Expose `classification_revision` with snapshots and transaction detail so the
-  browser can keep progressive rule evidence consistent with its visible
-  terrain.
-- Remove the experimental node agents, SQLite replicas, checkpoint and delta
-  protocol, evidence pipeline, classifiers, database tooling, and earlier
-  server-projected multi-node comparison surface from the active workspace.
-  Their code and lessons remain available in Git history.
-- Separate current-state visualisation from historical archival. Attempt #3
-  intentionally stores no application history and requires no database
-  migration or recovery path.
-- Validate the first deployed single-source slice over the existing WireGuard
-  RPC path, including public proxy limits, complete snapshot rendering,
-  client-side filtering, proxy temp-file behavior, and target-host memory.
+- Publish classification revisions through changed-only deltas and perform
+  snapshot materialization, validation, and JSON encoding after releasing the
+  shared RPC work gate. This removes three accumulated classification-map
+  passes while preserving atomic snapshot, detail, lifecycle, body, and ETag
+  replacement.
+- Cache aggregate-only distribution models by snapshot and semantic selection,
+  and build the comparison policy projection in one pass with bounded samples.
+  Revisited views no longer rebuild all nine panels or repeatedly rescan policy
+  populations, while transaction-only selection changes avoid population
+  rendering and identical selections perform no work.
+- Align the internal generation, fact-resolution, and RPC orchestration with
+  classification vocabulary now that the pipeline serves all four lenses,
+  while retaining precise Knots/BIP-110 policy and wire-visible names.
+- Move each distribution section's DOM, cache, resize, render, and reset
+  lifecycle out of the page controllers, and share Canvas backing preparation
+  without merging renderer-specific geometry or hit-testing behavior.
+- Consolidate the Rust workspace into one root package and internalize the
+  private BIP-110 evaluator without changing its wire-visible identifier or
+  assessment semantics.
+- Publish each transaction's delta-adjusted ancestor fees and add a Package
+  fee rate panel to both pages: effective ancestor fee rate (package fees over
+  package virtual size), the score a miner evaluates, stacked by the selected
+  classifier's buckets.
+- Add a population scope selector to the comparison page's mirrored
+  distribution panels. Panels can now summarize the whole snapshot, the
+  transactions present in both snapshots, or the transactions observed in only
+  one source, derived from the existing browser merge-join; the absent side
+  states plainly that the population has no members there.
+- Surface membership and structure facts in transaction detail: weight,
+  package and descendant ancestry with the effective package fee rate,
+  source-reported replaceability, input and output counts, output value,
+  witness bytes, and OP_RETURN payload bytes, on both the node inspector and
+  the per-source comparison detail.
+- Publish per-transaction structure facts with every snapshot. Membership rows
+  now carry the source-reported weight, ancestor and descendant counts and
+  virtual sizes, and effective BIP-125 replaceability; a progressive
+  `structure` object adds input and output counts, OP_RETURN payload bytes,
+  total output value, and witness bytes derived from the raw transaction
+  during classification. `structure` is non-null exactly when classifier
+  results are present, and the browser validates both the coupling and the
+  membership-fact consistency bounds.
+- Add four structure-fact panels to the Snapshot distributions section and
+  mirror them per source on the comparison page: Data carriage (OP_RETURN
+  payload sizes by data-protocols bucket), Inputs × outputs (complexity
+  density with marginals), Entanglement (banded unconfirmed ancestors and
+  descendants plus the reported replaceability share), and Value moved (total
+  output value by the selected classifier's buckets).
+- Add a browser-derived Snapshot distributions section to the node view with
+  four question-oriented panels in classification-first order: per-lens
+  composition bars, a fee structure spectrum stacked by the selected
+  classifier's buckets, a joint fee-rate-by-size density heatmap with
+  marginals, and a bucket-by-age mosaic. Composition segments and mosaic
+  columns deep-link into Buckets selections, and all aggregates are computed
+  in the browser from the complete published snapshot.
+- Add the same four panels to the comparison page as mirrored source-local
+  pairs on shared fixed axes, weighted by virtual size.
+- Add an honesty banner that names a retained observation's age and poll
+  failure when a source is stale, and reuses the paused-classification summary
+  when assessments are missing, plus a pulsing freshness indicator on the
+  healthy status strip.
+- Add independently versioned exact-property, transaction-shape,
+  data-protocol, and BIP-110 classifier lenses over one shared fact pipeline.
+- Publish classifier catalogs, per-lens coverage summaries, compact snapshot
+  results, and bounded transaction-detail evidence.
+- Make Classifications the default node view, drive Buckets from the selected
+  classifier, adapt each lens to readable presentation groups, and retain
+  BIP-110 as a specialist rule adapter alongside fee-rate-by-age.
+- Preserve individual transaction blocks inside proportional classifier
+  buckets, cache classifier partitions across interactions, suppress labels
+  that cannot fit, and disclose marginal filters, samples, and transaction
+  evidence only when requested.
+- Restore direct transaction selection from every Buckets block and summarize
+  Transaction properties by broad script profile without discarding exact
+  version, RBF, witness, data-carrier, or script-family labels.
+- Compress large snapshot responses with gzip when the client supports it.
+- Specify classifier rules, thresholds, partial-result semantics, and known
+  limitations independently in `docs/classification.md`.
+- Prepare the first public release under the MIT License with contributor,
+  security, conduct, CI, and dependency-maintenance guidance.
+- Provide a current-state service for one to four independent Bitcoin mempools,
+  with complete source observations and progressive BIP-110 classification.
+- Add an interactive classification terrain with exact multi-rule buckets,
+  policy evidence, coverage state, transaction search, and a fee-rate view.
+- Add browser-derived pairwise comparison with source-local policy results,
+  membership regions, collection windows, and sampling-skew disclosure.
+- Keep the product memory-only, bounded, and source-scoped, with no database,
+  retained history, node-side agent, or server-side combined mempool.
+- Document the product with verified screenshots, an editable architecture
+  diagram, a portable quick start, and current design decisions only.
+- Support revision-aware full-snapshot revalidation with shared `ETag` values
+  and bodyless `304` responses while retaining `no-store` for waiting, compact,
+  operational, and error responses.
+- Add a hardened loopback-origin deployment path through Cloudflare Tunnel,
+  including cache, WAF, rate-limit, security-header, monitoring, smoke-test,
+  failure, and rollback guidance without committing deployment secrets.

@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Explore policy classification across one periodically observed Bitcoin node mempool."
+      content="Explore independent transaction classifications across one periodically observed Bitcoin node mempool."
     />
-    <title>Mempool Atlas · Rule Terrain</title>
+    <title>Mempool Atlas · Transaction Classifications</title>
   </head>
   <body>
     <main class="shell">
@@ -16,7 +16,7 @@
           <span class="brand-mark" aria-hidden="true">MA</span>
           <div>
             <h1>Mempool Atlas</h1>
-            <p>Rule Terrain</p>
+            <p>Transaction Classifications</p>
             <nav class="product-nav" aria-label="Mempool Atlas products">
               <a href="./" aria-current="page">Node</a>
               <a id="compare-link" href="./compare/">Compare</a>
@@ -65,6 +65,17 @@
         <span id="status-detail">Loading the configured source.</span>
       </section>
 
+      <aside
+        id="honesty-banner"
+        class="honesty-banner"
+        data-tone="stale"
+        aria-live="polite"
+        hidden
+      >
+        <span class="honesty-icon" aria-hidden="true">⚠</span>
+        <p id="honesty-message"></p>
+      </aside>
+
       <section class="exploration-bar" aria-label="Explore current snapshot">
         <label class="exploration-field">
           <span>Node</span>
@@ -95,14 +106,24 @@
           <span class="toolbar-label">Lens</span>
           <div class="segmented" role="tablist" aria-label="Mempool lens">
             <button
-              id="terrain-tab"
+              id="overview-tab"
               role="tab"
               tabindex="0"
               aria-selected="true"
+              aria-controls="overview-view"
+              type="button"
+            >
+              Classifications
+            </button>
+            <button
+              id="terrain-tab"
+              role="tab"
+              tabindex="-1"
+              aria-selected="false"
               aria-controls="terrain-view"
               type="button"
             >
-              Rule buckets
+              Buckets
             </button>
             <button
               id="fee-age-tab"
@@ -117,43 +138,110 @@
           </div>
         </div>
 
-        <div class="coverage-legend" aria-label="Evaluator coverage">
-          <span class="toolbar-label">Coverage</span>
-          <span
-            ><i class="legend-dot complete" aria-hidden="true"></i>Complete
-            <strong id="coverage-complete">0</strong></span
+        <label class="classification-lens-field toolbar-classifier">
+          <span>Classifier</span>
+          <select
+            id="classification-lens-select"
+            aria-label="Transaction classifier"
+          ></select>
+        </label>
+
+        <div class="coverage-block">
+          <div
+            id="classification-lifecycle"
+            class="classification-lifecycle"
+            data-state="waiting"
+            aria-live="polite"
           >
-          <span
-            ><i class="legend-dot incomplete" aria-hidden="true"></i>Incomplete
-            <strong id="coverage-incomplete">0</strong></span
+            <strong id="classification-state">Waiting</strong>
+            <span id="classification-progress"
+              >Classification starts after the first complete snapshot.</span
+            >
+          </div>
+          <div
+            class="coverage-legend"
+            aria-label="Evaluator coverage"
+            aria-hidden="true"
+            hidden
           >
-          <span
-            ><i class="legend-dot unclassified" aria-hidden="true"></i>Not
-            classified <strong id="coverage-unclassified">0</strong></span
-          >
+            <span class="toolbar-label">Coverage</span>
+            <span
+              ><i class="legend-dot complete" aria-hidden="true"></i>Complete
+              <strong id="coverage-complete">0</strong></span
+            >
+            <span
+              ><i class="legend-dot incomplete" aria-hidden="true"></i
+              >Incomplete <strong id="coverage-incomplete">0</strong></span
+            >
+            <span
+              ><i class="legend-dot unclassified" aria-hidden="true"></i
+              ><span id="coverage-unclassified-label"
+                >Assessment unavailable</span
+              >
+              <strong id="coverage-unclassified">0</strong></span
+            >
+          </div>
         </div>
       </section>
 
       <div class="workspace">
         <section class="terrain-panel" aria-label="Mempool visualisation">
-          <div id="terrain-view" role="tabpanel" aria-labelledby="terrain-tab">
+          <div
+            id="overview-view"
+            role="tabpanel"
+            aria-labelledby="overview-tab"
+          >
+            <div class="terrain-heading classification-heading">
+              <div>
+                <p class="eyebrow">Independent classifier lenses</p>
+                <h2>Transaction overview</h2>
+              </div>
+            </div>
+            <div id="classification-method" class="classification-method">
+              <strong>Waiting for classifier catalog</strong>
+              <span
+                >Atlas publishes the available lenses with each snapshot.</span
+              >
+            </div>
+            <p id="classification-empty" class="empty-state">
+              The first complete mempool snapshot is being collected.
+            </p>
+            <div
+              id="classification-labels"
+              class="classification-labels"
+              aria-label="Classifier labels"
+            ></div>
+            <p id="classification-summary" class="visual-summary">
+              Labels within a multi-label classifier can overlap. Atlas does not
+              combine independent classifier taxonomies.
+            </p>
+          </div>
+
+          <div
+            id="terrain-view"
+            role="tabpanel"
+            aria-labelledby="terrain-tab"
+            hidden
+          >
             <div class="terrain-heading">
               <div>
-                <p class="eyebrow">Current source membership</p>
-                <h2>Rule-combination terrain</h2>
+                <p id="terrain-eyebrow" class="eyebrow">
+                  Selected classifier lens
+                </p>
+                <h2 id="terrain-title">Transaction buckets</h2>
               </div>
               <dl class="terrain-totals" aria-label="Classification totals">
-                <div class="compatible">
-                  <dt>Compatible</dt>
-                  <dd id="compatible-count">0</dd>
+                <div id="terrain-total-a" data-tone="complete">
+                  <dt id="terrain-total-a-label">Complete</dt>
+                  <dd id="terrain-total-a-count">0</dd>
                 </div>
-                <div class="indeterminate">
-                  <dt>Indeterminate</dt>
-                  <dd id="indeterminate-count">0</dd>
+                <div id="terrain-total-b" data-tone="partial">
+                  <dt id="terrain-total-b-label">Partial</dt>
+                  <dd id="terrain-total-b-count">0</dd>
                 </div>
-                <div class="violating">
-                  <dt>Would violate policy</dt>
-                  <dd id="violating-count">0</dd>
+                <div id="terrain-total-c" data-tone="unavailable">
+                  <dt id="terrain-total-c-label">Unavailable</dt>
+                  <dd id="terrain-total-c-count">0</dd>
                 </div>
               </dl>
             </div>
@@ -174,8 +262,8 @@
               ></div>
             </div>
             <p id="terrain-summary" class="visual-summary">
-              Each transaction appears once. Complete violations are bucketed by
-              their exact rule combination.
+              Bucket area summarizes the selected classifier. Choose a bucket to
+              inspect its population.
             </p>
           </div>
 
@@ -252,27 +340,23 @@
         <aside class="inspector-panel" aria-labelledby="inspector-name">
           <div class="inspector-heading">
             <div>
-              <p id="inspector-eyebrow" class="eyebrow">Rule 2</p>
-              <h2 id="inspector-name">Serialized element size</h2>
+              <p id="inspector-eyebrow" class="eyebrow">Classifier lens</p>
+              <h2 id="inspector-name">Choose a classifier label</h2>
             </div>
-            <span class="policy-badge">Mempool policy</span>
+            <span id="inspector-badge" class="policy-badge">Classifier</span>
           </div>
 
           <p id="inspector-description" class="rule-description">
-            Select a rule or terrain bucket to inspect its population.
+            Select a classifier label or bucket to inspect its population.
           </p>
-          <p class="policy-note">
-            This describes compatibility with rules applied by Bitcoin Knots as
-            mempool policy. It does not show that this source rejected a
-            transaction, or that a transaction is consensus-invalid.
+          <p id="inspector-note" class="policy-note">
+            Each classifier declares its method, evidence boundary, and
+            limitations independently.
           </p>
 
           <div class="mode-row">
-            <span class="toolbar-label">Transaction tiles</span>
-            <div
-              class="segmented compact"
-              aria-label="Transaction tile area metric"
-            >
+            <span class="toolbar-label">Area represents</span>
+            <div class="segmented compact" aria-label="Bucket area metric">
               <button id="mode-count" type="button" aria-pressed="true">
                 Count
               </button>
@@ -297,46 +381,162 @@
             </div>
           </dl>
 
-          <nav
-            id="rule-list"
-            class="rule-list"
-            aria-label="BIP-110 rule filters"
-          ></nav>
-          <p class="rule-overlap-note">
-            Rule totals overlap. A transaction is counted under every rule it
-            violates.
-          </p>
+          <details class="inspector-disclosure filter-disclosure">
+            <summary>
+              <span>Labels &amp; rules</span>
+              <small>Optional filters</small>
+            </summary>
+            <nav
+              id="rule-list"
+              class="rule-list"
+              aria-label="Classifier label filters"
+            ></nav>
+            <p id="rule-overlap-note" class="rule-overlap-note">
+              Label totals may overlap within the selected classifier.
+            </p>
+          </details>
 
-          <section class="sample-section" aria-labelledby="sample-heading">
-            <div class="section-heading">
-              <h3 id="sample-heading">Sample transactions</h3>
-              <span id="sample-summary">No matches</span>
+          <details
+            id="sample-disclosure"
+            class="inspector-disclosure sample-section"
+          >
+            <summary>
+              <span id="sample-heading">Sample transactions</span>
+              <small id="sample-summary">No matches</small>
+            </summary>
+            <div class="disclosure-content">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Transaction</th>
+                      <th id="sample-classification-heading" scope="col">
+                        Classification
+                      </th>
+                      <th scope="col">vsize</th>
+                      <th scope="col">Fee rate</th>
+                    </tr>
+                  </thead>
+                  <tbody id="rule-transactions"></tbody>
+                </table>
+              </div>
             </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">Transaction</th>
-                    <th scope="col">Rules</th>
-                    <th scope="col">vsize</th>
-                    <th scope="col">Fee rate</th>
-                  </tr>
-                </thead>
-                <tbody id="rule-transactions"></tbody>
-              </table>
-            </div>
-          </section>
+          </details>
 
-          <section class="detail-section" aria-labelledby="detail-heading">
-            <div class="section-heading">
-              <h3 id="detail-heading">Selected transaction</h3>
-              <span id="detail-status">Choose a sample</span>
+          <details
+            id="transaction-disclosure"
+            class="inspector-disclosure detail-section"
+          >
+            <summary>
+              <span id="detail-heading">Selected transaction</span>
+              <small id="detail-status">Choose a sample</small>
+            </summary>
+            <div class="disclosure-content">
+              <div id="detail-transaction" class="detail-transaction"></div>
+              <div id="detail-classifiers" class="detail-classifiers"></div>
+              <ol id="detail-rules" class="detail-rules"></ol>
             </div>
-            <div id="detail-transaction" class="detail-transaction"></div>
-            <ol id="detail-rules" class="detail-rules"></ol>
-          </section>
+          </details>
         </aside>
       </div>
+
+      <section
+        id="snapshot-distributions"
+        class="distribution-panel"
+        aria-label="Snapshot distributions"
+      >
+        <div class="terrain-heading">
+          <div>
+            <p class="eyebrow">Snapshot distributions</p>
+            <h2>Composition, fees, size &amp; age</h2>
+          </div>
+          <p class="panel-summary">
+            One node's current view. Absence from this mempool is not evidence
+            of rejection.
+          </p>
+        </div>
+        <p id="distribution-empty" class="empty-state">
+          The first complete mempool snapshot is being collected.
+        </p>
+        <div id="distribution-grid" class="distribution-grid" hidden>
+          <article
+            class="distribution-card"
+            aria-label="Composition by classifier lens"
+          >
+            <h3>Composition by lens</h3>
+            <p id="composition-note" class="distribution-note">Waiting</p>
+            <div id="composition-bars" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" aria-label="Fee-rate spectrum">
+            <h3>Fee structure</h3>
+            <p id="spectrum-note" class="distribution-note">Waiting</p>
+            <div id="spectrum-chart" class="spectrum-wrap"></div>
+          </article>
+          <article class="distribution-card" aria-label="Package fee rate">
+            <h3>Package fee rate</h3>
+            <p id="package-note" class="distribution-note">Waiting</p>
+            <div id="package-chart" class="spectrum-wrap"></div>
+          </article>
+          <article
+            class="distribution-card"
+            aria-label="Joint fee-rate and size density"
+          >
+            <h3>Fee rate × size</h3>
+            <p id="joint-note" class="distribution-note">Waiting</p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>128k+</span><span>2k</span><span>64</span>
+              </div>
+              <div id="joint-chart" class="joint-chart-wrap">
+                <canvas
+                  id="joint-canvas"
+                  role="img"
+                  aria-label="Joint fee-rate and virtual-size density with marginal distributions"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" aria-label="Bucket by age mosaic">
+            <h3>Bucket × age</h3>
+            <p id="mosaic-note" class="distribution-note">Waiting</p>
+            <div id="mosaic-chart" class="mosaic-wrap"></div>
+          </article>
+          <article class="distribution-card" aria-label="Data carriage">
+            <h3>Data carriage</h3>
+            <p id="data-note" class="distribution-note">Waiting</p>
+            <div id="data-chart" class="spectrum-wrap"></div>
+          </article>
+          <article
+            class="distribution-card"
+            aria-label="Inputs by outputs density"
+          >
+            <h3>Inputs × outputs</h3>
+            <p id="complexity-note" class="distribution-note">Waiting</p>
+            <div class="joint-layout">
+              <div class="joint-y-axis" aria-hidden="true">
+                <span>1k+</span><span>32</span><span>1</span>
+              </div>
+              <div id="complexity-chart" class="joint-chart-wrap">
+                <canvas
+                  id="complexity-canvas"
+                  role="img"
+                  aria-label="Input-count by output-count density with marginal distributions"
+                ></canvas>
+              </div>
+            </div>
+          </article>
+          <article class="distribution-card" aria-label="Mempool entanglement">
+            <h3>Entanglement</h3>
+            <p id="entanglement-note" class="distribution-note">Waiting</p>
+            <div id="entanglement-bars" class="composition-wrap"></div>
+          </article>
+          <article class="distribution-card" aria-label="Output value">
+            <h3>Value moved</h3>
+            <p id="value-note" class="distribution-note">Waiting</p>
+            <div id="value-chart" class="spectrum-wrap"></div>
+          </article>
+        </div>
+      </section>
     </main>
 
     <script type="module" src="/src/main.ts"></script>

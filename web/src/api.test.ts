@@ -8,10 +8,162 @@ import {
   parseTransactionDetailResponse,
   transactionDetailMatchesSnapshot,
 } from "./api";
-import type { MempoolSnapshot, TransactionDetailResponse } from "./types";
+import type {
+  MempoolSnapshot,
+  MempoolTransaction,
+  TransactionDetailResponse,
+} from "./types";
 
 const TXID = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 const BLOCK_HASH = "00".repeat(32);
+
+const classifierCatalog = () => [
+  {
+    id: "transaction_properties",
+    version: "1",
+    title: "Transaction properties",
+    methodology: "exact" as const,
+    semantics: "multi_label" as const,
+    required_facts: ["raw_transaction", "input_script_pubkeys"],
+    labels: [
+      { key: "version_2", label: "Version 2", description: "Version 2." },
+      { key: "p2wpkh", label: "P2WPKH", description: "Uses P2WPKH." },
+    ],
+  },
+  {
+    id: "transaction_shape",
+    version: "1",
+    title: "Transaction shape",
+    methodology: "heuristic" as const,
+    semantics: "multi_label" as const,
+    required_facts: ["raw_transaction", "input_script_pubkeys"],
+    labels: [
+      {
+        key: "other_shape",
+        label: "Other shape",
+        description: "No shape matched.",
+      },
+    ],
+  },
+  {
+    id: "data_protocols",
+    version: "1",
+    title: "Data protocols",
+    methodology: "fingerprint" as const,
+    semantics: "multi_label" as const,
+    required_facts: ["raw_transaction"],
+    labels: [
+      {
+        key: "no_detected_protocol",
+        label: "No detected protocol",
+        description: "No fingerprint fired.",
+      },
+    ],
+  },
+  {
+    id: "knots_bip110",
+    version: "1",
+    title: "Knots BIP-110 compatibility",
+    methodology: "policy" as const,
+    semantics: "rule_set" as const,
+    required_facts: ["raw_transaction", "input_script_pubkeys"],
+    labels: [
+      {
+        key: "violating",
+        label: "Would violate",
+        description: "A violation was proven.",
+      },
+    ],
+  },
+];
+
+const compactClassifications = () => [
+  {
+    classifier_id: "transaction_properties",
+    state: "complete" as const,
+    primary_label: null,
+    labels: ["version_2", "p2wpkh"],
+    missing_facts: [],
+    evidence: null,
+  },
+  {
+    classifier_id: "transaction_shape",
+    state: "complete" as const,
+    primary_label: "other_shape",
+    labels: ["other_shape"],
+    missing_facts: [],
+    evidence: null,
+  },
+  {
+    classifier_id: "data_protocols",
+    state: "complete" as const,
+    primary_label: "no_detected_protocol",
+    labels: ["no_detected_protocol"],
+    missing_facts: [],
+    evidence: null,
+  },
+  {
+    classifier_id: "knots_bip110",
+    state: "complete" as const,
+    primary_label: "violating",
+    labels: ["violating"],
+    missing_facts: [],
+    evidence: null,
+  },
+];
+
+const classificationSummaries = () => [
+  {
+    classifier_id: "transaction_properties",
+    complete_count: 1,
+    partial_count: 0,
+    unclassified_count: 0,
+    label_counts: { version_2: 1, p2wpkh: 1 },
+  },
+  {
+    classifier_id: "transaction_shape",
+    complete_count: 1,
+    partial_count: 0,
+    unclassified_count: 0,
+    label_counts: { other_shape: 1 },
+  },
+  {
+    classifier_id: "data_protocols",
+    complete_count: 1,
+    partial_count: 0,
+    unclassified_count: 0,
+    label_counts: { no_detected_protocol: 1 },
+  },
+  {
+    classifier_id: "knots_bip110",
+    complete_count: 1,
+    partial_count: 0,
+    unclassified_count: 0,
+    label_counts: { violating: 1 },
+  },
+];
+
+const makeUnclassified = (value: MempoolSnapshot): void => {
+  value.transactions[0]!.classifications = [];
+  value.transactions[0]!.bip110 = null;
+  value.transactions[0]!.structure = null;
+  value.classification_summaries = value.classification_summaries.map(
+    (summary) => ({
+      ...summary,
+      complete_count: 0,
+      partial_count: 0,
+      unclassified_count: 1,
+      label_counts: Object.fromEntries(
+        Object.keys(summary.label_counts).map((label) => [label, 0]),
+      ),
+    }),
+  );
+  value.bip110_summary = {
+    ...value.bip110_summary,
+    violating_count: 0,
+    unclassified_count: 1,
+  };
+};
 
 const source = () => ({
   source_id: "core",
@@ -23,6 +175,12 @@ const source = () => ({
   chain_tip: { height: 900_000, hash: BLOCK_HASH },
   transaction_count: 1,
   total_vsize: 141,
+  classification: {
+    state: "complete",
+    revision: 3,
+    classified_count: 1,
+    unclassified_count: 0,
+  },
   last_error: null,
 });
 
@@ -37,6 +195,8 @@ const snapshot = (): MempoolSnapshot => ({
   chain_tip: { height: 900_000, hash: BLOCK_HASH },
   transaction_count: 1,
   total_vsize: 141,
+  classifier_catalog: classifierCatalog(),
+  classification_summaries: classificationSummaries(),
   bip110_summary: {
     evaluator_id: "rdts",
     evaluator_version: "0.1.0",
@@ -51,8 +211,23 @@ const snapshot = (): MempoolSnapshot => ({
       txid: TXID,
       wtxid: TXID,
       vsize: 141,
+      weight: 561,
       fee_sats: 423,
       entered_at_ms: 1_699_999_000_000,
+      ancestor_count: 1,
+      ancestor_vsize: 141,
+      ancestor_fee_sats: 423,
+      descendant_count: 1,
+      descendant_vsize: 141,
+      replaceable: false,
+      structure: {
+        input_count: 1,
+        output_count: 2,
+        op_return_bytes: 0,
+        output_sats: 50_000,
+        witness_bytes: 107,
+      },
+      classifications: compactClassifications(),
       bip110: {
         status: "violating",
         primary_rule: "element_size",
@@ -69,6 +244,10 @@ const transactionDetail = (): TransactionDetailResponse => ({
   classification_revision: 3,
   txid: TXID,
   wtxid: TXID,
+  classifications: compactClassifications().map((result) => ({
+    ...result,
+    evidence: { fixture: true },
+  })),
   assessment: {
     status: "violating",
     primary_rule: "element_size",
@@ -165,6 +344,7 @@ describe("parseSourceSnapshotResponse", () => {
       chain_tip: null,
       transaction_count: null,
       total_vsize: null,
+      classification: null,
     };
 
     expect(
@@ -203,6 +383,180 @@ describe("parseSourceSnapshotResponse", () => {
         snapshot: { ...snapshot(), source_id: "knots" },
       }),
     ).toThrow("Source summary does not match its snapshot");
+  });
+
+  it("requires classification progress exactly when a snapshot exists", () => {
+    expect(() =>
+      parseSourceSnapshotResponse({
+        source: { ...source(), classification: null },
+        snapshot: snapshot(),
+      }),
+    ).toThrow(
+      "Source summary classification does not match its snapshot metadata",
+    );
+
+    const waiting = {
+      ...source(),
+      availability: "waiting",
+      last_poll_started_at_ms: null,
+      snapshot_observed_at_ms: null,
+      chain_tip: null,
+      transaction_count: null,
+      total_vsize: null,
+    };
+    expect(() =>
+      parseSourceSnapshotResponse({ source: waiting, snapshot: null }),
+    ).toThrow(
+      "Source without a snapshot unexpectedly contains classification progress",
+    );
+  });
+
+  it("requires strict and conserving classification progress", () => {
+    expect(() =>
+      parseSourceSnapshotResponse({
+        source: {
+          ...source(),
+          classification: {
+            ...source().classification,
+            state: "unknown",
+          },
+        },
+        snapshot: snapshot(),
+      }),
+    ).toThrow("Invalid classification progress");
+
+    expect(() =>
+      parseSourceSnapshotResponse({
+        source: {
+          ...source(),
+          classification: {
+            ...source().classification,
+            classified_count: 0,
+          },
+        },
+        snapshot: snapshot(),
+      }),
+    ).toThrow(
+      "Source summary classification does not match its snapshot metadata",
+    );
+
+    expect(() =>
+      parseSourceSnapshotResponse({
+        source: {
+          ...source(),
+          classification: {
+            ...source().classification,
+            extra: true,
+          },
+        },
+        snapshot: snapshot(),
+      }),
+    ).toThrow("Invalid classification progress");
+  });
+
+  it("binds classification revision and counts to the returned snapshot", () => {
+    expect(() =>
+      parseSourceSnapshotResponse({
+        source: {
+          ...source(),
+          classification: {
+            ...source().classification,
+            revision: 4,
+          },
+        },
+        snapshot: snapshot(),
+      }),
+    ).toThrow("Source summary does not match its snapshot");
+
+    const unclassifiedSnapshot = snapshot();
+    makeUnclassified(unclassifiedSnapshot);
+    expect(() =>
+      parseSourceSnapshotResponse({
+        source: source(),
+        snapshot: unclassifiedSnapshot,
+      }),
+    ).toThrow("Source summary does not match its snapshot");
+  });
+
+  it("accepts every lifecycle state and complete snapshots with coverage gaps", () => {
+    const noAssessmentSnapshot = snapshot();
+    makeUnclassified(noAssessmentSnapshot);
+
+    for (const state of ["classifying", "complete", "paused"] as const) {
+      const value = {
+        source: {
+          ...source(),
+          classification: {
+            state,
+            revision: 3,
+            classified_count: 0,
+            unclassified_count: 1,
+          },
+        },
+        snapshot: noAssessmentSnapshot,
+      };
+      expect(parseSourceSnapshotResponse(value)).toBe(value);
+    }
+  });
+
+  it("rejects membership facts and structure that break the contract", () => {
+    const withTransaction = (patch: Partial<MempoolTransaction>) => {
+      const value = snapshot();
+      Object.assign(value.transactions[0]!, patch);
+      return { source: source(), snapshot: value };
+    };
+
+    expect(() =>
+      parseSourceSnapshotResponse(withTransaction({ weight: 141 * 4 + 1 })),
+    ).toThrow("inconsistent weight");
+    expect(() =>
+      parseSourceSnapshotResponse(withTransaction({ weight: 0 })),
+    ).toThrow("inconsistent weight");
+    expect(() =>
+      parseSourceSnapshotResponse(withTransaction({ ancestor_vsize: 140 })),
+    ).toThrow("inconsistent ancestry");
+    expect(() =>
+      parseSourceSnapshotResponse(withTransaction({ descendant_count: 0 })),
+    ).toThrow("inconsistent ancestry");
+    expect(() =>
+      parseSourceSnapshotResponse(withTransaction({ structure: null })),
+    ).toThrow("couples structure and assessment");
+    expect(() =>
+      parseSourceSnapshotResponse(
+        withTransaction({
+          structure: {
+            input_count: 0,
+            output_count: 1,
+            op_return_bytes: 0,
+            output_sats: 0,
+            witness_bytes: 0,
+          },
+        }),
+      ),
+    ).toThrow("Invalid transaction structure");
+  });
+
+  it("rejects unsafe, negative, and fractional lifecycle numbers", () => {
+    const invalidNumbers = [
+      ["revision", Number.MAX_SAFE_INTEGER + 1],
+      ["classified_count", -1],
+      ["unclassified_count", 0.5],
+    ] as const;
+
+    for (const [field, invalid] of invalidNumbers) {
+      expect(() =>
+        parseSourceSnapshotResponse({
+          source: {
+            ...source(),
+            classification: {
+              ...source().classification,
+              [field]: invalid,
+            },
+          },
+          snapshot: snapshot(),
+        }),
+      ).toThrow("Invalid classification progress");
+    }
   });
 
   it("requires a reader-visible classification revision", () => {
@@ -311,6 +665,16 @@ describe("parseSourceSnapshotResponse", () => {
       violated_rules: ["element_size"],
       unknown_rules: ["element_size", "undefined_version"],
     };
+    const policy = value.transactions[0]!.classifications.find(
+      ({ classifier_id }) => classifier_id === "knots_bip110",
+    )!;
+    policy.state = "partial";
+    policy.missing_facts = ["policy_facts"];
+    const policySummary = value.classification_summaries.find(
+      ({ classifier_id }) => classifier_id === "knots_bip110",
+    )!;
+    policySummary.complete_count = 0;
+    policySummary.partial_count = 1;
 
     expect(
       parseSourceSnapshotResponse({ source: source(), snapshot: value })
@@ -358,6 +722,11 @@ describe("parseTransactionDetailResponse", () => {
     }
     value.assessment.primary_rule = null;
     value.assessment.unknown_rules = ["element_size"];
+    const policy = value.classifications.find(
+      ({ classifier_id }) => classifier_id === "knots_bip110",
+    )!;
+    policy.state = "partial";
+    policy.missing_facts = ["policy_facts"];
     value.rules[1]!.missing_count = 2;
     value.rules[1]!.missing = [{ location: "witness[1]" }];
 

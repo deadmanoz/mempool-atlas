@@ -5,23 +5,22 @@ import {
   formatMembershipAge,
   membershipPage,
 } from "./membership-table";
+import { mempoolTransaction } from "./test-fixtures";
 import type { MempoolTransaction } from "./types";
 
 const memberships = Array.from(
   { length: 205 },
-  (_, index): MempoolTransaction => ({
-    txid: index.toString(16).padStart(64, "0"),
-    wtxid: index.toString(16).padStart(64, "0"),
-    vsize: 141,
-    fee_sats: 423,
-    entered_at_ms: 1_700_000_000_000,
-    bip110: {
-      status: "compatible",
-      primary_rule: null,
-      violated_rules: [],
-      unknown_rules: [],
-    },
-  }),
+  (_, index): MempoolTransaction =>
+    mempoolTransaction(index, {
+      vsize: 141,
+      fee_sats: 423,
+      bip110: {
+        status: "compatible",
+        primary_rule: null,
+        violated_rules: [],
+        unknown_rules: [],
+      },
+    }),
 );
 
 describe("membershipPage", () => {

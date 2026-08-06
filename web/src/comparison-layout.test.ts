@@ -9,19 +9,13 @@ import {
   compareCurrentSnapshots,
   type LoadedSourceSnapshot,
 } from "./comparison-model";
+import { mempoolTransaction } from "./test-fixtures";
 import type { MempoolSnapshot, MempoolTransaction } from "./types";
 
-const txid = (value: number): string => value.toString(16).padStart(64, "0");
-
 const source = (sourceId: string, values: number[]): LoadedSourceSnapshot => {
-  const transactions: MempoolTransaction[] = values.map((value) => ({
-    txid: txid(value),
-    wtxid: txid(value),
-    vsize: 100 + value,
-    fee_sats: 200 + value,
-    entered_at_ms: 1_700_000_000_000,
-    bip110: null,
-  }));
+  const transactions: MempoolTransaction[] = values.map((value) =>
+    mempoolTransaction(value, { vsize: 100 + value, fee_sats: 200 + value }),
+  );
   const snapshot: MempoolSnapshot = {
     source_id: sourceId,
     source_label: sourceId,
@@ -33,6 +27,8 @@ const source = (sourceId: string, values: number[]): LoadedSourceSnapshot => {
     chain_tip: { height: 900_000, hash: "00".repeat(32) },
     transaction_count: transactions.length,
     total_vsize: transactions.reduce((total, entry) => total + entry.vsize, 0),
+    classifier_catalog: [],
+    classification_summaries: [],
     bip110_summary: {
       evaluator_id: "rdts-rules",
       evaluator_version: "0.1.0",
@@ -55,6 +51,12 @@ const source = (sourceId: string, values: number[]): LoadedSourceSnapshot => {
       chain_tip: snapshot.chain_tip,
       transaction_count: snapshot.transaction_count,
       total_vsize: snapshot.total_vsize,
+      classification: {
+        state: "complete",
+        revision: snapshot.classification_revision,
+        classified_count: 0,
+        unclassified_count: snapshot.transaction_count,
+      },
       last_error: null,
     },
     snapshot,

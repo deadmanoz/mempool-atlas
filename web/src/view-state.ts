@@ -14,6 +14,7 @@ import { RULE_IDS, type RuleId } from "./types";
 
 export interface NodeViewState {
   source: string | null;
+  classifier: string | null;
   selection: TerrainSelection | null;
   txid: string | null;
 }
@@ -48,6 +49,9 @@ const sourceId = (value: string | null): string | null =>
   SOURCE_ID_PATTERN.test(value)
     ? value
     : null;
+
+const classifierId = (value: string | null): string | null =>
+  value !== null && /^[a-z][a-z0-9_]*$/.test(value) ? value : null;
 
 const txid = (value: string | null): string | null =>
   value !== null && TXID_PATTERN.test(value) ? value.toLowerCase() : null;
@@ -173,6 +177,7 @@ export const parseNodeViewState = (input: SearchInput): NodeViewState => {
 
   return {
     source: sourceId(singleValue(params, "source")),
+    classifier: classifierId(singleValue(params, "classifier")),
     selection,
     txid: txid(singleValue(params, "txid")),
   };
@@ -183,6 +188,10 @@ export const serializeNodeViewState = (state: NodeViewState): string => {
   const source = sourceId(state.source);
   if (source !== null) {
     params.set("source", source);
+  }
+  const classifier = classifierId(state.classifier);
+  if (classifier !== null) {
+    params.set("classifier", classifier);
   }
   if (state.selection?.kind === "rule") {
     const rule = ruleId(state.selection.rule);

@@ -5,15 +5,9 @@
 
 /target/
 /var/
-/backups/
-*.db
-*.db-shm
-*.db-wal
 
 /web/node_modules/
 /web/dist/
 /web/coverage/
-/.playwright-mcp/
-/docs/.vite/
 
 .claude/settings.local.json

@@ -3,15 +3,22 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0",
+    "npm": ">=10"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "check": "prettier --check . && tsc --noEmit",
     "format": "prettier --write .",
-    "clean": "rm -rf dist coverage node_modules/.vite"
+    "clean": "rm -rf dist coverage node_modules/.vite",
+    "audit": "npm audit --audit-level=moderate"
   },
   "devDependencies": {
+    "happy-dom": "^20.11.1",
     "prettier": "^3.8.4",
     "typescript": "~6.0.2",
     "vite": "^8.0.10",

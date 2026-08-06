@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_FILTERS, filterTransactions } from "./filters";
+import { mempoolTransaction } from "./test-fixtures";
 import type { MempoolTransaction } from "./types";
 
 const OBSERVED_AT_MS = 1_700_000_000_000;
@@ -9,20 +10,17 @@ const HOUR_MS = 60 * 60_000;
 const transaction = (
   value: number,
   overrides: Partial<MempoolTransaction> = {},
-): MempoolTransaction => ({
-  txid: value.toString(16).padStart(64, "0"),
-  wtxid: value.toString(16).padStart(64, "0"),
-  vsize: 200,
-  fee_sats: 2_000,
-  entered_at_ms: OBSERVED_AT_MS - HOUR_MS,
-  bip110: {
-    status: "compatible",
-    primary_rule: null,
-    violated_rules: [],
-    unknown_rules: [],
-  },
-  ...overrides,
-});
+): MempoolTransaction =>
+  mempoolTransaction(value, {
+    entered_at_ms: OBSERVED_AT_MS - HOUR_MS,
+    bip110: {
+      status: "compatible",
+      primary_rule: null,
+      violated_rules: [],
+      unknown_rules: [],
+    },
+    ...overrides,
+  });
 
 describe("filterTransactions", () => {
   it("keeps the complete snapshot by default", () => {

@@ -1,8 +1,4 @@
-import {
-  terrainRegionKey,
-  type TerrainRegionKey,
-  type ViolationSignatureKey,
-} from "./terrain";
+import type { ViolationSignatureKey } from "./terrain";
 import type {
   Bip110Status,
   MempoolSnapshot,
@@ -60,12 +56,6 @@ export type ComparisonPolicyFilter =
   | { kind: "rule"; rule: RuleId }
   | { kind: "status"; status: ComparisonPolicyStatus }
   | { kind: "signature"; signature: ViolationSignatureKey };
-
-export interface ComparisonPopulation {
-  entries: ComparedTransaction[];
-  count: number;
-  vsize: number;
-}
 
 const addVsize = (total: number, transaction: MempoolTransaction): number =>
   total + transaction.vsize;
@@ -246,67 +236,3 @@ export const policySideForRegion = (
     : region === "right_only"
       ? "right"
       : preferred;
-
-export const assessmentRegionKey = (
-  transaction: MempoolTransaction,
-): TerrainRegionKey => terrainRegionKey(transaction);
-
-export const comparisonPolicyStatus = (
-  transaction: MempoolTransaction,
-): ComparisonPolicyStatus => transaction.bip110?.status ?? "unclassified";
-
-const filterMatches = (
-  transaction: MempoolTransaction,
-  filter: ComparisonPolicyFilter,
-): boolean => {
-  if (filter.kind === "all") {
-    return true;
-  }
-  if (filter.kind === "rule") {
-    return transaction.bip110?.violated_rules.includes(filter.rule) ?? false;
-  }
-  if (filter.kind === "status") {
-    return comparisonPolicyStatus(transaction) === filter.status;
-  }
-  return assessmentRegionKey(transaction) === filter.signature;
-};
-
-export const comparisonPolicyPopulation = (
-  comparison: CurrentComparison,
-  region: ComparisonRegionKey,
-  side: ComparisonSide,
-  filter: ComparisonPolicyFilter,
-): ComparisonPopulation => {
-  const effectiveSide = policySideForRegion(region, side);
-  const entries = comparisonRegionEntries(comparison, region).filter(
-    (entry) => {
-      const transaction = sourceEntry(entry, effectiveSide);
-      return transaction !== null && filterMatches(transaction, filter);
-    },
-  );
-  return {
-    entries,
-    count: entries.length,
-    vsize: entries.reduce((total, entry) => {
-      const transaction = sourceEntry(entry, effectiveSide);
-      return transaction === null ? total : total + transaction.vsize;
-    }, 0),
-  };
-};
-
-export const policyFilterCount = (
-  comparison: CurrentComparison,
-  region: ComparisonRegionKey,
-  side: ComparisonSide,
-  filter: Exclude<ComparisonPolicyFilter, { kind: "all" }>,
-): number => {
-  const effectiveSide = policySideForRegion(region, side);
-  let count = 0;
-  for (const entry of comparisonRegionEntries(comparison, region)) {
-    const transaction = sourceEntry(entry, effectiveSide);
-    if (transaction !== null && filterMatches(transaction, filter)) {
-      count += 1;
-    }
-  }
-  return count;
-};

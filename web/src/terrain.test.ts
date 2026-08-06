@@ -15,6 +15,7 @@ import {
   terrainRegionKey,
   violationSignature,
 } from "./terrain";
+import { mempoolTransaction } from "./test-fixtures";
 import type { Bip110Assessment, MempoolTransaction, RuleId } from "./types";
 
 const compatible: Bip110Assessment = {
@@ -49,15 +50,8 @@ const violating = (
 const transaction = (
   value: number,
   overrides: Partial<MempoolTransaction> = {},
-): MempoolTransaction => ({
-  txid: value.toString(16).padStart(64, "0"),
-  wtxid: value.toString(16).padStart(64, "0"),
-  vsize: 200,
-  fee_sats: 2_000,
-  entered_at_ms: 1_700_000_000_000,
-  bip110: compatible,
-  ...overrides,
-});
+): MempoolTransaction =>
+  mempoolTransaction(value, { bip110: compatible, ...overrides });
 
 describe("classificationTotals", () => {
   it("keeps status and coverage as independent claims", () => {
@@ -503,6 +497,30 @@ describe("createTerrainLayout", () => {
       },
     ]);
     expect(operations.at(-1)).toBe("stroke:#f7ff6a");
+  });
+
+  it("paints one visible Canvas block per transaction", () => {
+    const transactions = Array.from({ length: 1_000 }, (_, index) =>
+      transaction(index + 1),
+    );
+    const layout = createTerrainLayout(transactions, 900, 600, "count");
+    let fillCount = 0;
+    const context = {
+      fillStyle: "",
+      strokeStyle: "",
+      lineWidth: 1,
+      globalAlpha: 1,
+      clearRect: () => undefined,
+      fillRect: () => {
+        fillCount += 1;
+      },
+      strokeRect: () => undefined,
+    } as unknown as CanvasRenderingContext2D;
+
+    paintTerrain(context, layout, { kind: "region", regionKey: "compatible" });
+
+    expect(layout.glyphs).toHaveLength(transactions.length);
+    expect(fillCount).toBeGreaterThan(transactions.length);
   });
 
   it("keeps one Canvas glyph per entry without theoretical bucket allocation", () => {

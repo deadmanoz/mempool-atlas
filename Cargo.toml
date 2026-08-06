@@ -1,40 +1,40 @@
-[workspace]
-resolver = "3"
-members = [
-    "apps/atlas",
-    "crates/rdts-rules",
-]
-default-members = ["apps/atlas"]
-
-[workspace.package]
+[package]
+name = "mempool-atlas"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
+authors = ["Anthony Milton"]
+license = "MIT"
+repository = "https://github.com/deadmanoz/mempool-atlas"
+default-run = "mempool-atlas"
+publish = false
 
-[workspace.dependencies]
+[dependencies]
 anyhow = "1"
 axum = "0.8"
 base64 = "0.21"
 bitcoin = { version = "0.32.7", features = ["serde"] }
 bytes = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
-corepc-client = { version = "0.8", features = ["client-sync"] }
+# Branch: deadmanoz/corepc:fix-client-30s-timeout, based on corepc-client 0.8.0.
+corepc-client = { git = "https://github.com/deadmanoz/corepc", rev = "d57fd1f133aab9dc2be6769eec56bbbc20f3722a", features = ["client-sync"] }
 minreq = "2.14"
-rdts-rules = { path = "crates/rdts-rules" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[workspace.lints.rust]
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"
 
-[workspace.lints.clippy]
+[lints.clippy]
 all = { level = "warn", priority = -1 }
 
 [profile.release]

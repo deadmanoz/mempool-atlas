@@ -11,7 +11,7 @@ build:
     just build-web
 
 build-rust:
-    cargo build --workspace
+    cargo build
 
 build-web:
     npm --prefix web run build
@@ -21,27 +21,38 @@ test:
     just test-web
 
 test-rust:
-    cargo test --workspace
+    cargo test
 
 test-web:
     npm --prefix web test
 
 lint:
+    just structure
     cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --all-targets -- -D warnings
     npm --prefix web run check
+
+structure:
+    ./scripts/check-structure.sh
 
 format:
     cargo fmt --all
     npm --prefix web run format
 
 dev:
-    cargo run -p mempool-atlas
+    cargo run
 
 run: dev
 
 web-dev:
     npm --prefix web run dev
+
+# Run the deterministic fixture Atlas API for frontend-only development.
+web-fixtures:
+    node web/dev/fixture-server.mjs
+
+smoke-public base_url source_id:
+    ./scripts/smoke-public.sh "{{base_url}}" "{{source_id}}"
 
 clean:
     cargo clean

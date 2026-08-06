@@ -8,6 +8,7 @@ import {
   feeRateLaneIndex,
   paintMembershipGlyphs,
 } from "./swim-view";
+import { mempoolTransaction } from "./test-fixtures";
 import type { MempoolTransaction } from "./types";
 
 const MINUTE_MS = 60_000;
@@ -18,20 +19,18 @@ const OBSERVED_AT_MS = 1_700_000_000_000;
 const transaction = (
   value: number,
   overrides: Partial<MempoolTransaction> = {},
-): MempoolTransaction => ({
-  txid: value.toString(16).padStart(64, "0"),
-  wtxid: value.toString(16).padStart(64, "0"),
-  vsize: 250,
-  fee_sats: 2_000,
-  entered_at_ms: OBSERVED_AT_MS - HOUR_MS,
-  bip110: {
-    status: "compatible",
-    primary_rule: null,
-    violated_rules: [],
-    unknown_rules: [],
-  },
-  ...overrides,
-});
+): MempoolTransaction =>
+  mempoolTransaction(value, {
+    vsize: 250,
+    entered_at_ms: OBSERVED_AT_MS - HOUR_MS,
+    bip110: {
+      status: "compatible",
+      primary_rule: null,
+      violated_rules: [],
+      unknown_rules: [],
+    },
+    ...overrides,
+  });
 
 describe("feeRateLaneIndex", () => {
   it.each([

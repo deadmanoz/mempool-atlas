@@ -1,4 +1,12 @@
 export type SourceAvailability = "waiting" | "ready" | "stale" | "error";
+export type ClassificationState = "classifying" | "complete" | "paused";
+
+export interface ClassificationProgress {
+  state: ClassificationState;
+  revision: number;
+  classified_count: number;
+  unclassified_count: number;
+}
 
 export interface ChainTip {
   height: number;
@@ -36,12 +44,67 @@ export interface Bip110Summary {
   unclassified_count: number;
 }
 
+export type ClassifierMethodology =
+  "exact" | "heuristic" | "fingerprint" | "policy";
+export type ClassifierSemantics = "multi_label" | "rule_set";
+export type ClassificationResultState = "complete" | "partial";
+
+export interface ClassifierLabelDescriptor {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface ClassifierDescriptor {
+  id: string;
+  version: string;
+  title: string;
+  methodology: ClassifierMethodology;
+  semantics: ClassifierSemantics;
+  required_facts: string[];
+  labels: ClassifierLabelDescriptor[];
+}
+
+export interface ClassificationResult {
+  classifier_id: string;
+  state: ClassificationResultState;
+  primary_label: string | null;
+  labels: string[];
+  missing_facts: string[];
+  evidence: unknown | null;
+}
+
+export interface ClassifierSummary {
+  classifier_id: string;
+  complete_count: number;
+  partial_count: number;
+  unclassified_count: number;
+  label_counts: Record<string, number>;
+}
+
+export interface TransactionStructure {
+  input_count: number;
+  output_count: number;
+  op_return_bytes: number;
+  output_sats: number;
+  witness_bytes: number;
+}
+
 export interface MempoolTransaction {
   txid: string;
   wtxid: string;
   vsize: number;
+  weight: number;
   fee_sats: number;
   entered_at_ms: number;
+  ancestor_count: number;
+  ancestor_vsize: number;
+  ancestor_fee_sats: number;
+  descendant_count: number;
+  descendant_vsize: number;
+  replaceable: boolean;
+  structure: TransactionStructure | null;
+  classifications: ClassificationResult[];
   bip110: Bip110Assessment | null;
 }
 
@@ -56,6 +119,8 @@ export interface MempoolSnapshot {
   chain_tip: ChainTip;
   transaction_count: number;
   total_vsize: number;
+  classifier_catalog: ClassifierDescriptor[];
+  classification_summaries: ClassifierSummary[];
   bip110_summary: Bip110Summary;
   transactions: MempoolTransaction[];
 }
@@ -76,6 +141,7 @@ export interface TransactionDetailResponse {
   classification_revision: number;
   txid: string;
   wtxid: string;
+  classifications: ClassificationResult[];
   assessment: Bip110Assessment;
   rules: RuleAssessment[];
 }
@@ -90,6 +156,7 @@ export interface SourceSummary {
   chain_tip: ChainTip | null;
   transaction_count: number | null;
   total_vsize: number | null;
+  classification: ClassificationProgress | null;
   last_error: string | null;
 }
 
