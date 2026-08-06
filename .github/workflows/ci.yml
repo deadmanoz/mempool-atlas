@@ -22,7 +22,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
       - run: npm --prefix web ci
       - run: just lint
       - run: just test
