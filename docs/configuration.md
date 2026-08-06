@@ -101,6 +101,23 @@ cp .env.example .env
 The same settings are available as command-line options. Run
 `cargo run -- --help` for their names.
 
+### Optional website analytics
+
+The browser loads no analytics by default. A production build can enable a
+self-hosted Umami tracker with build-time Vite variables:
+
+| Variable | Required when enabled | Purpose |
+| --- | --- | --- |
+| `VITE_UMAMI_SCRIPT_URL` | yes | HTTPS URL of the Umami tracker script |
+| `VITE_UMAMI_WEBSITE_ID` | yes | Umami website UUID |
+| `VITE_UMAMI_DOMAINS` | no | Comma-separated hostnames accepted by the tracker |
+
+Set both required values in the environment that runs `just build`. Use
+`VITE_UMAMI_DOMAINS` in public deployments so the website ID only records the
+intended hostnames. Atlas rejects an insecure URL, malformed UUID, or malformed
+hostname list and leaves analytics disabled. These values are embedded in the
+built browser assets and are not secrets.
+
 ## Bitcoin RPC permissions
 
 Use a dedicated RPC identity and restrict it server-side to the methods Atlas

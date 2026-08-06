@@ -37,9 +37,17 @@ Build and verify the release from a clean, reviewed revision:
 npm --prefix web ci
 just lint
 just test
-just build
+VITE_UMAMI_SCRIPT_URL=https://analytics.example.com/script.js \
+VITE_UMAMI_WEBSITE_ID=00000000-0000-4000-8000-000000000000 \
+VITE_UMAMI_DOMAINS=atlas.example.com \
+  just build
 cargo build --release --locked
 ```
+
+Omit the three `VITE_UMAMI_*` variables when analytics is not required. If the
+tracker uses a separate origin, add that exact HTTPS origin to `script-src` and
+`connect-src` in the edge Content Security Policy. A first-party reverse proxy
+can keep both directives at `'self'` instead.
 
 Install the release binary and `web/dist` under `/opt/mempool-atlas`. Create a
 dedicated `mempool-atlas` system account with no interactive shell. Copy
@@ -167,7 +175,7 @@ describes the fields and actions available to each plan.
 Add these response headers at the edge:
 
 ```text
-Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'
+Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self' https://analytics.example.com; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' https://analytics.example.com; style-src 'self'
 Cross-Origin-Opener-Policy: same-origin
 Permissions-Policy: camera=(), geolocation=(), microphone=()
 Referrer-Policy: no-referrer

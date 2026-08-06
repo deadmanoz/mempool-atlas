@@ -5,6 +5,7 @@ import {
   fetchTransactionDetail,
   transactionDetailMatchesSnapshot,
 } from "./api";
+import { installAnalytics } from "./analytics";
 import {
   DEFAULT_FILTERS,
   filterTransactions,
@@ -94,6 +95,8 @@ import type {
   SourceSummary,
   TransactionDetailResponse,
 } from "./types";
+
+installAnalytics(import.meta.env);
 
 const requiredElement = <T extends HTMLElement>(id: string): T => {
   const element = document.getElementById(id);

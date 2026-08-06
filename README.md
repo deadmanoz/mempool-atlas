@@ -144,8 +144,9 @@ does not trigger a Bitcoin RPC poll.
 
 Public deployment uses Cloudflare Tunnel to reach the loopback Atlas listener.
 See [Deploy behind Cloudflare](docs/deployment-cloudflare.md) for setup and the
-smoke test. Keep deployment credentials, hostnames, private RPC addresses, and
-account identifiers out of this repository.
+smoke test. A deployment can enable a self-hosted Umami tracker at build time;
+analytics is disabled by default. Keep deployment credentials, hostnames,
+private RPC addresses, and account identifiers out of this repository.
 
 ## Contributing
 
