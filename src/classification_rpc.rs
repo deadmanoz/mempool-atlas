@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -220,14 +221,20 @@ struct WireRequest<'a> {
 fn read_bounded_response(
     mut response: minreq::ResponseLazy,
     maximum: usize,
-) -> Result<(i32, Vec<u8>), ClassificationRpcError> {
+) -> Result<(u16, Vec<u8>), ClassificationRpcError> {
     let status_code = response.status_code;
-    if response.headers.contains_key("transfer-encoding") {
+    if response
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+    {
         return Err(ClassificationRpcError::UnsupportedTransferEncoding);
     }
     let announced_length = response
         .headers
-        .get("content-length")
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .map(|(_, value)| value.as_str())
         .and_then(|length| length.trim().parse::<usize>().ok());
     if let Some(actual) = announced_length
         && actual > maximum
@@ -235,15 +242,23 @@ fn read_bounded_response(
         return Err(ClassificationRpcError::ResponseTooLarge { actual, maximum });
     }
     let mut body = Vec::with_capacity(announced_length.unwrap_or(0).min(maximum));
-    for byte in &mut response {
-        let (byte, _) = byte.map_err(ClassificationRpcError::Transport)?;
-        if body.len() == maximum {
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let remaining = maximum.saturating_sub(body.len());
+        let read_limit = remaining.saturating_add(1).min(buffer.len());
+        let read = response
+            .read(&mut buffer[..read_limit])
+            .map_err(|source| ClassificationRpcError::Transport(source.into()))?;
+        if read == 0 {
+            break;
+        }
+        if read > remaining {
             return Err(ClassificationRpcError::ResponseTooLarge {
                 actual: maximum.saturating_add(1),
                 maximum,
             });
         }
-        body.push(byte);
+        body.extend_from_slice(&buffer[..read]);
     }
     if let Some(expected) = announced_length
         && body.len() != expected
@@ -258,7 +273,7 @@ fn read_bounded_response(
 
 fn decode_batch_response(
     body: &[u8],
-    status_code: i32,
+    status_code: u16,
     expected_ids: &[u64],
 ) -> Result<Vec<Option<ClassificationRpcResponse>>, ClassificationRpcError> {
     let responses =
@@ -299,14 +314,14 @@ pub(crate) enum ClassificationRpcError {
     #[error("classification RPC HTTP transport failed: {0}")]
     Transport(#[source] minreq::Error),
     #[error("classification RPC returned unexpected HTTP status {0}")]
-    UnexpectedHttpStatus(i32),
+    UnexpectedHttpStatus(u16),
     #[error("classification RPC response used unsupported Transfer-Encoding")]
     UnsupportedTransferEncoding,
     #[error("classification RPC response ended after {actual} of {expected} declared bytes")]
     IncompleteResponseBody { expected: usize, actual: usize },
     #[error("classification RPC HTTP {status_code} response was not a valid JSON-RPC batch")]
     DecodeResponse {
-        status_code: i32,
+        status_code: u16,
         #[source]
         source: serde_json::Error,
     },
@@ -812,7 +827,7 @@ mod tests {
     }
 
     fn serve_once_with_status(
-        status_code: i32,
+        status_code: u16,
         response: &[u8],
         delay: Duration,
     ) -> (SocketAddr, Receiver<Vec<u8>>, JoinHandle<()>) {
@@ -833,7 +848,7 @@ mod tests {
     }
 
     fn serve_once_configured(
-        status_code: i32,
+        status_code: u16,
         response: &[u8],
         delay: Duration,
         content_length: Option<usize>,
