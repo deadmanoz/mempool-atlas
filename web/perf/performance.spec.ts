@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { AtlasCandidateReadyDetail } from "../src/candidate-ready";
 import type { AtlasWorkerRequest } from "../src/atlas-worker-protocol";
+import { RELEASE_GATES } from "./release-gates.mjs";
 
 type Scenario = "node" | "comparison";
 type StageKind = "population" | "membership" | "structure" | "classifier";
@@ -278,18 +279,6 @@ type Throttle = {
   cpu_slowdown: number;
 };
 
-type ScenarioGate = {
-  primary_ms: number;
-  complete_ms: number;
-  primary_encoded_bytes: number;
-  complete_encoded_bytes: number;
-  page_heap_bytes: number;
-  cross_context_bytes: number;
-  replacement_retained_bytes: number;
-  bip110_page_heap_bytes: number | null;
-  bip110_cross_context_bytes: number | null;
-};
-
 const RESULT_DIRECTORY = fileURLToPath(
   new URL("../.perf-results/raw/", import.meta.url),
 );
@@ -307,34 +296,6 @@ const DESKTOP_THROTTLE: Readonly<Throttle> = Object.freeze({
   upload_bytes_per_second: -1,
   cpu_slowdown: 1,
 });
-
-const GATES: Readonly<Record<Scenario, ScenarioGate>> = Object.freeze({
-  node: {
-    primary_ms: 30_000,
-    complete_ms: 52_000,
-    primary_encoded_bytes: 3_189_229,
-    complete_encoded_bytes: 6_059_535,
-    page_heap_bytes: 40_000_000,
-    cross_context_bytes: 60 * 1024 * 1024,
-    replacement_retained_bytes: 90 * 1024 * 1024,
-    bip110_page_heap_bytes: 90_000_000,
-    bip110_cross_context_bytes: 120 * 1024 * 1024,
-  },
-  comparison: {
-    primary_ms: 50_000,
-    complete_ms: 94_000,
-    primary_encoded_bytes: 5_740_612,
-    complete_encoded_bytes: 12_119_070,
-    page_heap_bytes: 60_000_000,
-    cross_context_bytes: 100 * 1024 * 1024,
-    replacement_retained_bytes: 150 * 1024 * 1024,
-    bip110_page_heap_bytes: null,
-    bip110_cross_context_bytes: null,
-  },
-});
-
-const INTERACTION_HANDLER_GATE_MS = 200;
-const INTERACTION_SETTLE_GATE_MS = 5_000;
 
 const installObservers = async (page: Page): Promise<void> => {
   await page.addInitScript(() => {
@@ -1716,7 +1677,7 @@ const runScenario = async (
   const maximumInteractionSettleMs = Math.max(
     ...measuredInteractions.map(({ settle_duration_ms }) => settle_duration_ms),
   );
-  const gate = GATES[scenario];
+  const gate = RELEASE_GATES[scenario];
   const result = {
     schema_version: 2,
     result_kind: "stable-success",
@@ -1824,16 +1785,18 @@ const runScenario = async (
   ).not.toBeNull();
   expect(
     result.metadata_usable_ms ?? Number.POSITIVE_INFINITY,
-  ).toBeLessThanOrEqual(5_000);
-  expect(result.primary_interaction_ms).toBeLessThanOrEqual(gate.primary_ms);
+  ).toBeLessThanOrEqual(RELEASE_GATES.metadata_usable_ms);
+  expect(result.primary_interaction_ms).toBeLessThanOrEqual(
+    gate.primary_interaction_ms,
+  );
   expect(result.complete_feature_ready_ms).toBeLessThanOrEqual(
-    gate.complete_ms,
+    gate.complete_feature_ready_ms,
   );
   expect(primaryQuorum.encoded_body_bytes).toBeLessThanOrEqual(
-    gate.primary_encoded_bytes,
+    gate.primary_encoded_body_bytes,
   );
   expect(completeQuorum.encoded_body_bytes).toBeLessThanOrEqual(
-    gate.complete_encoded_bytes,
+    gate.complete_encoded_body_bytes,
   );
   expect(statusCounts["304"] ?? 0).toBe(0);
   expect(statusCounts["409"] ?? 0).toBe(0);
@@ -1893,12 +1856,14 @@ const runScenario = async (
   expect(expectedDescriptors.size).toBe(
     manifests.reduce((total, manifest) => total + manifest.stages.length, 0),
   );
-  expect(result.maximum_responsiveness_long_task_ms).toBeLessThanOrEqual(200);
+  expect(result.maximum_responsiveness_long_task_ms).toBeLessThanOrEqual(
+    RELEASE_GATES.maximum_responsiveness_long_task_ms,
+  );
   expect(result.maximum_interaction_handler_ms).toBeLessThanOrEqual(
-    INTERACTION_HANDLER_GATE_MS,
+    RELEASE_GATES.interaction_handler_ms,
   );
   expect(result.maximum_interaction_settle_ms).toBeLessThanOrEqual(
-    INTERACTION_SETTLE_GATE_MS,
+    RELEASE_GATES.interaction_settle_ms,
   );
   if (bip110RuleNavigation !== null) {
     expect(bip110RuleNavigation.ruleIds).toHaveLength(7);
@@ -1910,7 +1875,9 @@ const runScenario = async (
     expect(bip110RuleNavigation.selectedRule).toBe(
       bip110RuleNavigation.ruleIds.at(-1),
     );
-    expect(bip110RuleNavigation.handlerDurationMs).toBeLessThanOrEqual(200);
+    expect(bip110RuleNavigation.handlerDurationMs).toBeLessThanOrEqual(
+      RELEASE_GATES.bip110_rule_navigation_handler_ms,
+    );
     expect(bip110MemorySample).not.toBeNull();
     expect(gate.bip110_page_heap_bytes).not.toBeNull();
     expect(gate.bip110_cross_context_bytes).not.toBeNull();
@@ -1931,10 +1898,12 @@ const runScenario = async (
     expect(bip110MemorySample).toBeNull();
   }
   expect(result.maximum_animation_frame_callback_ms).toBeLessThanOrEqual(
-    profile === "mobile-slow-4g" ? 16 : 8,
+    profile === "mobile-slow-4g"
+      ? RELEASE_GATES.maximum_animation_frame_callback_ms["mobile-slow-4g"]
+      : RELEASE_GATES.maximum_animation_frame_callback_ms.desktop,
   );
   expect(result.cls, JSON.stringify(result.layout_shifts)).toBeLessThanOrEqual(
-    0.1,
+    RELEASE_GATES.cls,
   );
   expect(result.primary_memory_sample.isolated_context).toBe(true);
   expect(result.primary_memory_sample.cross_origin_isolated).toBe(true);

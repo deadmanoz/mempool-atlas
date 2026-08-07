@@ -7,8 +7,9 @@ be agreed first.
 ## Development setup
 
 Install Rust 1.88 or newer, Node.js 20.19.x or 22.12 or newer, npm 10 or newer,
-and [`just`](https://github.com/casey/just). Then install the locked frontend
-dependencies and run the quality gate:
+[`just`](https://github.com/casey/just), and `jq`. The manifest parser test run
+by `just test` requires `jq`. Then install the locked frontend dependencies and
+run the quality gate:
 
 ```sh
 npm --prefix web ci

@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { prepareComparisonPublication } from "./comparison-publication-candidate";
+import type { ComparisonCanvasView } from "./comparison-canvas-view";
+import type { ComparisonDistributionsView } from "./comparison-distributions-view";
+import {
+  prepareComparisonCommitCandidate,
+  prepareComparisonPublication,
+} from "./comparison-publication-candidate";
 import { loadedSource } from "./comparison-test-fixtures";
 import { mempoolTransaction } from "./test-fixtures";
 
@@ -15,6 +20,21 @@ const publication = (sourceId: string, values: number[]) => {
       `${sourceId.charCodeAt(0).toString(16).padStart(2, "0")}`.repeat(32),
     snapshot_identity: `snapshot-${sourceId}`,
     publication: loaded.snapshot,
+  };
+};
+
+const unusedDistributionsView = {} as ComparisonDistributionsView;
+
+const canvasView = (canCommit: () => boolean) => {
+  const prepareCandidate = vi.fn((comparison) => ({ comparison }));
+  const canCommitCandidate = vi.fn(canCommit);
+  return {
+    view: {
+      prepareCandidate,
+      canCommitCandidate,
+    } as unknown as ComparisonCanvasView,
+    prepareCandidate,
+    canCommitCandidate,
   };
 };
 
@@ -51,5 +71,54 @@ describe("comparison publication candidate", () => {
         controller.signal,
       ),
     ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("reprepares comparison geometry after one commit invalidation", async () => {
+    let checks = 0;
+    const canvas = canvasView(() => {
+      checks += 1;
+      return checks > 1;
+    });
+
+    const prepared = await prepareComparisonCommitCandidate(
+      publication("left", [1, 2, 3]),
+      publication("right", [2, 3, 4]),
+      false,
+      false,
+      new AbortController().signal,
+      () => true,
+      unusedDistributionsView,
+      canvas.view,
+    );
+
+    expect(prepared.publication.candidateKey).toBe(
+      "snapshot-left|snapshot-right",
+    );
+    expect(canvas.prepareCandidate).toHaveBeenCalledTimes(2);
+    expect(canvas.canCommitCandidate).toHaveBeenCalledTimes(3);
+  });
+
+  it("exits after four consecutive comparison-canvas invalidations", async () => {
+    const canvas = canvasView(() => false);
+    const isCurrent = vi.fn(() => true);
+
+    await expect(
+      prepareComparisonCommitCandidate(
+        publication("left", [1, 2, 3]),
+        publication("right", [2, 3, 4]),
+        false,
+        false,
+        new AbortController().signal,
+        isCurrent,
+        unusedDistributionsView,
+        canvas.view,
+      ),
+    ).rejects.toThrow(
+      "Comparison publication candidate changed during 4 consecutive commit attempts",
+    );
+
+    expect(canvas.prepareCandidate).toHaveBeenCalledTimes(4);
+    expect(canvas.canCommitCandidate).toHaveBeenCalledTimes(4);
+    expect(isCurrent).toHaveBeenCalledTimes(4);
   });
 });

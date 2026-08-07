@@ -1,10 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   nodePublicationCandidateReadyDetail,
+  prepareNodePublicationCommit,
   prepareNodePublicationCandidate,
   retainNodePublicationSelection,
+  type NodePublicationInput,
 } from "./node-publication-candidate";
+import type { SnapshotDistributionsView } from "./snapshot-distributions-view";
 import { mempoolTransaction } from "./test-fixtures";
 import type {
   ClassifierDescriptor,
@@ -104,7 +107,25 @@ const publication = (
   publication: snapshot(),
 });
 
-describe("prepareNodePublicationCandidate", () => {
+const publicationInput = (
+  classifier: string | null = null,
+): NodePublicationInput => ({
+  viewState: {
+    source: "core",
+    classifier,
+    selection: null,
+    txid: null,
+  },
+  terrainMode: "count",
+  currentSnapshotIdentity: null,
+  selectedClassifierLabel: null,
+  selectedClassifierBucketKey: null,
+  selectedInspector: { kind: "rule", rule: "element_size" },
+});
+
+const unusedDistributionsView = {} as SnapshotDistributionsView;
+
+describe("node publication candidate", () => {
   it("resolves the classifier and view state before publication commit", async () => {
     const candidate = await prepareNodePublicationCandidate(
       publication(),
@@ -274,5 +295,50 @@ describe("prepareNodePublicationCandidate", () => {
         false,
       ),
     ).rejects.toThrow("Loaded publication is missing classification progress");
+  });
+
+  it("reprepares from the latest node state after one commit invalidation", async () => {
+    const initial = publicationInput();
+    const changed = publicationInput("knots_bip110");
+    let reads = 0;
+
+    const prepared = await prepareNodePublicationCommit(
+      publication(),
+      false,
+      false,
+      new AbortController().signal,
+      () => true,
+      () => (reads++ === 0 ? initial : changed),
+      unusedDistributionsView,
+    );
+
+    expect(prepared.candidate.selectedClassifierId).toBe("knots_bip110");
+    expect(reads).toBe(5);
+  });
+
+  it("exits after four consecutive node-state invalidations", async () => {
+    const isCurrent = vi.fn(() => true);
+    let reads = 0;
+    const changingInput = (): NodePublicationInput => {
+      reads += 1;
+      return publicationInput(reads % 2 === 0 ? "knots_bip110" : null);
+    };
+
+    await expect(
+      prepareNodePublicationCommit(
+        publication(),
+        false,
+        false,
+        new AbortController().signal,
+        isCurrent,
+        changingInput,
+        unusedDistributionsView,
+      ),
+    ).rejects.toThrow(
+      "Node publication candidate changed during 4 consecutive commit attempts",
+    );
+
+    expect(isCurrent).toHaveBeenCalledTimes(4);
+    expect(reads).toBe(8);
   });
 });

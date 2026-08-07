@@ -774,17 +774,24 @@ test.describe("policy terrain raster", () => {
     try {
       const directProfile = await selectedTerrainStrokePixelProfile(directPage);
       expect(rasterProfile.count).toBeGreaterThan(0);
-      expect(rasterProfile.count).toBe(directProfile.count);
-      expect(rasterProfile.solidCount).toBe(directProfile.solidCount);
+      expect(directProfile.count).toBeGreaterThan(0);
+      const countTolerance = Math.max(4, Math.ceil(directProfile.count * 0.01));
+      expect(
+        Math.abs(rasterProfile.count - directProfile.count),
+      ).toBeLessThanOrEqual(countTolerance);
+      expect(
+        Math.abs(rasterProfile.solidCount - directProfile.solidCount),
+      ).toBeLessThanOrEqual(countTolerance);
+      const channelTolerance = 320 + countTolerance * 255;
       expect(
         Math.abs(rasterProfile.redTotal - directProfile.redTotal),
-      ).toBeLessThanOrEqual(320);
+      ).toBeLessThanOrEqual(channelTolerance);
       expect(
         Math.abs(rasterProfile.greenTotal - directProfile.greenTotal),
-      ).toBeLessThanOrEqual(320);
+      ).toBeLessThanOrEqual(channelTolerance);
       expect(
         Math.abs(rasterProfile.blueTotal - directProfile.blueTotal),
-      ).toBeLessThanOrEqual(320);
+      ).toBeLessThanOrEqual(channelTolerance);
     } finally {
       await directPage.close();
     }

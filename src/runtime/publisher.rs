@@ -31,6 +31,8 @@ pub(super) struct CurrentStatePublisher {
     next_publication_limits: std::sync::Mutex<Option<StagedSnapshotLimits>>,
     #[cfg(test)]
     next_poll_start_reencoding_limits: std::sync::Mutex<Option<StagedSnapshotLimits>>,
+    #[cfg(test)]
+    next_manifest_replacement_preparation: std::sync::Mutex<Option<Arc<PreparationBlock>>>,
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +109,8 @@ impl CurrentStatePublisher {
             next_publication_limits: std::sync::Mutex::new(None),
             #[cfg(test)]
             next_poll_start_reencoding_limits: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            next_manifest_replacement_preparation: std::sync::Mutex::new(None),
         }
     }
 
@@ -161,6 +165,10 @@ impl CurrentStatePublisher {
                 .as_ref()
                 .map(|manifest| self.reencode_poll_start_manifest(manifest, &source))
                 .transpose()?;
+            #[cfg(test)]
+            if replacement.is_some() {
+                self.wait_on_next_manifest_replacement_preparation().await;
+            }
             let mut state = self.state.write().await;
             if state.status_revision != status_revision
                 || state.classification_generation != classification_generation
@@ -627,6 +635,10 @@ impl CurrentStatePublisher {
                 .map(|retained| reencode_manifest_for_source(retained, &source))
                 .transpose()?;
             let json_encoding_ms = encode_started_at.elapsed().as_millis();
+            #[cfg(test)]
+            if manifest.is_some() {
+                self.wait_on_next_manifest_replacement_preparation().await;
+            }
 
             let commit_started_at = Instant::now();
             let mut state = self.state.write().await;
@@ -751,6 +763,16 @@ impl CurrentStatePublisher {
     }
 
     #[cfg(test)]
+    pub(super) fn block_next_manifest_replacement_preparation(&self) -> Arc<PreparationBlock> {
+        let block = Arc::new(PreparationBlock::default());
+        *self
+            .next_manifest_replacement_preparation
+            .lock()
+            .expect("manifest replacement test hook is not poisoned") = Some(Arc::clone(&block));
+        block
+    }
+
+    #[cfg(test)]
     pub(super) fn limit_next_publication(&self, limits: StagedSnapshotLimits) {
         *self
             .next_publication_limits
@@ -780,6 +802,24 @@ impl CurrentStatePublisher {
                 .acquire()
                 .await
                 .expect("classification preparation test hook remains open")
+                .forget();
+        }
+    }
+
+    #[cfg(test)]
+    async fn wait_on_next_manifest_replacement_preparation(&self) {
+        let block = self
+            .next_manifest_replacement_preparation
+            .lock()
+            .expect("manifest replacement test hook is not poisoned")
+            .take();
+        if let Some(block) = block {
+            block.started.notify_one();
+            block
+                .release
+                .acquire()
+                .await
+                .expect("manifest replacement test hook remains open")
                 .forget();
         }
     }
@@ -901,6 +941,19 @@ fn replace_manifest(
         .publication
         .as_mut()
         .ok_or(RuntimeError::PublicationStateWithoutBundle)?;
+    let stage_graph_matches = manifest.value.stages.len() == publication.stages.len()
+        && manifest
+            .value
+            .stages
+            .iter()
+            .zip(&publication.stages)
+            .all(|(descriptor, stage)| descriptor == &stage.descriptor);
+    if !stage_graph_matches
+        || manifest.value.population_id != publication.manifest_value.population_id
+        || manifest.value.classification_set_id != publication.manifest_value.classification_set_id
+    {
+        return Err(RuntimeError::PublicationManifestStageMismatch);
+    }
     publication.manifest_value = manifest.value;
     publication.manifest = encoded_manifest_body(manifest.content_id, manifest.bytes);
     Ok(publication.encoded_bytes())
@@ -1086,5 +1139,57 @@ mod tests {
 
         assert_eq!(encoded_bytes, publication.manifest.body.len() + stage_bytes);
         assert_eq!(encoded_bytes, publication.encoded_bytes());
+    }
+
+    #[test]
+    fn manifest_replacement_rejects_a_different_stage_graph() {
+        let publisher = CurrentStatePublisher::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            Duration::from_secs(30),
+        );
+        let snapshot = Arc::new(
+            MempoolSnapshot::new(
+                "core".to_owned(),
+                "Bitcoin Core".to_owned(),
+                1_700_000_000_000,
+                ChainTip {
+                    height: 900_000,
+                    hash: "00".repeat(32),
+                },
+                Vec::new(),
+            )
+            .expect("snapshot"),
+        );
+        let source = summary_from_parts(
+            &publisher,
+            None,
+            Some(&snapshot),
+            Some(ClassificationState::Complete),
+            None,
+        );
+        let bundle = encode_staged_snapshot_with_limits(
+            &source,
+            &snapshot,
+            None,
+            StagedSnapshotLimits::default(),
+        )
+        .expect("encoded staged snapshot");
+        let retained_manifest = bundle.manifest.value.clone();
+        let mut state = CurrentState {
+            publication: Some(CurrentV2Publication::from_bundle(bundle)),
+            ..CurrentState::default()
+        };
+        let mut replacement = reencode_manifest_for_source(&retained_manifest, &source)
+            .expect("replacement manifest");
+        replacement.value.stages[0].content_id = "ff".repeat(32);
+
+        let error = replace_manifest(&mut state, replacement)
+            .expect_err("a different stage graph must be rejected");
+
+        assert!(matches!(
+            error,
+            RuntimeError::PublicationManifestStageMismatch
+        ));
     }
 }

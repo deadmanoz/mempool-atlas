@@ -135,6 +135,80 @@ async fn poll_start_reencodes_only_the_manifest() {
 }
 
 #[tokio::test]
+async fn poll_start_retries_after_a_concurrent_failure_publication() {
+    let runtime = Arc::new(runtime());
+    runtime
+        .record_membership(membership_publication(1, true, observation(20)))
+        .await
+        .expect("publish membership");
+    let block = runtime.block_next_manifest_replacement_preparation();
+    let poll_start = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        async move { runtime.record_poll_started(30).await }
+    });
+    tokio::time::timeout(Duration::from_secs(1), block.wait_until_started())
+        .await
+        .expect("poll-start manifest preparation blocked");
+
+    runtime
+        .record_failure("transient RPC failure".to_owned())
+        .await
+        .expect("publish concurrent failure");
+    block.release();
+    poll_start
+        .await
+        .expect("poll-start task")
+        .expect("retry poll-start publication");
+
+    let manifest = runtime
+        .current_manifest_payload()
+        .await
+        .expect("poll-start manifest");
+    let manifest = serde_json::from_slice::<Value>(&manifest.body).expect("manifest JSON");
+    assert_eq!(manifest["source"]["last_poll_started_at_ms"], 30);
+    assert_eq!(manifest["source"]["last_error"], "transient RPC failure");
+}
+
+#[tokio::test]
+async fn failure_publication_retries_after_a_concurrent_poll_start() {
+    let runtime = Arc::new(runtime());
+    runtime
+        .record_membership(membership_publication(1, true, observation(20)))
+        .await
+        .expect("publish membership");
+    let block = runtime.block_next_manifest_replacement_preparation();
+    let failure = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        async move {
+            runtime
+                .record_failure("transient RPC failure".to_owned())
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), block.wait_until_started())
+        .await
+        .expect("failure manifest preparation blocked");
+
+    runtime
+        .record_poll_started(30)
+        .await
+        .expect("publish concurrent poll start");
+    block.release();
+    failure
+        .await
+        .expect("failure task")
+        .expect("retry failure publication");
+
+    let manifest = runtime
+        .current_manifest_payload()
+        .await
+        .expect("failure manifest");
+    let manifest = serde_json::from_slice::<Value>(&manifest.body).expect("manifest JSON");
+    assert_eq!(manifest["source"]["last_poll_started_at_ms"], 30);
+    assert_eq!(manifest["source"]["last_error"], "transient RPC failure");
+}
+
+#[tokio::test]
 async fn publication_limit_failure_retains_the_current_bundle_and_domain_state() {
     let runtime = runtime();
     let txid = "00".repeat(32);

@@ -304,7 +304,10 @@ guards so obsolete responses cannot replace a newer source or pair selection.
 On the comparison page, changing only the selected transaction reuses the
 current population view. Repeating the same interactive selection is a true
 no-op, while a refreshed snapshot pair still reapplies state and reloads detail
-against the new comparison identity.
+against the new comparison identity. Node-state and comparison-canvas
+coherence checks permit at most four candidate preparation attempts; if live
+input or geometry keeps changing, the current committed publication remains
+active instead of allowing an unbounded derivation loop.
 
 ## Network and credential boundary
 

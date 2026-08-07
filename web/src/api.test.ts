@@ -664,10 +664,6 @@ describe("publication worker lifecycle", () => {
       "transaction_properties",
       () => primaryPaint,
     );
-    let rejected = false;
-    void request.catch(() => {
-      rejected = true;
-    });
     FakeWorker.instance.emit({
       type: "primary",
       requestId: 1,
@@ -679,19 +675,19 @@ describe("publication worker lifecycle", () => {
       timing: workerTiming,
     });
     await Promise.resolve();
+    const rejection = expect(request).rejects.toMatchObject({
+      message: "Atlas v2 publication timed out",
+      name: "TimeoutError",
+    });
 
     await vi.advanceTimersByTimeAsync(120_000);
 
-    expect(rejected).toBe(false);
     expect(FakeWorker.instance.postMessage).toHaveBeenLastCalledWith({
       type: "cancel",
       requestId: 1,
     });
+    await rejection;
     releasePrimary();
-    await expect(request).rejects.toMatchObject({
-      message: "Atlas v2 publication timed out",
-      name: "TimeoutError",
-    });
   });
 
   it("cleans pending state when worker construction fails", async () => {

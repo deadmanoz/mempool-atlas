@@ -9,6 +9,10 @@ import {
   maximumCandidate,
   projectWallClockMs,
 } from "./project-stages-logic.mjs";
+import {
+  PINNED_THROUGHPUT_BYTES_PER_SECOND,
+  STAGED_PROJECTION_GATES,
+} from "./release-gates.mjs";
 
 assertPinnedNodeRuntime(process.versions.node);
 
@@ -22,18 +26,9 @@ const OUTPUT_PATH = resolve(
   "client-performance-staged-projection.json",
 );
 
-const THROUGHPUT_BYTES_PER_SECOND = 159_461.45607954692;
 const PERFORMANCE_SOURCE_COUNT = 2;
 const PERFORMANCE_TRANSACTION_COUNT = 70_000;
 const GZIP_LEVEL = 6;
-const GATES = Object.freeze({
-  node_primary_bytes: 3_189_229,
-  node_complete_target_bytes: 6_059_535,
-  node_complete_maximum_bytes: 6_537_919,
-  comparison_primary_bytes: 5_740_612,
-  comparison_complete_target_bytes: 12_119_070,
-  comparison_complete_maximum_bytes: 13_075_839,
-});
 
 const fixture = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
 if (
@@ -169,22 +164,22 @@ const gateResult = composeProjectionGates(
     comparisonPrimaryBytes: comparisonPrimary.primary_comparison_bytes,
     comparisonCompleteBytes: comparisonComplete.cold_progressive_complete_bytes,
   },
-  GATES,
+  STAGED_PROJECTION_GATES,
 );
 
 const output = {
   schema_version: 2,
   fixture_manifest_version: fixture.manifest_version,
   fixture_profile: fixture.profile,
-  throughput_bytes_per_second: THROUGHPUT_BYTES_PER_SECOND,
-  gates: GATES,
+  throughput_bytes_per_second: PINNED_THROUGHPUT_BYTES_PER_SECOND,
+  gates: STAGED_PROJECTION_GATES,
   ...gateResult,
   worst_case: {
     node_primary: {
       ...nodePrimary,
       wall_clock_ms: projectWallClockMs(
         nodePrimary.primary_node_bytes,
-        THROUGHPUT_BYTES_PER_SECOND,
+        PINNED_THROUGHPUT_BYTES_PER_SECOND,
         2,
         8,
       ),
@@ -193,7 +188,7 @@ const output = {
       ...nodeComplete,
       wall_clock_ms: projectWallClockMs(
         nodeComplete.cold_progressive_complete_bytes,
-        THROUGHPUT_BYTES_PER_SECOND,
+        PINNED_THROUGHPUT_BYTES_PER_SECOND,
         2,
         12,
       ),
@@ -202,7 +197,7 @@ const output = {
       ...comparisonPrimary,
       wall_clock_ms: projectWallClockMs(
         comparisonPrimary.primary_comparison_bytes,
-        THROUGHPUT_BYTES_PER_SECOND,
+        PINNED_THROUGHPUT_BYTES_PER_SECOND,
         2,
         12,
       ),
@@ -211,7 +206,7 @@ const output = {
       ...comparisonComplete,
       wall_clock_ms: projectWallClockMs(
         comparisonComplete.cold_progressive_complete_bytes,
-        THROUGHPUT_BYTES_PER_SECOND,
+        PINNED_THROUGHPUT_BYTES_PER_SECOND,
         2,
         16,
       ),

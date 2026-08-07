@@ -627,6 +627,37 @@ describe("v2 coherent publication loading", () => {
     expect(conflicts).toBe(4);
   });
 
+  it.each([400, 404] as const)(
+    "treats terminal stage status %i as non-retryable",
+    async (status) => {
+      const current = await fixture();
+      let manifests = 0;
+      let stages = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string | URL | Request) => {
+          const path = String(input);
+          if (path.endsWith("/mempool")) {
+            manifests += 1;
+            return response(current.manifestBytes);
+          }
+          stages += 1;
+          return response(json({ error: "terminal stage failure" }), status);
+        }),
+      );
+
+      await expect(
+        loadPackedPublication(
+          "core",
+          "knots_bip110",
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ status });
+      expect(manifests).toBe(1);
+      expect(stages).toBeGreaterThan(0);
+    },
+  );
+
   it("rebases one complete candidate without withdrawing primary readiness", async () => {
     const initial = await fixture("none", 1);
     const rebased = await fixture("none", 2);

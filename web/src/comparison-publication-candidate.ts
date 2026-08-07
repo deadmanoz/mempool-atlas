@@ -19,6 +19,7 @@ import {
   requireLoadedSnapshot,
   type CurrentComparison,
 } from "./comparison-model";
+import { requirePublicationCommitRetry } from "./publication-commit-budget";
 import type { LoadedSourcePublication } from "./types";
 
 export interface PreparedComparisonPublication {
@@ -73,7 +74,7 @@ export const prepareComparisonCommitCandidate = async (
   distributionsView: ComparisonDistributionsView,
   canvasView: ComparisonCanvasView,
 ): Promise<PreparedComparisonCommitCandidate> => {
-  while (true) {
+  for (let attempt = 1; ; attempt += 1) {
     const publication = await prepareComparisonPublication(
       left,
       right,
@@ -92,7 +93,10 @@ export const prepareComparisonCommitCandidate = async (
     if (!isCurrent()) {
       throw new DOMException("Comparison request was superseded", "AbortError");
     }
-    if (!canCommit()) continue;
+    if (!canCommit()) {
+      requirePublicationCommitRetry("Comparison", attempt);
+      continue;
+    }
 
     const detail: AtlasCandidateReadyDetail = {
       surface: "comparison",
@@ -106,7 +110,10 @@ export const prepareComparisonCommitCandidate = async (
     if (!isCurrent()) {
       throw new DOMException("Comparison request was superseded", "AbortError");
     }
-    if (!canCommit()) continue;
+    if (!canCommit()) {
+      requirePublicationCommitRetry("Comparison", attempt);
+      continue;
+    }
     return { publication, distributions, canvas, detail };
   }
 };

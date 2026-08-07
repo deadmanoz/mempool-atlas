@@ -14,6 +14,7 @@ import {
   type ClassifierBucketKey,
 } from "./classifier-terrain";
 import { findSnapshotTransaction, snapshotIsComplete } from "./packed-store";
+import { requirePublicationCommitRetry } from "./publication-commit-budget";
 import type {
   PreparedSnapshotDistributions,
   SnapshotDistributionSelection,
@@ -216,7 +217,7 @@ export const prepareNodePublicationCommit = async (
   currentInput: () => NodePublicationInput,
   distributionsView: SnapshotDistributionsView,
 ): Promise<PreparedNodePublicationCommit> => {
-  while (true) {
+  for (let attempt = 1; ; attempt += 1) {
     const input = currentInput();
     const candidate = retainNodePublicationSelection(
       await prepareNodePublicationCandidate(
@@ -239,27 +240,32 @@ export const prepareNodePublicationCommit = async (
           signal,
         )
       : null;
-    const canCommit = (): boolean =>
-      currentInput().viewState === input.viewState &&
-      currentInput().terrainMode === input.terrainMode &&
-      currentInput().currentSnapshotIdentity ===
-        input.currentSnapshotIdentity &&
-      currentInput().selectedClassifierLabel ===
-        input.selectedClassifierLabel &&
-      currentInput().selectedClassifierBucketKey ===
-        input.selectedClassifierBucketKey &&
-      currentInput().selectedInspector === input.selectedInspector &&
-      (distributions === null ||
-        distributionsView.canCommit(
-          distributions,
-          candidate.snapshot,
-          distributionSelection,
-        ));
+    const canCommit = (): boolean => {
+      const current = currentInput();
+      return (
+        current.viewState === input.viewState &&
+        current.terrainMode === input.terrainMode &&
+        current.currentSnapshotIdentity === input.currentSnapshotIdentity &&
+        current.selectedClassifierLabel === input.selectedClassifierLabel &&
+        current.selectedClassifierBucketKey ===
+          input.selectedClassifierBucketKey &&
+        current.selectedInspector === input.selectedInspector &&
+        (distributions === null ||
+          distributionsView.canCommit(
+            distributions,
+            candidate.snapshot,
+            distributionSelection,
+          ))
+      );
+    };
     signal.throwIfAborted();
     if (!isCurrent()) {
       throw new DOMException("Node request was superseded", "AbortError");
     }
-    if (!canCommit()) continue;
+    if (!canCommit()) {
+      requirePublicationCommitRetry("Node", attempt);
+      continue;
+    }
     const detail = nodePublicationCandidateReadyDetail(candidate);
     if (replacement && complete) {
       await awaitAtlasCandidateRelease(detail, signal);
@@ -268,7 +274,10 @@ export const prepareNodePublicationCommit = async (
     if (!isCurrent()) {
       throw new DOMException("Node request was superseded", "AbortError");
     }
-    if (!canCommit()) continue;
+    if (!canCommit()) {
+      requirePublicationCommitRetry("Node", attempt);
+      continue;
+    }
     return { candidate, distributions, distributionSelection, detail };
   }
 };

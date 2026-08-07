@@ -82,6 +82,9 @@ empty-worker scenario records the worker and page baseline.
 The constrained-mobile transfer gates use the pinned, transport-independent
 throughput calibration of `159461.45607954692` bytes per second. A faster local
 run reports its measured feasibility but never loosens these ceilings.
+`web/perf/release-gates.mjs` is the executable source of truth for the
+projection, browser, and merged-result ceilings; its unit test keeps the values
+below synchronized with that contract.
 
 | Milestone                         | Wall-clock gate | Compressed-byte ceiling |
 | --------------------------------- | --------------: | ----------------------: |
@@ -161,12 +164,12 @@ current wire format measures:
 | Comparison primary  |  4,877,288 bytes |  5,740,612 bytes | pass   |
 | Comparison complete | 10,606,466 bytes | 12,119,070 bytes | pass   |
 
-At the pinned throughput, the corresponding transfer projections are 25.135,
-47.318, 44.586, and 84.515 seconds. These projections reserve the remainder of
-each wall-clock gate for request overhead, worker decode and validation,
-derivation, packed-model construction, and rendering. `just perf-web` verifies
-the end-to-end browser outcome rather than treating the byte projection as a
-substitute for an interactive product.
+At the pinned throughput, the corresponding projected wall clocks are 25.135,
+47.318, 44.586, and 84.515 seconds. Each includes a two-second request
+allowance and, respectively, an 8, 12, 12, or 16-second processing allowance.
+The remaining margins against the release gates are 4.865, 4.682, 5.414, and
+9.485 seconds. `just perf-web` verifies the end-to-end browser outcome rather
+than treating the projection as a substitute for an interactive product.
 
 ## Functional guarantees
 

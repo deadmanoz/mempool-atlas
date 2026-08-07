@@ -648,6 +648,11 @@ impl SourceRuntime {
     }
 
     #[cfg(test)]
+    fn block_next_manifest_replacement_preparation(&self) -> Arc<publisher::PreparationBlock> {
+        self.publisher.block_next_manifest_replacement_preparation()
+    }
+
+    #[cfg(test)]
     fn limit_next_publication(&self, limits: StagedSnapshotLimits) {
         self.publisher.limit_next_publication(limits);
     }
@@ -779,6 +784,8 @@ pub enum RuntimeError {
     ClassificationStateWithoutSnapshot,
     #[error("published domain state exists without its v2 bundle")]
     PublicationStateWithoutBundle,
+    #[error("replacement v2 manifest does not describe the retained stage bundle")]
+    PublicationManifestStageMismatch,
     #[error("v2 publication worker failed: {0}")]
     PublicationTask(#[from] tokio::task::JoinError),
     #[error("system clock is before the Unix epoch")]

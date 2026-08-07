@@ -12,6 +12,9 @@ const FIXTURE_ERROR =
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIRECTORY = resolve(HERE, "../.perf-fixtures/functional");
 const MANIFEST_PATH = join(FIXTURE_DIRECTORY, "manifest.json");
+const CONTENT_ID = /^[0-9a-f]{64}$/;
+const CLASSIFIER_ID = /^[a-z][a-z0-9_]*$/;
+const SNAPSHOT_STAGE_KINDS = new Set(["population", "membership", "structure"]);
 
 const failFixtureLoad = () => {
   writeSync(process.stderr.fd, `${FIXTURE_ERROR}\n`);
@@ -48,7 +51,7 @@ const loadBody = (descriptor, cacheable) => {
       typeof descriptor.path !== "string" ||
       typeof descriptor.content_type !== "string" ||
       typeof descriptor.content_id !== "string" ||
-      !/^[0-9a-f]{64}$/.test(descriptor.content_id) ||
+      !CONTENT_ID.test(descriptor.content_id) ||
       !Number.isSafeInteger(descriptor.uncompressed_bytes) ||
       descriptor.uncompressed_bytes < 0
     ) {
@@ -71,7 +74,92 @@ const loadBody = (descriptor, cacheable) => {
 };
 
 const routes = new Map();
-const stagePrefixes = new Set();
+const stageContracts = new Map();
+
+const stageLaneKey = (kind, classifierId) => `${kind}\0${classifierId ?? ""}`;
+
+const addStageContract = (snapshot, stage) => {
+  if (stage === null || typeof stage !== "object") {
+    failFixtureLoad();
+  }
+  const classifierId = stage.classifier_id ?? null;
+  if (
+    (stage.kind !== "classifier" && !SNAPSHOT_STAGE_KINDS.has(stage.kind)) ||
+    (stage.kind === "classifier"
+      ? typeof classifierId !== "string" || !CLASSIFIER_ID.test(classifierId)
+      : classifierId !== null)
+  ) {
+    failFixtureLoad();
+  }
+  const contentId = stage.route?.body?.content_id;
+  if (typeof contentId !== "string" || !CONTENT_ID.test(contentId)) {
+    failFixtureLoad();
+  }
+  let contract = stageContracts.get(snapshot.source_id);
+  if (contract === undefined) {
+    contract = {
+      contentIds: new Set(),
+      lanes: new Map(),
+    };
+    stageContracts.set(snapshot.source_id, contract);
+  }
+  const lane = stageLaneKey(stage.kind, classifierId);
+  if (contract.lanes.has(lane) || contract.contentIds.has(contentId)) {
+    failFixtureLoad();
+  }
+  contract.lanes.set(lane, contentId);
+  contract.contentIds.add(contentId);
+};
+
+const decodedSegment = (segment) => {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+};
+
+// Mirror `src/api.rs`: malformed route parameters are 400, an unknown source,
+// lane, or content ID used on the wrong current lane is 404, and a well-formed
+// non-current ID for an existing lane is the retryable 409 supersession case.
+const stageErrorStatus = (pathname) => {
+  const segments = pathname.split("/");
+  if (
+    segments.length < 9 ||
+    segments[0] !== "" ||
+    segments[1] !== "api" ||
+    segments[2] !== "v2" ||
+    segments[3] !== "sources" ||
+    segments[5] !== "mempool" ||
+    segments[6] !== "stages"
+  ) {
+    return 404;
+  }
+
+  const sourceId = decodedSegment(segments[4]);
+  const kind = decodedSegment(segments[7]);
+  if (sourceId === null || kind === null) return 400;
+
+  let classifierId = null;
+  let contentId;
+  if (segments.length === 9) {
+    contentId = decodedSegment(segments[8]);
+    if (!SNAPSHOT_STAGE_KINDS.has(kind)) return 400;
+  } else if (segments.length === 10 && kind === "classifier") {
+    classifierId = decodedSegment(segments[8]);
+    contentId = decodedSegment(segments[9]);
+    if (classifierId === null || !CLASSIFIER_ID.test(classifierId)) return 400;
+  } else {
+    return 404;
+  }
+  if (contentId === null || !CONTENT_ID.test(contentId)) return 400;
+
+  const contract = stageContracts.get(sourceId);
+  if (contract === undefined) return 404;
+  const expected = contract.lanes.get(stageLaneKey(kind, classifierId));
+  if (expected === undefined || contract.contentIds.has(contentId)) return 404;
+  return 409;
+};
 
 const addRoute = (route, cacheable) => {
   if (
@@ -96,15 +184,16 @@ for (const snapshot of manifest.snapshots) {
     failFixtureLoad();
   }
   addRoute(snapshot.manifest, true);
-  stagePrefixes.add(
-    `/api/v2/sources/${encodeURIComponent(snapshot.source_id)}/mempool/stages/`,
-  );
-  for (const stage of snapshot.stages) addRoute(stage.route, true);
+  for (const stage of snapshot.stages) {
+    addStageContract(snapshot, stage);
+    addRoute(stage.route, true);
+  }
 }
 for (const detail of manifest.transaction_details)
   addRoute(detail.route, false);
 
 const errorBodies = Object.freeze({
+  invalidStage: Buffer.from('{"error":"invalid v2 stage request"}'),
   notFound: Buffer.from('{"error":"not found"}'),
   queryNotSupported: Buffer.from(
     '{"error":"query-dependent v2 representations are not supported"}',
@@ -142,11 +231,17 @@ const server = createServer((request, response) => {
   }
   const body = routes.get(url.pathname);
   if (body === undefined) {
-    if ([...stagePrefixes].some((prefix) => url.pathname.startsWith(prefix))) {
+    const status = stageErrorStatus(url.pathname);
+    if (status === 409) {
       send(request, response, 409, errorBodies.superseded);
       return;
     }
-    send(request, response, 404, errorBodies.notFound);
+    send(
+      request,
+      response,
+      status,
+      status === 400 ? errorBodies.invalidStage : errorBodies.notFound,
+    );
     return;
   }
 

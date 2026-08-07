@@ -29,7 +29,6 @@ test-smoke-public-stages:
     ./scripts/test-smoke-public-stages.sh
 
 test-rust:
-    cargo test
     cargo test --features perf-fixtures
 
 test-web:
@@ -71,7 +70,7 @@ functional-fixtures:
 
 # Export the functional fixtures plus the production-scale performance set.
 perf-fixtures: functional-fixtures
-    cargo run --release --features perf-fixtures --bin export-perf-fixture -- --profile performance
+    cargo run --profile fixtures --features perf-fixtures --bin export-perf-fixture -- --profile performance
 
 # Refresh the compact cross-language digest fixture from Rust-owned model data.
 publication-digest-fixture:

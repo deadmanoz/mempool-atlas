@@ -13,9 +13,10 @@ source "$script_dir/lib/v2-manifest-stages.sh"
 
 fixture="$repo_root/tests/fixtures/publication-digest-v2.json"
 manifest_url=https://atlas.example.test/api/v2/sources/perf-node-01/mempool
-records=$(mktemp)
+test_tmp_dir=$(mktemp -d)
+records="$test_tmp_dir/records"
 cleanup() {
-    rm -- "$records"
+    rm -r -- "$test_tmp_dir"
 }
 trap cleanup EXIT
 
@@ -46,6 +47,32 @@ require_match() {
     local pattern=$3
     [[ "$actual" =~ $pattern ]] ||
         fail "$context: '$actual' does not match $pattern"
+}
+
+require_contains() {
+    local context=$1
+    local actual=$2
+    local expected=$3
+    [[ "$actual" == *"$expected"* ]] ||
+        fail "$context: expected message '$expected', got '$actual'"
+}
+
+negative_case_count=0
+expect_manifest_error() {
+    local context=$1
+    local expected_message=$2
+    local mutation=$3
+    negative_case_count=$((negative_case_count + 1))
+    local mutated_manifest="$test_tmp_dir/negative-$negative_case_count.json"
+    local stdout_file="$test_tmp_dir/negative-$negative_case_count.stdout"
+    local stderr_file="$test_tmp_dir/negative-$negative_case_count.stderr"
+
+    jq "$mutation" "$fixture" >"$mutated_manifest" ||
+        fail "$context: failed to create mutated manifest"
+    if atlas_v2_manifest_stage_records "$mutated_manifest" >"$stdout_file" 2>"$stderr_file"; then
+        fail "$context: parser unexpectedly accepted the mutated manifest"
+    fi
+    require_contains "$context" "$(<"$stderr_file")" "$expected_message"
 }
 
 stage_count=0
@@ -142,9 +169,75 @@ require_equal \
     "classifier stage order" \
     "$classifier_ids" \
     "transaction_properties transaction_shape data_protocols knots_bip110"
+expected_uncompressed_sizes=$(
+    jq --raw-output \
+        '[.stages[].uncompressed_bytes | tostring] | join(" ")' \
+        "$fixture"
+)
 require_equal \
     "uncompressed stage sizes" \
     "$uncompressed_sizes" \
-    "269 906 706 580 638 530 605"
+    "$expected_uncompressed_sizes"
+
+expect_manifest_error \
+    "negative transaction count" \
+    "invalid manifest transaction_count" \
+    '.transaction_count = -1'
+expect_manifest_error \
+    "negative stages container" \
+    "invalid manifest stages" \
+    '.stages = {}'
+expect_manifest_error \
+    "negative duplicate population" \
+    "manifest must declare one population stage" \
+    '.stages += [(.stages[] | select(.kind == "population"))]'
+expect_manifest_error \
+    "negative missing membership" \
+    "manifest must declare one membership stage" \
+    '.stages |= map(select(.kind != "membership"))'
+expect_manifest_error \
+    "negative missing structure" \
+    "manifest must declare one structure stage" \
+    '.stages |= map(select(.kind != "structure"))'
+expect_manifest_error \
+    "negative missing classifier" \
+    "manifest must declare a classifier stage" \
+    '.stages |= map(if .kind == "classifier" then .kind = "unknown" else . end)'
+expect_manifest_error \
+    "negative descriptor type" \
+    "invalid stage descriptor" \
+    '.stages += [null]'
+expect_manifest_error \
+    "negative content ID" \
+    "invalid stage content_id" \
+    '(.stages[] | select(.kind == "membership") | .content_id) = "bad"'
+expect_manifest_error \
+    "negative uncompressed bytes" \
+    "invalid stage uncompressed_bytes" \
+    '(.stages[] | select(.kind == "membership") | .uncompressed_bytes) = 0'
+expect_manifest_error \
+    "negative row count" \
+    "stage row_count does not match transaction_count" \
+    '(.stages[] | select(.kind == "membership") | .row_count) += 1'
+expect_manifest_error \
+    "negative dependency container" \
+    "invalid stage dependency_ids" \
+    '(.stages[] | select(.kind == "membership") | .dependency_ids) = {}'
+expect_manifest_error \
+    "negative dependency content ID" \
+    "invalid stage dependency_ids" \
+    '(.stages[] | select(.kind == "membership") | .dependency_ids) = ["bad"]'
+expect_manifest_error \
+    "negative classifier ID" \
+    "invalid classifier stage classifier_id" \
+    '(.stages[] | select(.kind == "classifier") | .classifier_id) = "Bad-ID"'
+expect_manifest_error \
+    "negative non-classifier classifier ID" \
+    "non-classifier stage has classifier_id" \
+    '(.stages[] | select(.kind == "population") | .classifier_id) = "not_allowed"'
+expect_manifest_error \
+    "negative stage kind" \
+    "invalid stage kind" \
+    '(.stages[] | select(.classifier_id == "transaction_properties") | .kind) = "unknown"'
 
 printf 'v2 smoke stage parser checks passed\n'

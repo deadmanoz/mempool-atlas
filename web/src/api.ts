@@ -637,7 +637,6 @@ const cancelPendingPublication = (
   requestId: number,
   pending: PendingPublication,
   error: unknown,
-  afterPrimary = false,
 ): void => {
   if (pendingPublications.get(requestId) !== pending) return;
   pendingPublications.delete(requestId);
@@ -656,15 +655,7 @@ const cancelPendingPublication = (
       );
     }
   }
-  if (afterPrimary) {
-    void pending.primaryReady.then(
-      () => pending.reject(error),
-      (primaryError) =>
-        pending.reject(errorValue(primaryError, "Primary publication failed")),
-    );
-  } else {
-    pending.reject(error);
-  }
+  pending.reject(error);
 };
 
 const worker = (): Worker => {
@@ -783,7 +774,6 @@ export const fetchSourcePublication = async (
         requestId,
         pending,
         new DOMException("Atlas v2 publication timed out", "TimeoutError"),
-        true,
       );
     }, PUBLICATION_DEADLINE_MS);
     pendingPublications.set(requestId, {
