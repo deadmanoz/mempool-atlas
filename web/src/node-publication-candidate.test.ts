@@ -7,6 +7,7 @@ import {
   retainNodePublicationSelection,
   type NodePublicationInput,
 } from "./node-publication-candidate";
+import { DEFAULT_FILTERS } from "./filters";
 import type { SnapshotDistributionsView } from "./snapshot-distributions-view";
 import { mempoolTransaction } from "./test-fixtures";
 import type {
@@ -117,6 +118,7 @@ const publicationInput = (
     txid: null,
   },
   terrainMode: "count",
+  filters: DEFAULT_FILTERS,
   currentSnapshotIdentity: null,
   selectedClassifierLabel: null,
   selectedClassifierBucketKey: null,
@@ -169,6 +171,7 @@ describe("node publication candidate", () => {
     const retained = retainNodePublicationSelection(candidate, {
       viewState: candidate.viewState,
       terrainMode: "count",
+      filters: DEFAULT_FILTERS,
       currentSnapshotIdentity: "snapshot-a",
       selectedClassifierLabel: "version_2",
       selectedClassifierBucketKey: bucketKey,
@@ -194,6 +197,7 @@ describe("node publication candidate", () => {
     const retained = retainNodePublicationSelection(candidate, {
       viewState: candidate.viewState,
       terrainMode: "count",
+      filters: DEFAULT_FILTERS,
       currentSnapshotIdentity: "snapshot-b",
       selectedClassifierLabel: "version_2",
       selectedClassifierBucketKey: "complete:version_2",
@@ -228,6 +232,7 @@ describe("node publication candidate", () => {
     const retained = retainNodePublicationSelection(candidate, {
       viewState,
       terrainMode: "count",
+      filters: DEFAULT_FILTERS,
       currentSnapshotIdentity: candidate.snapshotIdentity,
       selectedClassifierLabel: null,
       selectedClassifierBucketKey: null,
@@ -313,6 +318,27 @@ describe("node publication candidate", () => {
     );
 
     expect(prepared.candidate.selectedClassifierId).toBe("knots_bip110");
+    expect(reads).toBe(5);
+  });
+
+  it("reprepares when membership filters change before commit", async () => {
+    const initial = publicationInput();
+    const changed: NodePublicationInput = {
+      ...initial,
+      filters: { ...DEFAULT_FILTERS, minimumFeeRate: 5 },
+    };
+    let reads = 0;
+
+    await prepareNodePublicationCommit(
+      publication(),
+      false,
+      false,
+      new AbortController().signal,
+      () => true,
+      () => (reads++ === 0 ? initial : changed),
+      unusedDistributionsView,
+    );
+
     expect(reads).toBe(5);
   });
 

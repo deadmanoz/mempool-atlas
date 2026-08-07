@@ -234,6 +234,28 @@ const publicationDigestGoldenManifest = (): StagedSnapshotManifest =>
     ),
   );
 
+interface PublicationDigestSourceCase {
+  name: string;
+  availability: "ready" | "stale";
+  last_poll_started_at_ms: number | null;
+  last_error: string | null;
+  publication_id: string;
+}
+
+const publicationDigestSourceCases = (): PublicationDigestSourceCase[] => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../tests/fixtures/publication-digest-source-cases-v2.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as { schema_version: number; cases: PublicationDigestSourceCase[] };
+  expect(fixture.schema_version).toBe(2);
+  return fixture.cases;
+};
+
 const response = (bytes: Uint8Array, status = 200): Response =>
   new Response(Uint8Array.from(bytes).buffer, {
     status,
@@ -269,15 +291,31 @@ describe("v2 manifest validation", () => {
     );
   });
 
-  it("matches the Rust publication digest fixture", async () => {
-    const manifest = publicationDigestGoldenManifest();
+  it("matches the Rust publication digest fixtures", async () => {
+    const baseManifest = publicationDigestGoldenManifest();
+    const sourceCases = publicationDigestSourceCases();
 
-    await expect(classificationSetId(manifest)).resolves.toBe(
-      manifest.classification_set_id,
+    await expect(classificationSetId(baseManifest)).resolves.toBe(
+      baseManifest.classification_set_id,
     );
-    await expect(publicationId(manifest)).resolves.toBe(
-      manifest.publication_id,
-    );
+    expect(sourceCases.map((sourceCase) => sourceCase.name)).toEqual([
+      "ready",
+      "stale_retained_failure",
+    ]);
+    for (const sourceCase of sourceCases) {
+      const manifest: StagedSnapshotManifest = {
+        ...baseManifest,
+        source: {
+          ...baseManifest.source,
+          availability: sourceCase.availability,
+          last_poll_started_at_ms: sourceCase.last_poll_started_at_ms,
+          last_error: sourceCase.last_error,
+        },
+      };
+      await expect(publicationId(manifest), sourceCase.name).resolves.toBe(
+        sourceCase.publication_id,
+      );
+    }
   });
 
   it("recomputes both digest roots", async () => {

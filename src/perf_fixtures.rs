@@ -10,6 +10,8 @@ use crate::model::{
     MempoolEntry, MempoolSnapshot, SourceAvailability, SourceSummary, TransactionStructure,
     classifier_catalog,
 };
+#[cfg(test)]
+use crate::staged_snapshot::reencode_manifest_for_source;
 use crate::staged_snapshot::{EncodedStage, StageKind, encode_staged_snapshot};
 use anyhow::{Context, Result, ensure};
 use bitcoin::hashes::{Hash, sha256};
@@ -1117,6 +1119,21 @@ fn hex64(rng: &mut FixtureRng) -> String {
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    struct PublicationDigestSourceCases {
+        schema_version: u64,
+        cases: Vec<PublicationDigestSourceCase>,
+    }
+
+    #[derive(Deserialize)]
+    struct PublicationDigestSourceCase {
+        name: String,
+        availability: String,
+        last_poll_started_at_ms: Option<u64>,
+        last_error: Option<String>,
+        publication_id: String,
+    }
+
     #[test]
     fn committed_publication_digest_fixture_matches_rust_export() {
         let (sources, _) = performance_sources(PERFORMANCE_REFERENCE_TIME_MS, 3, 1)
@@ -1129,6 +1146,47 @@ mod tests {
             bundle.manifest.bytes.as_ref(),
             include_bytes!("../tests/fixtures/publication-digest-v2.json")
         );
+    }
+
+    #[test]
+    fn publication_digest_source_cases_match_rust_preimages() {
+        let (sources, _) = performance_sources(PERFORMANCE_REFERENCE_TIME_MS, 3, 1)
+            .expect("publication digest fixture source");
+        let source = sources.first().expect("publication digest fixture source");
+        let bundle = encode_staged_snapshot(&source.summary, &source.snapshot)
+            .expect("publication digest fixture encoding");
+        let fixture = serde_json::from_slice::<PublicationDigestSourceCases>(include_bytes!(
+            "../tests/fixtures/publication-digest-source-cases-v2.json"
+        ))
+        .expect("publication digest source cases");
+        assert_eq!(fixture.schema_version, 2);
+        assert_eq!(
+            fixture
+                .cases
+                .iter()
+                .map(|case| case.name.as_str())
+                .collect::<Vec<_>>(),
+            ["ready", "stale_retained_failure"]
+        );
+
+        for case in fixture.cases {
+            let mut case_source = bundle.manifest.value.source.clone();
+            case_source.availability = match case.availability.as_str() {
+                "ready" => SourceAvailability::Ready,
+                "stale" => SourceAvailability::Stale,
+                value => panic!("unexpected availability {value:?} in {}", case.name),
+            };
+            case_source.last_poll_started_at_ms = case.last_poll_started_at_ms;
+            case_source.last_error = case.last_error;
+            let encoded = reencode_manifest_for_source(&bundle.manifest.value, &case_source)
+                .expect("re-encoded source case");
+
+            assert_eq!(
+                encoded.value.publication_id, case.publication_id,
+                "{} publication digest",
+                case.name
+            );
+        }
     }
 
     #[test]

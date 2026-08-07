@@ -17,6 +17,15 @@ captured public mempool is stored in the repository.
   origin, runs the desktop and constrained-mobile matrix, and writes
   `web/.perf-results/latest.json`.
 
+The exact Node patch pin is deliberate because Node ships the zlib
+implementation that produces the checked-in gzip byte evidence. A Node patch
+update is a reviewed release-evidence change: update the CI runtime and
+projection pin together, regenerate the staged projection, and review the byte
+and gate diff. The hard runtime failure prevents evidence produced by different
+compressors from being compared as though the toolchain were unchanged. Normal
+build, unit-test, and browser-test commands continue to support the wider
+documented Node.js range.
+
 The local servers serialize and compress fixture bodies once at startup. A
 timed request only selects an immutable manifest or content-addressed stage and
 sends it with an explicit `Content-Length`. Product assets come from the Vite

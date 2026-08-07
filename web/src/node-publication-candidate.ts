@@ -13,6 +13,10 @@ import {
   precomputeClassifierBuckets,
   type ClassifierBucketKey,
 } from "./classifier-terrain";
+import {
+  filterTransactionsCooperatively,
+  type MempoolFilters,
+} from "./filters";
 import { findSnapshotTransaction, snapshotIsComplete } from "./packed-store";
 import { requirePublicationCommitRetry } from "./publication-commit-budget";
 import type {
@@ -53,6 +57,7 @@ export interface NodePublicationCandidate {
 export interface NodePublicationInput {
   viewState: NodeViewState;
   terrainMode: TerrainMode;
+  filters: Readonly<MempoolFilters>;
   currentSnapshotIdentity: string | null;
   selectedClassifierLabel: string | null;
   selectedClassifierBucketKey: ClassifierBucketKey | null;
@@ -63,8 +68,17 @@ export interface PreparedNodePublicationCommit {
   candidate: NodePublicationCandidate;
   distributions: PreparedSnapshotDistributions | null;
   distributionSelection: SnapshotDistributionSelection;
+  filteredTransactions: MempoolTransaction[] | null;
   detail: AtlasCandidateReadyDetail;
 }
+
+const sameFilters = (
+  left: Readonly<MempoolFilters>,
+  right: Readonly<MempoolFilters>,
+): boolean =>
+  left.minimumFeeRate === right.minimumFeeRate &&
+  left.maximumAgeMs === right.maximumAgeMs &&
+  left.minimumVsize === right.minimumVsize;
 
 export const chooseInitialNodeRule = (snapshot: MempoolSnapshot): RuleId => {
   let chosen: RuleId = "element_size";
@@ -240,11 +254,20 @@ export const prepareNodePublicationCommit = async (
           signal,
         )
       : null;
+    const filteredTransactions = complete
+      ? await filterTransactionsCooperatively(
+          candidate.snapshot.transactions,
+          input.filters,
+          candidate.snapshot.observed_at_ms,
+          { signal },
+        )
+      : null;
     const canCommit = (): boolean => {
       const current = currentInput();
       return (
         current.viewState === input.viewState &&
         current.terrainMode === input.terrainMode &&
+        sameFilters(current.filters, input.filters) &&
         current.currentSnapshotIdentity === input.currentSnapshotIdentity &&
         current.selectedClassifierLabel === input.selectedClassifierLabel &&
         current.selectedClassifierBucketKey ===
@@ -278,6 +301,12 @@ export const prepareNodePublicationCommit = async (
       requirePublicationCommitRetry("Node", attempt);
       continue;
     }
-    return { candidate, distributions, distributionSelection, detail };
+    return {
+      candidate,
+      distributions,
+      distributionSelection,
+      filteredTransactions,
+      detail,
+    };
   }
 };

@@ -153,10 +153,12 @@ contract, reconciled baseline, and current checkpoints.
   policy detail for one current transaction.
 
 Source discovery, transaction detail, operational responses, and errors disable
-caching. Published manifests and stages have `ETag` validators and require
-revalidation, so an unchanged conditional request returns `304` without
-transferring the JSON body. The browser refresh action reads Atlas' latest
-in-memory publication; it does not trigger a Bitcoin RPC poll.
+caching. Published manifests have `ETag` validators and require revalidation.
+Successful stage responses use their SHA-256 content ID in the URL and remain
+fresh and immutable for one year. Stage validators remain available, so an
+explicit matching conditional request returns `304` without transferring the
+JSON body. The browser refresh action reads Atlas' latest in-memory publication;
+it does not trigger a Bitcoin RPC poll.
 
 ## Public deployment
 

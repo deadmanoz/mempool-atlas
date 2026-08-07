@@ -13,6 +13,8 @@ const MANIFEST_VERSION = 2;
 const PERFORMANCE_SOURCE_COUNT = 2;
 const PERFORMANCE_TRANSACTION_COUNT = 70_000;
 const GZIP_LEVEL = 6;
+const STAGE_CACHE_CONTROL =
+  "public, max-age=31536000, immutable, must-revalidate";
 
 const MIME_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -119,7 +121,7 @@ for (const snapshot of manifest.snapshots) {
   for (const stage of snapshot.stages) {
     routes.set(
       stage.route.request_path,
-      loadFixtureBody(stage.route.body, "public, no-cache, must-revalidate"),
+      loadFixtureBody(stage.route.body, STAGE_CACHE_CONTROL),
     );
   }
 }

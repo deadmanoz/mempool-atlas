@@ -13,6 +13,7 @@ source "$script_dir/lib/v2-manifest-stages.sh"
 # optional. Every origin response, payload, validator, and cache-policy check
 # below remains active.
 local_fixture=0
+stage_cache_control_expected='public, max-age=31536000, immutable, must-revalidate'
 if [[ ${1:-} == --local-fixture ]]; then
     local_fixture=1
     shift
@@ -251,13 +252,10 @@ while IFS= read -r -d '' kind &&
         exit 1
     }
     stage_cache_control=$(require_header cache-control "$temp_dir/stage-$stage_number.headers")
-    case "$stage_cache_control" in
-        *public*no-cache*must-revalidate*) ;;
-        *)
-            printf 'unexpected stage cache policy: %s\n' "$stage_cache_control" >&2
-            exit 1
-            ;;
-    esac
+    [[ "$stage_cache_control" == "$stage_cache_control_expected" ]] || {
+        printf 'unexpected stage cache policy: %s\n' "$stage_cache_control" >&2
+        exit 1
+    }
     stage_etag=$(require_header etag "$temp_dir/stage-$stage_number.headers")
     [[ "$stage_etag" == *"$content_id"* ]] || {
         printf 'stage ETag does not bind its content ID: %s\n' "$stage_etag" >&2
@@ -281,6 +279,13 @@ while IFS= read -r -d '' kind &&
         "$stage_url"
     [[ $(status_code "$temp_dir/stage-$stage_number-conditional.headers") == 304 ]] || {
         printf 'conditional stage request did not return 304: %s\n' "$stage_url" >&2
+        exit 1
+    }
+    conditional_stage_cache_control=$(require_header \
+        cache-control "$temp_dir/stage-$stage_number-conditional.headers")
+    [[ "$conditional_stage_cache_control" == "$stage_cache_control_expected" ]] || {
+        printf 'conditional stage returned an unexpected cache policy: %s\n' \
+            "$conditional_stage_cache_control" >&2
         exit 1
     }
     require_cloudflare_cache_handling \
@@ -310,6 +315,15 @@ if [[ $(status_code "$temp_dir/conditional.headers") != 304 ]]; then
     printf 'conditional manifest request did not return 304\n' >&2
     exit 1
 fi
+conditional_manifest_cache_control=$(require_header cache-control "$temp_dir/conditional.headers")
+case "$conditional_manifest_cache_control" in
+    *public*no-cache*must-revalidate*) ;;
+    *)
+        printf 'conditional manifest returned an unexpected cache policy: %s\n' \
+            "$conditional_manifest_cache_control" >&2
+        exit 1
+        ;;
+esac
 require_cloudflare_cache_handling \
     "$temp_dir/conditional.headers" "conditional manifest"
 if [[ -s "$temp_dir/conditional.body" ]]; then

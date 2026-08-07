@@ -733,6 +733,73 @@ test.describe("atomic publication replacement", () => {
     await expect(page.locator("#refresh")).toBeEnabled();
   });
 
+  test("retains node controls and filtered state when a superseding refresh fails", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    await page.locator("#fee-age-tab").click();
+    const retainedFilterSummary =
+      (await page.locator("#filter-summary").textContent()) ?? "";
+    await page.locator("#minimum-fee-rate").fill("1000000");
+
+    let refreshRequests = 0;
+    await page.route(
+      /\/api\/v2\/sources\/[^/]+\/mempool(?:\?.*)?$/,
+      async (route) => {
+        refreshRequests += 1;
+        if (refreshRequests === 1) {
+          await route.continue();
+          return;
+        }
+        await route.fulfill({
+          status: 503,
+          contentType: "application/problem+json",
+          json: {
+            type: "v2_unavailable",
+            title: "Current v2 publication unavailable",
+            status: 503,
+            detail: "Injected superseding refresh failure.",
+          },
+        });
+      },
+    );
+
+    await page.locator("#spectrum-chart").evaluate((element) => {
+      const originalReplaceChildren = element.replaceChildren.bind(element);
+      element.replaceChildren = (..._nodes) => {
+        element.replaceChildren = originalReplaceChildren;
+        document
+          .querySelector<HTMLButtonElement>("#refresh")
+          ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        throw new Error("Injected obsolete distribution commit failure");
+      };
+    });
+
+    await page.locator("#refresh").click();
+    await expect.poll(() => refreshRequests).toBe(2);
+    await expect(page.locator("#status-title")).toHaveText(
+      "Refresh failed · showing the prior snapshot",
+    );
+    await expect(page.locator("#filter-summary")).toHaveText(
+      retainedFilterSummary,
+    );
+    for (const selector of [
+      "#fee-age-tab",
+      "#classification-lens-select",
+      "#minimum-fee-rate",
+      "#maximum-age",
+      "#minimum-vsize",
+      "#reset-filters",
+    ]) {
+      await expect(page.locator(selector)).toBeEnabled();
+    }
+    await expect(page.locator("#refresh")).toBeEnabled();
+  });
+
   test("keeps the complete comparison and its controls active until refresh commit", async ({
     page,
   }) => {

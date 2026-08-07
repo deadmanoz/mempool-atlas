@@ -163,8 +163,12 @@ just web-dev
 The browser refresh control reads the latest in-memory observation. It does not
 request an immediate Bitcoin RPC poll.
 
-After a source publishes its first snapshot, the full snapshot endpoint returns
-an `ETag` and `Cache-Control: public, no-cache, must-revalidate`. A matching
-`If-None-Match` request returns `304` without a body. Waiting responses, source
-discovery, transaction detail, errors, and operational endpoints remain
-`no-store`.
+After a source publishes its first snapshot, its manifest returns an `ETag` and
+`Cache-Control: public, no-cache, must-revalidate`. Each successful
+content-addressed stage returns `Cache-Control: public, max-age=31536000,
+immutable, must-revalidate`; its SHA-256 URL is never reused for different
+bytes. Atlas checks that a requested stage belongs to the current publication
+before applying a conditional validator. A matching explicit `If-None-Match`
+request therefore still returns `304` without a body. Waiting responses, source
+discovery, transaction detail, superseded or unknown stages, other errors, and
+operational endpoints remain `no-store`.

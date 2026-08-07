@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mxfile host="Portable" modified="2026-08-06T00:00:00.000Z" agent="draw.io" version="21.0.0" type="device">
   <diagram name="Current-state data flow" id="mempool-atlas-architecture">
-    <mxGraphModel dx="1580" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2080" pageHeight="960" math="0" shadow="0" background="#1a1a2e">
+    <mxGraphModel dx="1580" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2080" pageHeight="960" math="0" shadow="0" background="#071018">
       <root>
         <mxCell id="0"/>
         <mxCell id="1" parent="0"/>

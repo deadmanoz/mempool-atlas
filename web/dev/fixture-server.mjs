@@ -16,6 +16,10 @@ const MANIFEST_PATH = join(FIXTURE_DIRECTORY, "manifest.json");
 const CONTENT_ID = /^[0-9a-f]{64}$/;
 const CLASSIFIER_ID = /^[a-z][a-z0-9_]*$/;
 const SNAPSHOT_STAGE_KINDS = new Set(["population", "membership", "structure"]);
+const NO_STORE = "no-store";
+const MANIFEST_CACHE_CONTROL = "public, no-cache, must-revalidate";
+const STAGE_CACHE_CONTROL =
+  "public, max-age=31536000, immutable, must-revalidate";
 const FIXTURE_PORT_TEXT = process.env.ATLAS_FIXTURE_PORT ?? "3101";
 const EMULATE_CLOUDFLARE_HEADERS =
   process.env.ATLAS_FIXTURE_CLOUDFLARE_HEADERS === "1";
@@ -64,7 +68,7 @@ const loadManifest = () => {
 
 const manifest = loadManifest();
 
-const loadBody = (descriptor, cacheable) => {
+const loadBody = (descriptor, cacheControl) => {
   try {
     if (
       descriptor === null ||
@@ -85,7 +89,8 @@ const loadBody = (descriptor, cacheable) => {
     JSON.parse(bytes.toString("utf8"));
     return Object.freeze({
       bytes,
-      cacheable,
+      cacheable: cacheControl !== NO_STORE,
+      cacheControl,
       gzipBytes: gzipSync(bytes),
       contentId: descriptor.content_id,
       contentType: descriptor.content_type,
@@ -183,7 +188,7 @@ const stageErrorStatus = (pathname) => {
   return 409;
 };
 
-const addRoute = (route, cacheable) => {
+const addRoute = (route, cacheControl) => {
   if (
     route === null ||
     typeof route !== "object" ||
@@ -192,10 +197,10 @@ const addRoute = (route, cacheable) => {
   ) {
     failFixtureLoad();
   }
-  routes.set(route.request_path, loadBody(route.body, cacheable));
+  routes.set(route.request_path, loadBody(route.body, cacheControl));
 };
 
-addRoute(manifest.source_list, false);
+addRoute(manifest.source_list, NO_STORE);
 for (const snapshot of manifest.snapshots) {
   if (
     snapshot === null ||
@@ -205,14 +210,14 @@ for (const snapshot of manifest.snapshots) {
   ) {
     failFixtureLoad();
   }
-  addRoute(snapshot.manifest, true);
+  addRoute(snapshot.manifest, MANIFEST_CACHE_CONTROL);
   for (const stage of snapshot.stages) {
     addStageContract(snapshot, stage);
-    addRoute(stage.route, true);
+    addRoute(stage.route, STAGE_CACHE_CONTROL);
   }
 }
 for (const detail of manifest.transaction_details)
-  addRoute(detail.route, false);
+  addRoute(detail.route, NO_STORE);
 
 const errorBodies = Object.freeze({
   invalidStage: Buffer.from('{"error":"invalid v2 stage request"}'),
@@ -304,9 +309,7 @@ const server = createServer((request, response) => {
   const bytes = body.bytes;
   const etag = `W/"${body.contentId}"`;
   const headers = {
-    "cache-control": body.cacheable
-      ? "public, no-cache, must-revalidate"
-      : "no-store",
+    "cache-control": body.cacheControl,
     "content-type": body.contentType,
     "x-atlas-content-id": body.contentId,
     "x-atlas-uncompressed-length": String(bytes.byteLength),

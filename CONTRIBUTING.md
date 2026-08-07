@@ -22,7 +22,9 @@ Most development commands support the Node.js version range above. Run
 `just stage-projection` and `just perf-web` with exactly Node.js 22.23.2. The
 staged projection checks runtime-sensitive gzip byte evidence and rejects other
 Node.js versions; `just perf-web` includes that projection before running the
-browser performance matrix.
+browser performance matrix. Treat a Node patch update as a reviewed evidence
+change: update the CI runtime and projection pin together, regenerate the
+checked-in projection, and review its byte and gate diff.
 
 Rust code must remain compatible with the declared 1.88 MSRV. Check it with:
 

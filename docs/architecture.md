@@ -183,15 +183,27 @@ process rather than an independently versioned static package.
 
 Each manifest and stage receives a weak `ETag`. A manifest validator changes
 when membership, classification, lifecycle, poll-start, or failure metadata
-changes. A stage validator embeds its SHA-256 content identifier and changes
-only with the exact body. Conditional reads of current representations return
-`304` without sending a body. A well-formed content identifier absent from the
-current publication returns non-cacheable `409`. An identifier that belongs to
-a different current stage, or a request for a stage kind or classifier that is
-not present, returns non-cacheable `404`. Malformed identifiers or stage kinds
-return non-cacheable `400`, all before conditional validation. Source discovery,
-transaction detail, failures, and responses before the first publication remain
-non-cacheable. Clients that advertise gzip support receive compressed JSON.
+changes, and `Cache-Control: public, no-cache, must-revalidate` forces every
+reuse through validation. A stage validator embeds its SHA-256 content
+identifier and changes only with the exact body. Its content ID is also part of
+the URL, which is never reused for different bytes, so successful stage
+responses use `Cache-Control: public, max-age=31536000, immutable,
+must-revalidate`. The one-year freshness lifetime removes redundant browser and
+edge requests while `must-revalidate` resumes validator checks after expiry.
+
+Atlas resolves a requested stage against the current publication before
+evaluating `If-None-Match`. Explicit conditional reads of current
+representations therefore still return `304` without a body, while a
+well-formed content identifier absent from the current publication returns
+non-cacheable `409`. An immutable cached stage represents only the exact bytes
+named by its content ID, not evidence that a later manifest still declares it;
+clients discover usable stage IDs only from the revalidated current manifest.
+An identifier that belongs to a different current stage, or a request for a
+stage kind or classifier that is not present, returns non-cacheable `404`.
+Malformed identifiers or stage kinds return non-cacheable `400`, all before
+conditional validation. Source discovery, transaction detail, failures, and
+responses before the first publication remain non-cacheable. Clients that
+advertise gzip support receive compressed JSON.
 
 The process retains no application data on disk. Restarting discards current
 state and readiness returns only after a new valid observation is available.

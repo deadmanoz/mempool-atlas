@@ -16,7 +16,11 @@ use crate::model::SourcesResponse;
 use crate::runtime::{PublicationLookup, SourceRegistry, StageLookup, TransactionLookup};
 use crate::staged_snapshot::StageKind;
 
-const SNAPSHOT_CACHE_CONTROL: &str = "public, no-cache, must-revalidate";
+const MANIFEST_CACHE_CONTROL: &str = "public, no-cache, must-revalidate";
+// A stage ID is the SHA-256 digest of its exact body and is part of the URL, so
+// that URL is never reused for different bytes. One year matches the immutable
+// static-asset convention; must-revalidate resumes validator checks after it.
+const STAGE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable, must-revalidate";
 const NO_STORE: &str = "no-store";
 const X_ATLAS_CONTENT_ID: &str = "x-atlas-content-id";
 const X_ATLAS_UNCOMPRESSED_LENGTH: &str = "x-atlas-uncompressed-length";
@@ -115,7 +119,11 @@ async fn source_manifest(
     let PublicationLookup::Ready(payload) = source.manifest_payload().await else {
         return Err(ApiError::v2_unavailable());
     };
-    Ok(cacheable_payload(payload, &request_headers))
+    Ok(cacheable_payload(
+        payload,
+        &request_headers,
+        MANIFEST_CACHE_CONTROL,
+    ))
 }
 
 async fn snapshot_stage(
@@ -163,7 +171,11 @@ async fn classifier_stage(
 
 fn stage_response(lookup: StageLookup, request_headers: &HeaderMap) -> Result<Response, ApiError> {
     match lookup {
-        StageLookup::Ready(payload) => Ok(cacheable_payload(payload, request_headers)),
+        StageLookup::Ready(payload) => Ok(cacheable_payload(
+            payload,
+            request_headers,
+            STAGE_CACHE_CONTROL,
+        )),
         StageLookup::Unavailable => Err(ApiError::v2_unavailable()),
         StageLookup::Superseded => Err(ApiError::superseded_stage()),
         StageLookup::Unknown => Err(ApiError::stage_not_found()),
@@ -173,6 +185,7 @@ fn stage_response(lookup: StageLookup, request_headers: &HeaderMap) -> Result<Re
 fn cacheable_payload(
     payload: crate::runtime::PublicationPayload,
     request_headers: &HeaderMap,
+    cache_control: &'static str,
 ) -> Response {
     let not_modified = if_none_match_matches(request_headers, &payload.etag);
     let mut response = if not_modified {
@@ -187,7 +200,7 @@ fn cacheable_payload(
     };
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(SNAPSHOT_CACHE_CONTROL),
+        HeaderValue::from_static(cache_control),
     );
     response.headers_mut().insert(
         header::ETAG,
@@ -795,7 +808,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
-            SNAPSHOT_CACHE_CONTROL
+            MANIFEST_CACHE_CONTROL
         );
         let etag = response.headers()[header::ETAG]
             .to_str()
@@ -825,7 +838,7 @@ mod tests {
         assert_eq!(response.headers()[header::ETAG], etag);
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
-            SNAPSHOT_CACHE_CONTROL
+            MANIFEST_CACHE_CONTROL
         );
         assert!(
             to_bytes(response.into_body(), usize::MAX)
@@ -847,7 +860,7 @@ mod tests {
         assert_eq!(response.headers()[header::ETAG], etag);
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
-            SNAPSHOT_CACHE_CONTROL
+            MANIFEST_CACHE_CONTROL
         );
         assert_eq!(response.headers()[X_ATLAS_CONTENT_ID], content_id);
         assert_eq!(
@@ -961,6 +974,10 @@ mod tests {
         assert_eq!(retained_stage.status(), StatusCode::OK);
         assert_eq!(retained_stage.headers()[header::ETAG], stage_etag);
         assert_eq!(
+            retained_stage.headers()[header::CACHE_CONTROL],
+            STAGE_CACHE_CONTROL
+        );
+        assert_eq!(
             to_bytes(retained_stage.into_body(), usize::MAX)
                 .await
                 .expect("retained stage body"),
@@ -996,10 +1013,7 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(first.status(), StatusCode::OK);
-        assert_eq!(
-            first.headers()[header::CACHE_CONTROL],
-            SNAPSHOT_CACHE_CONTROL
-        );
+        assert_eq!(first.headers()[header::CACHE_CONTROL], STAGE_CACHE_CONTROL);
         let etag = first.headers()[header::ETAG].clone();
         assert!(
             etag.to_str()
@@ -1023,6 +1037,10 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            not_modified.headers()[header::CACHE_CONTROL],
+            STAGE_CACHE_CONTROL
+        );
         assert_eq!(not_modified.headers()[X_ATLAS_CONTENT_ID], population_id);
         assert_eq!(
             not_modified.headers()[X_ATLAS_UNCOMPRESSED_LENGTH],
@@ -1101,7 +1119,7 @@ mod tests {
         assert_eq!(manifest.status(), StatusCode::OK);
         assert_eq!(
             manifest.headers()[header::CACHE_CONTROL],
-            SNAPSHOT_CACHE_CONTROL
+            MANIFEST_CACHE_CONTROL
         );
         assert!(manifest.headers().contains_key(header::ETAG));
         assert!(
@@ -1131,10 +1149,7 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(stage.status(), StatusCode::OK);
-        assert_eq!(
-            stage.headers()[header::CACHE_CONTROL],
-            SNAPSHOT_CACHE_CONTROL
-        );
+        assert_eq!(stage.headers()[header::CACHE_CONTROL], STAGE_CACHE_CONTROL);
         assert!(stage.headers().contains_key(header::ETAG));
         assert_eq!(stage.headers()["x-atlas-content-id"], stage_content_id);
         assert!(stage.headers().contains_key("x-atlas-uncompressed-length"));

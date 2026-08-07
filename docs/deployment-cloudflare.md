@@ -119,7 +119,7 @@ last matching rule wins.
 | `/assets/*` | Eligible | Long-lived and immutable | Long-lived |
 | `/` and `/compare/` | Bypass | Revalidate | Bypass |
 | `/api/v2/sources/*/mempool` | Eligible for `GET` and `HEAD` | Revalidate | Respect origin validators |
-| `/api/v2/sources/*/mempool/stages/*` | Eligible for `GET` and `HEAD` | Revalidate | Respect origin validators |
+| `/api/v2/sources/*/mempool/stages/*` | Eligible for `GET` and `HEAD` | One year, immutable | One year; respect origin |
 | `/api/v2/sources` | Bypass | `no-store` | Bypass |
 | `/api/v2/sources/*/transactions/*` | Bypass | `no-store` | Bypass |
 | errors and operational paths | Bypass | `no-store` | Bypass |
@@ -134,33 +134,55 @@ For the manifest and stage rules:
 1. Match only the Atlas hostname, `GET` or `HEAD`, and the exact source snapshot
    manifest or content-addressed stage path shapes.
 2. Mark JSON eligible for cache.
-3. Respect the origin `Cache-Control` and `ETag` headers.
+3. Respect the origin `Cache-Control` and `ETag` headers. Do not set an Edge
+   Cache TTL or Browser Cache TTL that overrides them.
 4. Match only an empty query string. Requests with a non-empty query string
    must bypass the edge cache and reach Atlas, which rejects them as
    non-cacheable `400` responses. A bare trailing `?` can still satisfy an
    edge empty-query match and be forwarded, but Atlas rejects that request as
    a non-cacheable `400` too.
-5. Do not enable stale serving for the API. Atlas already publishes explicit
-   source failure and staleness state.
+5. Do not enable stale serving for the API. Manifests must always revalidate;
+   stages have their own explicit freshness lifetime and must revalidate after
+   it expires. Atlas already publishes explicit source failure and staleness
+   state.
 
 Atlas returns `Cache-Control: public, no-cache, must-revalidate` and a weak
-`ETag` for current manifests and content-addressed stages. An unchanged
-`If-None-Match` request returns `304` without the JSON body. A well-formed
-content identifier absent from the current publication returns non-cacheable
-`409`. An identifier that belongs to a different current stage, or a request
-for a stage kind or classifier that is not present, returns non-cacheable
-`404`. A malformed identifier or stage kind returns non-cacheable `400`, all
-before validator handling. Before the first
-publication, the manifest returns
-non-cacheable `503 application/problem+json` and no validator.
+`ETag` for the current manifest. Never assign the manifest a freshness TTL: it
+is the authority that declares the current stage IDs and must revalidate on
+every reuse.
+
+A successful current stage returns `Cache-Control: public,
+max-age=31536000, immutable, must-revalidate` and a weak `ETag`. The content ID
+in its URL is the SHA-256 digest of the exact body, so that URL is never reused
+for different bytes. One year follows the established immutable-asset
+convention; `must-revalidate` requires validation again after that freshness
+lifetime. Cloudflare documents that `immutable` affects browsers rather than
+public-cache freshness, while `max-age` supplies the edge and browser lifetime
+when Origin Cache Control is respected.
+
+Atlas checks current stage membership before evaluating a conditional header,
+so an explicit matching `If-None-Match` request for a current representation
+still returns `304` without the JSON body. A cached immutable stage represents
+only the bytes named by its content ID, not evidence that a later manifest
+still declares it. Clients must use stage IDs from the freshly revalidated
+manifest.
+
+A well-formed content identifier absent from the current publication returns
+non-cacheable `409`. An identifier that belongs to a different current stage,
+or a request for a stage kind or classifier that is not present, returns
+non-cacheable `404`. A malformed identifier or stage kind returns non-cacheable
+`400`, all before validator handling. Cache eligibility must not override those
+`no-store` error responses. Before the first publication, the manifest and
+stage routes return non-cacheable `503 application/problem+json` with no
+validator.
 
 Review Cloudflare's current
 [default cache behavior](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/),
 [Cache Rule settings](https://developers.cloudflare.com/cache/how-to/cache-rules/settings/),
 and [Origin Cache Control](https://developers.cloudflare.com/cache/concepts/cache-control/)
 when creating the rules. Availability and minimum TTL behavior vary by plan.
-Do not override the origin with a long fixed API TTL merely to obtain a cache
-hit.
+Do not override the manifest with a fixed TTL or replace the stage lifetime
+with an edge-only value merely to obtain a cache hit.
 
 ## Configure edge security
 
@@ -256,8 +278,9 @@ just smoke-public https://atlas.example.com node-a
 
 It verifies the source discovery status, cache policy, and required semantic
 Atlas version, plus hidden public health paths, Cloudflare routing,
-compression, every declared stage, manifest and stage validators, transaction
-detail when the publication is non-empty, and conditional `304` behavior.
+compression, the always-revalidated manifest, every immutable declared stage,
+manifest and stage validators, transaction detail when the publication is
+non-empty, and conditional `304` behavior.
 Rate-limit actions and direct-origin
 isolation require separate staging and firewall checks.
 
@@ -299,8 +322,9 @@ they do not copy or replace the server and browser artifacts separately under
    the package and modules, not a host-switch command.
 3. From `mempool-atlas-deploy`, run `just verify-cloudflare`, then add a
    temporary fail-closed edge rule for the Atlas hostname. Preflight the v2
-   manifest and stage cache rules, no-stale behavior, CSP worker allowance,
-   method rule, WAF policy, and rate limits while the block remains active.
+   always-revalidated manifest rule, one-year immutable stage rule, no-stale
+   behavior, CSP worker allowance, method rule, WAF policy, and rate limits
+   while the block remains active.
 4. Switch source hosts first only if their evaluated RPC configuration changes.
    Switch the presentation host last; that NixOS switch changes the service
    executable and `ATLAS_WEB_ROOT` to paths in the same production package.
@@ -350,11 +374,14 @@ Before launch, exercise these cases:
    stale manifest while its declared content-addressed stages remain unchanged
    and other sources continue.
 3. Restart `cloudflared` and confirm it reconnects without exposing the origin.
-4. Request a superseded stage identifier and confirm non-cacheable `409` even
-   when the request includes an old matching validator.
+4. Purge a superseded stage URL, request it with its old matching validator,
+   and confirm the origin currentness check returns non-cacheable `409` rather
+   than `304`. Purging prevents a still-fresh immutable edge entry from
+   satisfying this origin-specific check.
 5. Send an old manifest ETag after a classification update and confirm the
    response is `200` with the new manifest.
-6. Send current manifest and stage ETags and confirm `304` with no body.
+6. Send current manifest and stage ETags explicitly and confirm `304` with no
+   body and the route-appropriate cache policy.
 7. Run controlled concurrent stage reads and confirm polling and
    classification remain within the recorded budgets.
 

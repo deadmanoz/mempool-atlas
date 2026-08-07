@@ -11,7 +11,6 @@ import {
   filterTransactionsCooperatively,
   type MempoolFilters,
 } from "./filters";
-import { combineAbortSignals } from "./cooperative-work";
 import * as firstPublication from "./first-publication-failure";
 import { pinSelectedInBoundedSample } from "./bounded-sample";
 import {
@@ -1783,7 +1782,22 @@ const startSnapshotDistributionsRender = (): void => {
   });
 };
 
-const applyFilters = async (signal?: AbortSignal): Promise<boolean> => {
+const commitFilteredTransactions = (
+  snapshot: MempoolSnapshot,
+  transactions: MempoolTransaction[],
+): void => {
+  filteredTransactions = transactions;
+  filterSummary.textContent = `Showing ${countFormat.format(filteredTransactions.length)} of ${countFormat.format(snapshot.transaction_count)} transactions.`;
+  feeAgeStage.hidden = filteredTransactions.length === 0;
+  feeAgeEmpty.hidden = filteredTransactions.length !== 0;
+  feeAgeEmpty.textContent =
+    snapshot.transaction_count === 0
+      ? "This snapshot contains an empty mempool."
+      : "No transactions match the current filters.";
+  scheduleFeeAgeRender();
+};
+
+const applyFilters = async (): Promise<boolean> => {
   filterController?.abort();
   filterController = null;
   if (currentSnapshot === null) {
@@ -1795,39 +1809,27 @@ const applyFilters = async (signal?: AbortSignal): Promise<boolean> => {
   const filters = readFilters();
   const controller = new AbortController();
   filterController = controller;
-  const combined = combineAbortSignals(
-    signal === undefined ? [controller.signal] : [controller.signal, signal],
-  );
   filterSummary.textContent = "Applying membership filters…";
   try {
     const nextTransactions = await filterTransactionsCooperatively(
       snapshot.transactions,
       filters,
       snapshot.observed_at_ms,
-      { signal: combined.signal },
+      { signal: controller.signal },
     );
     if (
-      combined.signal.aborted ||
+      controller.signal.aborted ||
       filterController !== controller ||
       currentSnapshot !== snapshot
     ) {
       return false;
     }
-    filteredTransactions = nextTransactions;
-    filterSummary.textContent = `Showing ${countFormat.format(filteredTransactions.length)} of ${countFormat.format(snapshot.transaction_count)} transactions.`;
-    feeAgeStage.hidden = filteredTransactions.length === 0;
-    feeAgeEmpty.hidden = filteredTransactions.length !== 0;
-    feeAgeEmpty.textContent =
-      snapshot.transaction_count === 0
-        ? "This snapshot contains an empty mempool."
-        : "No transactions match the current filters.";
-    scheduleFeeAgeRender();
+    commitFilteredTransactions(snapshot, nextTransactions);
     return true;
   } catch (error) {
-    if (combined.signal.aborted) return false;
+    if (controller.signal.aborted) return false;
     throw error;
   } finally {
-    combined.dispose();
     if (filterController === controller) filterController = null;
   }
 };
@@ -1955,6 +1957,7 @@ const renderResponse = async (
     () => ({
       viewState: nodeViewState,
       terrainMode,
+      filters: readFilters(),
       currentSnapshotIdentity,
       selectedClassifierLabel,
       selectedClassifierBucketKey,
@@ -1962,24 +1965,48 @@ const renderResponse = async (
     }),
     snapshotDistributionsView,
   );
-  const { candidate, distributionSelection, distributions } = prepared;
+  const {
+    candidate,
+    distributionSelection,
+    distributions,
+    filteredTransactions: preparedFilteredTransactions,
+  } = prepared;
   const { source, snapshot, requestedTransaction } = candidate;
+
+  let completeFilteredTransactions: MempoolTransaction[] | null = null;
+  if (complete) {
+    if (preparedFilteredTransactions === null || distributions === null) {
+      throw new Error("Prepared complete node view is incomplete");
+    }
+    if (
+      !snapshotDistributionsView.commit(
+        distributions,
+        snapshot,
+        distributionSelection,
+      )
+    ) {
+      throw new Error("Prepared complete node view became stale");
+    }
+    completeFilteredTransactions = preparedFilteredTransactions;
+  }
 
   pageStatus.dataset.state = source.availability;
   sourceSelect.value = source.source_id;
   sourceSummaryView.renderSnapshot(source, snapshot);
-  feeAgeTab.disabled = true;
-  classificationLensSelect.disabled = true;
-  minimumFeeRate.disabled = true;
-  maximumAge.disabled = true;
-  minimumVsize.disabled = true;
-  resetFilters.disabled = true;
+  filterController?.abort();
+  filterController = null;
   currentSnapshot = snapshot;
   currentSnapshotIdentity = candidate.snapshotIdentity;
   currentClassification = candidate.classification;
   selectedClassifierId = candidate.selectedClassifierId;
   selectedClassifierLabel = candidate.selectedClassifierLabel;
   selectedClassifierBucketKey = candidate.selectedClassifierBucketKey;
+  feeAgeTab.disabled = !complete;
+  classificationLensSelect.disabled = !complete;
+  minimumFeeRate.disabled = !complete;
+  maximumAge.disabled = !complete;
+  minimumVsize.disabled = !complete;
+  resetFilters.disabled = !complete;
   resetTerrainLayouts();
   terrainStage.hidden = snapshot.transaction_count === 0;
   terrainEmpty.hidden = snapshot.transaction_count !== 0;
@@ -1987,7 +2014,8 @@ const renderResponse = async (
   selectedInspector = candidate.selectedInspector;
   nodeViewState = candidate.viewState;
   transactionSearchInput.value = candidate.viewState.txid ?? "";
-  if (complete) {
+  if (completeFilteredTransactions !== null) {
+    commitFilteredTransactions(snapshot, completeFilteredTransactions);
     clearDetail("Choose a sample", false);
     setTransactionSearchStatus("Search this snapshot by txid.");
   } else {
@@ -2024,25 +2052,6 @@ const renderResponse = async (
   renderClassificationOverview();
   renderClassification(snapshot, currentClassification);
   renderInspector();
-  if (complete) {
-    if (!(await applyFilters(signal))) return;
-    if (
-      distributions === null ||
-      !snapshotDistributionsView.commit(
-        distributions,
-        snapshot,
-        distributionSelection,
-      )
-    ) {
-      throw new Error("Prepared snapshot distributions became stale");
-    }
-    feeAgeTab.disabled = false;
-    classificationLensSelect.disabled = false;
-    minimumFeeRate.disabled = false;
-    maximumAge.disabled = false;
-    minimumVsize.disabled = false;
-    resetFilters.disabled = false;
-  }
   if (!complete) {
     statusTitle.textContent = "Snapshot classifications ready";
     statusDetail.textContent =
