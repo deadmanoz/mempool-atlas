@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_path=${BASH_SOURCE[0]}
+script_dir=${script_path%/*}
+if [[ "$script_dir" == "$script_path" ]]; then
+    script_dir=.
+fi
+# shellcheck source=lib/v2-manifest-stages.sh
+source "$script_dir/lib/v2-manifest-stages.sh"
+
 if (( $# != 2 )); then
     printf 'usage: %s https://atlas.example.com SOURCE_ID\n' "$0" >&2
     exit 2
@@ -180,21 +188,17 @@ jq -e --arg source_id "$source_id" '
     )
 ' "$temp_dir/manifest.json" >/dev/null
 
+stage_records="$temp_dir/stages.records"
+atlas_v2_manifest_stage_records "$temp_dir/manifest.json" >"$stage_records"
+
 stage_number=0
-while IFS=$'\t' read -r kind classifier_id content_id uncompressed_bytes; do
+while IFS= read -r -d '' kind &&
+    IFS= read -r -d '' classifier_id &&
+    IFS= read -r -d '' content_id &&
+    IFS= read -r -d '' uncompressed_bytes &&
+    IFS= read -r -d '' row_count &&
+    IFS= read -r -d '' stage_path; do
     stage_number=$((stage_number + 1))
-    case "$kind" in
-        classifier)
-            stage_path="classifier/$classifier_id/$content_id"
-            ;;
-        population|membership|structure)
-            stage_path="$kind/$content_id"
-            ;;
-        *)
-            printf 'unexpected v2 stage kind: %s\n' "$kind" >&2
-            exit 1
-            ;;
-    esac
     stage_url="$manifest_url/stages/$stage_path"
     curl --silent --show-error --fail-with-body --max-time 120 --compressed \
         --dump-header "$temp_dir/stage-$stage_number.headers" \
@@ -247,8 +251,7 @@ while IFS=$'\t' read -r kind classifier_id content_id uncompressed_bytes; do
     if [[ "$kind" == population ]]; then
         cp "$temp_dir/stage-$stage_number.json" "$temp_dir/population.json"
     fi
-done < <(jq -r '.stages[] | [.kind, (.classifier_id // ""), .content_id, .uncompressed_bytes] | @tsv' \
-    "$temp_dir/manifest.json")
+done <"$stage_records"
 
 [[ -s "$temp_dir/population.json" ]] || {
     printf 'manifest did not expose a population stage\n' >&2

@@ -18,11 +18,15 @@ build-web:
 
 test:
     just test-release
+    just test-smoke-public-stages
     just test-rust
     just test-web
 
 test-release:
     ./scripts/test-release-head.sh
+
+test-smoke-public-stages:
+    ./scripts/test-smoke-public-stages.sh
 
 test-rust:
     cargo test

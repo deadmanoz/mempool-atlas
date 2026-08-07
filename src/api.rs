@@ -207,7 +207,7 @@ fn cacheable_payload(
 }
 
 fn reject_query(query: Option<String>) -> Result<(), ApiError> {
-    if query.is_some() {
+    if query.as_deref().is_some_and(|value| !value.is_empty()) {
         Err(ApiError::query_not_supported())
     } else {
         Ok(())
@@ -1150,10 +1150,23 @@ mod tests {
             .as_str()
             .expect("classifier content ID");
 
+        assert!(reject_query(Some(String::new())).is_ok());
+
         let (status, policy) = cache_control(
             application.clone(),
             &format!(
                 "/api/v2/sources/core/mempool/stages/population/{}",
+                "00".repeat(32)
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(policy.as_deref(), Some(NO_STORE));
+
+        let (status, policy) = cache_control(
+            application.clone(),
+            &format!(
+                "/api/v2/sources/core/mempool/stages/classifier/{classifier_id}/{}",
                 "00".repeat(32)
             ),
         )

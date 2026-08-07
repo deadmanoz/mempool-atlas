@@ -491,6 +491,8 @@ test.describe("progressive v2 publications", () => {
     page,
   }) => {
     const gate = await installCompletionStageGate(page);
+    const pageErrors: Error[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error));
     try {
       await page.goto("/");
       await gate.waitForRequests(2);
@@ -516,6 +518,20 @@ test.describe("progressive v2 publications", () => {
       );
       await selectedControl.focus();
       await expect(selectedControl).toBeFocused();
+      const metricToggle = page.locator("#mode-vsize");
+      await metricToggle.click();
+      await expect(metricToggle).toHaveAttribute("aria-pressed", "true");
+      await expect(page.locator("#snapshot-distributions")).toHaveAttribute(
+        "aria-busy",
+        "false",
+      );
+      await expect(status).toHaveAttribute("data-state", /ready|stale/);
+      await expect(page.locator("#status-title")).toHaveText(
+        "Snapshot classifications ready",
+      );
+      expect(pageErrors).toEqual([]);
+      await selectedControl.focus();
+      await expect(selectedControl).toBeFocused();
 
       gate.release();
       await expect(status).toHaveAttribute(
@@ -529,7 +545,10 @@ test.describe("progressive v2 publications", () => {
         "aria-pressed",
         "false",
       );
+      await expect(metricToggle).toHaveAttribute("aria-pressed", "true");
+      await expect(page.locator("#distribution-grid")).toBeVisible();
       await expect(selectedControl).toBeFocused();
+      expect(pageErrors).toEqual([]);
     } finally {
       gate.release();
     }

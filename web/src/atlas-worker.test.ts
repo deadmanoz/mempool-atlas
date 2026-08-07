@@ -247,6 +247,16 @@ afterEach(() => {
 });
 
 describe("v2 manifest validation", () => {
+  it("rejects base64 with non-canonical padding bits", () => {
+    expect(() =>
+      signedColumn(
+        { width_bytes: 1, values_base64: "AR==" },
+        1,
+        "ancestor fees",
+      ),
+    ).toThrow("Non-canonical ancestor fees values");
+  });
+
   it("accepts the Rust seven-byte encoding of the minimum safe signed value", () => {
     const parsed = signedColumn(
       { width_bytes: 7, values_base64: "AQAAAAAA4A==" },

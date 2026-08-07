@@ -397,7 +397,11 @@ export class PackedPrimaryPublicationStore {
   transaction(row: number): MempoolTransaction | undefined {
     if (!isValidRow(row, this.rowCount)) return undefined;
     const cached = this.rowCache.get(row);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      this.rowCache.delete(row);
+      this.rowCache.set(row, cached);
+      return cached;
+    }
     const policy = this.classifiers.find(
       ({ transfer }) => transfer.classifierId === "knots_bip110",
     );

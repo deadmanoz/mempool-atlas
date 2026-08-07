@@ -16,6 +16,7 @@ import type {
 import { atlasFailureBody } from "./atlas-problem";
 import type { AtlasProblem } from "./atlas-problem";
 import { SupersededStageError, WorkerHttpError } from "./atlas-worker-errors";
+import { decodeCanonicalBase64 as decodeBase64 } from "./canonical-base64";
 import type {
   Bip110Assessment,
   ClassifierDescriptor,
@@ -630,18 +631,6 @@ const validateManifestRoots = async (
   if ((await publicationId(manifest)) !== manifest.publication_id) {
     throw new TypeError("Publication digest mismatch");
   }
-};
-
-const decodeBase64 = (value: unknown, field: string): Uint8Array => {
-  if (typeof value !== "string") throw new TypeError(`Invalid ${field}`);
-  let binary: string;
-  try {
-    binary = atob(value);
-  } catch {
-    throw new TypeError(`Invalid ${field}`);
-  }
-  if (btoa(binary) !== value) throw new TypeError(`Non-canonical ${field}`);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 };
 
 const asBuffer = (value: Uint8Array): ArrayBuffer =>

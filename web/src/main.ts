@@ -1845,7 +1845,7 @@ const snapshotDistributionsView = createSnapshotDistributionsView({
 
 const renderSnapshotDistributions = (): Promise<void> => {
   const snapshot = currentSnapshot;
-  return snapshot === null
+  return snapshot === null || !snapshotIsComplete(snapshot)
     ? Promise.resolve()
     : snapshotDistributionsView.render(snapshot, {
         classifierId: selectedClassifierId,

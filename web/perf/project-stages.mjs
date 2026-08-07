@@ -3,6 +3,15 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 
+import {
+  assertPinnedNodeRuntime,
+  composeProjectionGates,
+  maximumCandidate,
+  projectWallClockMs,
+} from "./project-stages-logic.mjs";
+
+assertPinnedNodeRuntime(process.versions.node);
+
 const WEB_ROOT = resolve(import.meta.dirname, "..");
 const FIXTURE_ROOT = join(WEB_ROOT, ".perf-fixtures", "performance");
 const MANIFEST_PATH = join(FIXTURE_ROOT, "manifest.json");
@@ -118,11 +127,6 @@ if (
   throw new Error("performance sources have inconsistent classifier lanes");
 }
 
-const maximumCandidate = (candidates, field) =>
-  candidates.reduce((maximum, candidate) =>
-    candidate[field] > maximum[field] ? candidate : maximum,
-  );
-
 const nodeCandidates = sources.flatMap((source) =>
   classifierIds.map((classifier_id) => ({
     source_id: source.source_id,
@@ -158,30 +162,15 @@ const comparisonComplete = maximumCandidate(
   "cold_progressive_complete_bytes",
 );
 
-const wallClockMs = (bytes, requestSeconds, processingSeconds) =>
-  Math.ceil(
-    (requestSeconds + bytes / THROUGHPUT_BYTES_PER_SECOND + processingSeconds) *
-      1_000,
-  );
-
-const checks = {
-  node_primary: nodePrimary.primary_node_bytes <= GATES.node_primary_bytes,
-  node_complete_target:
-    nodeComplete.cold_progressive_complete_bytes <=
-    GATES.node_complete_target_bytes,
-  node_complete_maximum:
-    nodeComplete.cold_progressive_complete_bytes <=
-    GATES.node_complete_maximum_bytes,
-  comparison_primary:
-    comparisonPrimary.primary_comparison_bytes <=
-    GATES.comparison_primary_bytes,
-  comparison_complete_target:
-    comparisonComplete.cold_progressive_complete_bytes <=
-    GATES.comparison_complete_target_bytes,
-  comparison_complete_maximum:
-    comparisonComplete.cold_progressive_complete_bytes <=
-    GATES.comparison_complete_maximum_bytes,
-};
+const gateResult = composeProjectionGates(
+  {
+    nodePrimaryBytes: nodePrimary.primary_node_bytes,
+    nodeCompleteBytes: nodeComplete.cold_progressive_complete_bytes,
+    comparisonPrimaryBytes: comparisonPrimary.primary_comparison_bytes,
+    comparisonCompleteBytes: comparisonComplete.cold_progressive_complete_bytes,
+  },
+  GATES,
+);
 
 const output = {
   schema_version: 2,
@@ -189,39 +178,40 @@ const output = {
   fixture_profile: fixture.profile,
   throughput_bytes_per_second: THROUGHPUT_BYTES_PER_SECOND,
   gates: GATES,
-  checks,
-  release_gate_passed:
-    checks.node_primary &&
-    checks.node_complete_maximum &&
-    checks.comparison_primary &&
-    checks.comparison_complete_maximum,
-  requires_pre_authorized_rederivation:
-    !checks.node_complete_target || !checks.comparison_complete_target,
+  ...gateResult,
   worst_case: {
     node_primary: {
       ...nodePrimary,
-      wall_clock_ms: wallClockMs(nodePrimary.primary_node_bytes, 2, 8),
+      wall_clock_ms: projectWallClockMs(
+        nodePrimary.primary_node_bytes,
+        THROUGHPUT_BYTES_PER_SECOND,
+        2,
+        8,
+      ),
     },
     node_complete: {
       ...nodeComplete,
-      wall_clock_ms: wallClockMs(
+      wall_clock_ms: projectWallClockMs(
         nodeComplete.cold_progressive_complete_bytes,
+        THROUGHPUT_BYTES_PER_SECOND,
         2,
         12,
       ),
     },
     comparison_primary: {
       ...comparisonPrimary,
-      wall_clock_ms: wallClockMs(
+      wall_clock_ms: projectWallClockMs(
         comparisonPrimary.primary_comparison_bytes,
+        THROUGHPUT_BYTES_PER_SECOND,
         2,
         12,
       ),
     },
     comparison_complete: {
       ...comparisonComplete,
-      wall_clock_ms: wallClockMs(
+      wall_clock_ms: projectWallClockMs(
         comparisonComplete.cold_progressive_complete_bytes,
+        THROUGHPUT_BYTES_PER_SECOND,
         2,
         16,
       ),
