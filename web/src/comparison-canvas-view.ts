@@ -18,6 +18,29 @@ export interface PreparedComparisonCanvas {
 
 export type ComparisonCanvasRenderStatus = "rendered" | "superseded";
 
+/**
+ * Settle the latest selection owned by one publication. Selection churn is
+ * not publication churn: the view aborts obsolete paint and retains at most
+ * one current render, while publication replacement terminates this loop.
+ */
+export const renderLatestComparisonCanvas = async (
+  ownsPublication: () => boolean,
+  selectedRegion: () => ComparisonRegionKey,
+  render: () => Promise<ComparisonCanvasRenderStatus>,
+): Promise<void> => {
+  while (ownsPublication()) {
+    const renderedRegion = selectedRegion();
+    const status = await render();
+    if (
+      status === "rendered" &&
+      ownsPublication() &&
+      selectedRegion() === renderedRegion
+    ) {
+      return;
+    }
+  }
+};
+
 const currentCanvasMetrics = (canvas: HTMLCanvasElement) => {
   const bounds = canvas.getBoundingClientRect();
   return {
@@ -56,6 +79,7 @@ export class ComparisonCanvasView {
     this.baseRegion = null;
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
+    delete this.canvas.dataset.renderedRegion;
   }
 
   prepareCandidate(comparison: CurrentComparison): PreparedComparisonCanvas {
@@ -92,6 +116,7 @@ export class ComparisonCanvasView {
     this.baseRegion = null;
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
+    delete this.canvas.dataset.renderedRegion;
   }
 
   private baseMatches(
@@ -184,6 +209,7 @@ export class ComparisonCanvasView {
         this.captureBase();
         this.baseComparison = comparison;
         this.baseRegion = selectedRegion;
+        this.canvas.dataset.renderedRegion = selectedRegion;
         this.paintActiveTransaction(this.desiredTransactionId);
         return "rendered";
       } catch (error) {

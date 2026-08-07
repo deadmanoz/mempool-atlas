@@ -159,7 +159,10 @@ target sets `requires_pre_authorized_rederivation` and requires the transfer
 budget to be derived and approved again. It is not an automatic allowance to
 spend the remaining margin. The separate hard maxima are 6,537,919 bytes for a
 complete node publication and 13,075,839 bytes for a complete comparison.
-Crossing either hard maximum fails `just stage-projection`.
+`just stage-projection` records a target crossing for re-authorization and
+fails only at a hard maximum. `just perf-web` additionally treats each target
+as its hard `complete_bytes` browser gate, so crossing a target fails the full
+performance matrix until the budget is re-derived and approved.
 
 Node primary readiness requires the manifest, population, and selected
 classifier lane. The primary population must support exact search, selection,

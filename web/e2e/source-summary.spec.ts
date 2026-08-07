@@ -18,11 +18,22 @@ interface CandidateGate {
   wait(): Promise<void>;
 }
 
+interface ComparisonPaintGate {
+  release(): Promise<void>;
+  waitForRequests(count: number): Promise<void>;
+}
+
 type CandidateGateWindow = Window &
   typeof globalThis & {
     __atlasCandidateGateSeen?: number;
     __atlasCandidateGateRelease?: () => void;
     __atlasCandidateReadyHook?: () => void | Promise<void>;
+  };
+
+type ComparisonPaintGateWindow = Window &
+  typeof globalThis & {
+    __atlasComparisonPaintGateSeen?: number;
+    __atlasComparisonPaintGateRelease?: () => void;
   };
 
 interface LayoutShiftMetric {
@@ -271,6 +282,62 @@ const installCandidateGate = async (page: Page): Promise<CandidateGate> => {
     release: () =>
       page.evaluate(() => {
         (window as CandidateGateWindow).__atlasCandidateGateRelease?.();
+      }),
+  };
+};
+
+const installComparisonPaintGate = async (
+  page: Page,
+): Promise<ComparisonPaintGate> => {
+  await page.addInitScript(() => {
+    const target = window as ComparisonPaintGateWindow;
+    const requestFrame = window.requestAnimationFrame.bind(window);
+    const cancelFrame = window.cancelAnimationFrame.bind(window);
+    const held = new Map<number, FrameRequestCallback>();
+    let nextHandle = -1;
+    target.__atlasComparisonPaintGateSeen = 0;
+    window.requestAnimationFrame = (callback) => {
+      if (
+        (callback as FrameRequestCallback & { __atlasPerfLabel?: string })
+          .__atlasPerfLabel !== "comparison-paint"
+      ) {
+        return requestFrame(callback);
+      }
+      const handle = nextHandle;
+      nextHandle -= 1;
+      held.set(handle, callback);
+      target.__atlasComparisonPaintGateSeen =
+        (target.__atlasComparisonPaintGateSeen ?? 0) + 1;
+      return handle;
+    };
+    window.cancelAnimationFrame = (handle) => {
+      if (!held.delete(handle)) cancelFrame(handle);
+    };
+    target.__atlasComparisonPaintGateRelease = () => {
+      window.requestAnimationFrame = requestFrame;
+      window.cancelAnimationFrame = cancelFrame;
+      const callbacks = [...held.values()];
+      held.clear();
+      for (const callback of callbacks) requestFrame(callback);
+    };
+  });
+  return {
+    waitForRequests: async (count) => {
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (window as ComparisonPaintGateWindow)
+                .__atlasComparisonPaintGateSeen ?? 0,
+          ),
+        )
+        .toBeGreaterThanOrEqual(count);
+    },
+    release: () =>
+      page.evaluate(() => {
+        (
+          window as ComparisonPaintGateWindow
+        ).__atlasComparisonPaintGateRelease?.();
       }),
   };
 };
@@ -691,6 +758,54 @@ test.describe("progressive v2 publications", () => {
       await expect(sourceLink).toBeFocused();
     } finally {
       gate.release();
+    }
+  });
+});
+
+test.describe("comparison canvas selection churn", () => {
+  test("renders the latest region after repeated changes during painting", async ({
+    page,
+  }) => {
+    const gate = await installComparisonPaintGate(page);
+    const pageErrors: Error[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error));
+    try {
+      await page.goto("/compare/");
+      await gate.waitForRequests(1);
+      const changes = [
+        "left_only",
+        "common",
+        "right_only",
+        "left_only",
+        "common",
+      ] as const;
+      for (let index = 0; index < changes.length; index += 1) {
+        const region = changes[index]!;
+        const control = page.locator(
+          `#comparison-regions button[data-region="${region}"]`,
+        );
+        await control.click();
+        await expect(control).toHaveAttribute("aria-pressed", "true");
+        await gate.waitForRequests(index + 2);
+      }
+
+      await gate.release();
+      const status = page.locator("#comparison-status");
+      await expect(status).toHaveAttribute(
+        "data-readiness",
+        "complete-feature-ready",
+      );
+      await expect(status).toHaveAttribute("data-state", /ready|stale/);
+      await expect(page.locator("#comparison-canvas")).toHaveAttribute(
+        "data-rendered-region",
+        "common",
+      );
+      await expect(page.locator("#comparison-status-title")).not.toContainText(
+        "unavailable",
+      );
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await gate.release();
     }
   });
 });

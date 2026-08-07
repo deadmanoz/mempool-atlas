@@ -319,11 +319,10 @@ impl CurrentStatePublisher {
                 (
                     state.status_revision,
                     state.classification_generation,
-                    if state.poll_start_publication_failed {
-                        None
-                    } else {
-                        state.last_poll_started_at_ms
-                    },
+                    // A failed poll-start re-encode never committed the new
+                    // timestamp. Retain the last successfully published value
+                    // so the replacement source and manifest stay honest.
+                    state.last_poll_started_at_ms,
                 )
             };
             if current_generation.is_some_and(|current| current >= generation) {
@@ -638,6 +637,8 @@ impl CurrentStatePublisher {
                     state.status_revision,
                     state.classification_generation,
                     state.classification_revision,
+                    // Poll-start failures never advance this field, so it is
+                    // also the last value committed in the retained manifest.
                     state.last_poll_started_at_ms,
                     state.latest.clone(),
                     state.classification_state,

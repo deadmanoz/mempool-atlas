@@ -66,6 +66,8 @@ Use `just` targets whenever one exists:
 
 - `just build` builds Rust and the website.
 - `just test` runs Rust and website unit tests.
+  It enables `perf-fixtures` for the Rust suite so both cross-language
+  publication-digest goldens run; a bare `cargo test` omits those checks.
 - `just test-web-e2e` runs Playwright viewport coverage against the fixture
   Atlas API, after a one-time `just test-web-e2e-install`.
 - `just functional-fixtures` exports the small Rust-owned functional profile.

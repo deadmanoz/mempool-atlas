@@ -2,8 +2,15 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ComparisonCanvasView } from "./comparison-canvas-view";
-import { compareCurrentSnapshots } from "./comparison-model";
+import {
+  ComparisonCanvasView,
+  renderLatestComparisonCanvas,
+  type ComparisonCanvasRenderStatus,
+} from "./comparison-canvas-view";
+import {
+  compareCurrentSnapshots,
+  type ComparisonRegionKey,
+} from "./comparison-model";
 import { loadedSource } from "./comparison-test-fixtures";
 import { mempoolTransaction, txid } from "./test-fixtures";
 
@@ -95,5 +102,43 @@ describe("ComparisonCanvasView", () => {
       await Promise.resolve();
     }
     await expect(current).resolves.toBe("rendered");
+  });
+
+  it("settles the latest region after repeated same-publication churn", async () => {
+    let region: ComparisonRegionKey = "common";
+    const pending: Array<{
+      region: ComparisonRegionKey;
+      resolve: (status: ComparisonCanvasRenderStatus) => void;
+    }> = [];
+    const render = vi.fn(
+      () =>
+        new Promise<ComparisonCanvasRenderStatus>((resolve) => {
+          pending.push({ region, resolve });
+        }),
+    );
+    const settled = renderLatestComparisonCanvas(
+      () => true,
+      () => region,
+      render,
+    );
+    const changes: ComparisonRegionKey[] = [
+      "left_only",
+      "common",
+      "right_only",
+      "left_only",
+      "common",
+    ];
+
+    for (let index = 0; index < changes.length; index += 1) {
+      await vi.waitFor(() => expect(pending).toHaveLength(index + 1));
+      region = changes[index]!;
+      pending[index]!.resolve("superseded");
+    }
+    await vi.waitFor(() => expect(pending).toHaveLength(changes.length + 1));
+    expect(pending.at(-1)?.region).toBe("common");
+    pending.at(-1)!.resolve("rendered");
+
+    await expect(settled).resolves.toBeUndefined();
+    expect(render).toHaveBeenCalledTimes(changes.length + 1);
   });
 });

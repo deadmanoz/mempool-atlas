@@ -704,50 +704,73 @@ async fn poll_start_publication_failure_does_not_hide_the_rpc_outcome() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn successful_poll_clears_a_start_time_left_by_poll_start_publication_failure() {
-    let probe = Arc::new(MembershipProbe::default());
-    let (address, server) = start_membership_fixture("core", Arc::clone(&probe), false).await;
+async fn successful_poll_retains_the_last_published_start_time_after_poll_start_failure() {
     let poll_interval = Duration::from_secs(60);
-    let runtime = Arc::new(
-        SourceRuntime::new("core".to_owned(), "Bitcoin Core".to_owned(), poll_interval)
-            .expect("source runtime"),
-    );
-    let url = format!("http://{address}/");
-    let source = AtlasSource::new(
-        Arc::clone(&runtime),
-        RpcClient::new(&url, "atlas", "secret", 100).expect("membership RPC client"),
-        ClassificationPipeline::new(
-            &url,
-            "atlas".to_owned(),
-            "secret".to_owned(),
-            ClassificationLimits::new(1, 1, 1024 * 1024).expect("classification limits"),
-        )
-        .expect("classification client"),
-    );
-    let atlas = AtlasRuntime::new(vec![source], poll_interval).expect("Atlas runtime");
+    let runtime = SourceRuntime::new("core".to_owned(), "Bitcoin Core".to_owned(), poll_interval)
+        .expect("source runtime");
 
-    atlas.poll_round(1).await;
-    assert!(runtime.summary().await.last_poll_started_at_ms.is_some());
+    runtime
+        .record_poll_started(10)
+        .await
+        .expect("record initial poll start");
+    runtime
+        .record_success(observation(20))
+        .await
+        .expect("record initial snapshot");
 
     runtime.limit_next_poll_start_reencoding(StagedSnapshotLimits {
         max_stage_bytes: 1,
         max_publication_bytes: 1,
     });
-    atlas.poll_round(2).await;
+    runtime
+        .record_poll_started(30)
+        .await
+        .expect_err("poll-start publication must fail");
+
+    let failed_start_summary = runtime.summary().await;
+    assert_eq!(failed_start_summary.last_poll_started_at_ms, Some(10));
+    let failed_start_manifest = runtime
+        .current_manifest_payload()
+        .await
+        .expect("retained manifest");
+    let failed_start_manifest =
+        serde_json::from_slice::<Value>(&failed_start_manifest.body).expect("manifest JSON");
+    assert_eq!(
+        failed_start_manifest["source"]["last_poll_started_at_ms"],
+        10
+    );
+
+    runtime
+        .record_success(observation(40))
+        .await
+        .expect("record replacement snapshot");
 
     let summary = runtime.summary().await;
     assert_eq!(summary.availability, SourceAvailability::Ready);
-    assert_eq!(summary.last_poll_started_at_ms, None);
+    assert_eq!(summary.last_poll_started_at_ms, Some(10));
+    assert_eq!(summary.snapshot_observed_at_ms, Some(40));
     assert_eq!(summary.last_error, None);
     let manifest = runtime
         .current_manifest_payload()
         .await
         .expect("fresh manifest");
     let manifest = serde_json::from_slice::<Value>(&manifest.body).expect("manifest JSON");
-    assert_eq!(manifest["source"]["last_poll_started_at_ms"], Value::Null);
+    assert_eq!(manifest["source"]["last_poll_started_at_ms"], 10);
+    assert_eq!(manifest["source"]["snapshot_observed_at_ms"], 40);
     assert_eq!(manifest["source"]["availability"], "ready");
 
-    server.abort();
+    runtime
+        .record_poll_started(50)
+        .await
+        .expect("record later poll start");
+    assert_eq!(runtime.summary().await.last_poll_started_at_ms, Some(50));
+    let later_manifest = runtime
+        .current_manifest_payload()
+        .await
+        .expect("later manifest");
+    let later_manifest =
+        serde_json::from_slice::<Value>(&later_manifest.body).expect("manifest JSON");
+    assert_eq!(later_manifest["source"]["last_poll_started_at_ms"], 50);
 }
 
 #[tokio::test(flavor = "multi_thread")]
