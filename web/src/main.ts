@@ -62,6 +62,7 @@ import {
   chooseInitialNodeRule,
   prepareNodePublicationCommit,
 } from "./node-publication-candidate";
+import { renderPrimaryNodePublication } from "./node-primary-publication";
 import {
   nodeSampleSelectionContains,
   resolveNodeSampleSelection,
@@ -2154,13 +2155,15 @@ const loadSnapshot = async (): Promise<void> => {
           selectedSourceId === requestedSourceId
         ) {
           if (retainActivePublication) return undefined;
-          return renderResponse(
-            primary,
-            false,
-            () =>
-              snapshotLifecycle.isCurrent(ticket) &&
-              selectedSourceId === requestedSourceId,
-            ticket.signal,
+          return renderPrimaryNodePublication(() =>
+            renderResponse(
+              primary,
+              false,
+              () =>
+                snapshotLifecycle.isCurrent(ticket) &&
+                selectedSourceId === requestedSourceId,
+              ticket.signal,
+            ),
           );
         }
         return undefined;

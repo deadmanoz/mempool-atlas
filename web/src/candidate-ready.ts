@@ -4,10 +4,18 @@ export interface AtlasCandidateReadyDetail {
   sourceIds: string[];
 }
 
+export interface AtlasNodePublicationAttemptDetail {
+  attempt: number;
+  complete: boolean;
+}
+
 declare global {
   interface Window {
     __atlasCandidateReadyHook?: (
       detail: AtlasCandidateReadyDetail,
+    ) => void | Promise<void>;
+    __atlasNodePublicationAttemptHook?: (
+      detail: AtlasNodePublicationAttemptDetail,
     ) => void | Promise<void>;
   }
 }
@@ -22,16 +30,10 @@ const markCandidate = (
   performance.mark(`atlas:${detail.surface}:${phase}`, { detail });
 };
 
-export const awaitAtlasCandidateRelease = async (
-  detail: AtlasCandidateReadyDetail,
+const awaitHook = async (
+  hookResult: Promise<void>,
   signal: AbortSignal,
 ): Promise<void> => {
-  signal.throwIfAborted();
-  markCandidate("replacement-candidate-ready", detail);
-  const hook = window.__atlasCandidateReadyHook;
-  if (hook === undefined) return;
-
-  const hookResult = Promise.resolve().then(() => hook(detail));
   await new Promise<void>((resolve, reject) => {
     const abort = (): void => {
       signal.removeEventListener("abort", abort);
@@ -50,6 +52,33 @@ export const awaitAtlasCandidateRelease = async (
       },
     );
   });
+};
+
+export const awaitAtlasCandidateRelease = async (
+  detail: AtlasCandidateReadyDetail,
+  signal: AbortSignal,
+): Promise<void> => {
+  signal.throwIfAborted();
+  markCandidate("replacement-candidate-ready", detail);
+  const hook = window.__atlasCandidateReadyHook;
+  if (hook === undefined) return;
+
+  const hookResult = Promise.resolve().then(() => hook(detail));
+  await awaitHook(hookResult, signal);
+};
+
+export const awaitAtlasNodePublicationAttemptRelease = async (
+  detail: AtlasNodePublicationAttemptDetail,
+  signal: AbortSignal,
+): Promise<void> => {
+  signal.throwIfAborted();
+  if (typeof window === "undefined") return;
+  const hook = window.__atlasNodePublicationAttemptHook;
+  if (hook === undefined) return;
+  await awaitHook(
+    Promise.resolve().then(() => hook(detail)),
+    signal,
+  );
 };
 
 export const recordAtlasCandidateCommitted = (

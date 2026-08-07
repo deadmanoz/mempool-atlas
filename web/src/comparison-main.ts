@@ -17,10 +17,7 @@ import {
   isAbortError,
   type ComparisonRequestTicket,
 } from "./comparison-lifecycle";
-import {
-  createComparisonDistributionsView,
-  type PreparedComparisonDistributions,
-} from "./comparison-distributions-view";
+import { createComparisonDistributionsView } from "./comparison-distributions-view";
 import {
   ComparisonCanvasView,
   renderLatestComparisonCanvas,
@@ -49,7 +46,10 @@ import {
   type ComparisonPolicyPopulation,
   type ComparisonPolicyView,
 } from "./comparison-policy-view";
-import { prepareComparisonCommitCandidate } from "./comparison-publication-candidate";
+import {
+  commitPreparedComparisonDistributions,
+  prepareComparisonCommitCandidate,
+} from "./comparison-publication-candidate";
 import {
   comparisonRegionEntries,
   lookupComparisonTransaction,
@@ -1321,7 +1321,6 @@ const renderComparison = async (
   current: CurrentComparison,
   view: ComparisonPolicyView,
   complete = true,
-  preparedDistributions: PreparedComparisonDistributions | null = null,
 ): Promise<void> => {
   leftSourceCardView.renderSnapshot(current.left.source, current.left.snapshot);
   rightSourceCardView.renderSnapshot(
@@ -1329,17 +1328,6 @@ const renderComparison = async (
     current.right.snapshot,
   );
   renderSampling(current);
-  if (complete) {
-    if (
-      preparedDistributions === null ||
-      !comparisonDistributions.commit(preparedDistributions, current)
-    ) {
-      throw new DOMException(
-        "Comparison distribution candidate was superseded",
-        "AbortError",
-      );
-    }
-  } else comparisonDistributions.reset();
   if (comparison !== current) return;
   renderPolicyMatrix(current, view);
   renderRegionControls(current);
@@ -1503,9 +1491,15 @@ const commitComparisonPublications = async (
     comparisonDistributions,
     comparisonCanvasView,
   );
+  const { comparison: next, policyView } = prepared.publication;
+  commitPreparedComparisonDistributions(
+    complete,
+    prepared.distributions,
+    next,
+    comparisonDistributions,
+  );
   replaceSourceSummary(left.source);
   replaceSourceSummary(right.source);
-  const { comparison: next, policyView } = prepared.publication;
   comparison = next;
   comparisonPolicyView = policyView;
   const previous = currentViewState();
@@ -1513,12 +1507,7 @@ const commitComparisonPublications = async (
   applyResolvedLoadedView(next, applied);
   populateSourceSelectors();
   comparisonCanvasView.commitCandidate(prepared.canvas);
-  const rendered = renderComparison(
-    next,
-    policyView,
-    complete,
-    prepared.distributions,
-  );
+  const rendered = renderComparison(next, policyView, complete);
   if (replacement && complete) recordAtlasCandidateCommitted(prepared.detail);
   await rendered;
   if (comparison === next) updateQuery();

@@ -29,7 +29,7 @@ fn main() -> Result<()> {
         source_count: cli.source_count,
     })?;
     if let Some(path) = cli.publication_digest_source_cases {
-        write_publication_digest_source_cases(&path)?;
+        write_publication_digest_source_cases(&path, cli.transaction_count, cli.source_count)?;
         println!(
             "exported publication digest source cases to {}",
             path.display()

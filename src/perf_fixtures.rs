@@ -58,7 +58,11 @@ pub struct ExportOptions {
     pub source_count: usize,
 }
 
-pub fn write_publication_digest_source_cases(output_path: &Path) -> Result<()> {
+pub fn write_publication_digest_source_cases(
+    output_path: &Path,
+    transaction_count: usize,
+    source_count: usize,
+) -> Result<()> {
     #[derive(Serialize)]
     struct SourceCases {
         schema_version: u64,
@@ -74,8 +78,12 @@ pub fn write_publication_digest_source_cases(output_path: &Path) -> Result<()> {
         publication_id: String,
     }
 
-    let (sources, _) = performance_sources(PERFORMANCE_REFERENCE_TIME_MS, 3, 1)
-        .context("build publication digest fixture source")?;
+    let (sources, _) = performance_sources(
+        PERFORMANCE_REFERENCE_TIME_MS,
+        transaction_count,
+        source_count,
+    )
+    .context("build publication digest fixture source")?;
     let source = sources
         .first()
         .context("publication digest fixture source is missing")?;

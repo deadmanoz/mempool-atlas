@@ -132,10 +132,10 @@ grep -F 'public v2-only Cloudflare smoke checks passed' \
     fail "smoke script did not report success with Cloudflare headers"
 stop_fixture_server
 
-# Exercise the two expected non-success detail outcomes against the same full
+# Exercise the expected non-success detail outcomes against the same full
 # publication contract. The smoke script must validate each exact error body
 # and still require the non-cacheable edge path.
-for detail_status in 404 503; do
+for detail_status in 404 503 503-unavailable; do
     start_fixture_server 1 "$detail_status"
     ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
         "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \

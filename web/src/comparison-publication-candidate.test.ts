@@ -6,6 +6,7 @@ import type {
   PreparedComparisonDistributions,
 } from "./comparison-distributions-view";
 import {
+  commitPreparedComparisonDistributions,
   prepareComparisonCommitCandidate,
   prepareComparisonPublication,
 } from "./comparison-publication-candidate";
@@ -142,6 +143,36 @@ describe("comparison publication candidate", () => {
     expect(canvas.prepareCandidate).toHaveBeenCalledTimes(2);
     expect(canvas.canCommitCandidate).toHaveBeenCalledTimes(3);
     expect(isCurrent).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects a stale distribution commit before publishing comparison state", async () => {
+    const prepared = await prepareComparisonPublication(
+      publication("left", [1, 2, 3]),
+      publication("right", [2, 3, 4]),
+      true,
+      new AbortController().signal,
+    );
+    const commit = vi.fn(() => false);
+    const retained = { comparison: "retained" };
+    let published = retained;
+
+    expect(() => {
+      commitPreparedComparisonDistributions(
+        true,
+        { current: prepared.comparison } as PreparedComparisonDistributions,
+        prepared.comparison,
+        { commit } as unknown as ComparisonDistributionsView,
+      );
+      published = { comparison: "candidate" };
+    }).toThrowError(
+      expect.objectContaining({
+        name: "AbortError",
+        message: "Comparison distribution candidate was superseded",
+      }),
+    );
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(published).toBe(retained);
   });
 
   it("exits after four consecutive comparison-canvas invalidations", async () => {

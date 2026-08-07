@@ -31,6 +31,10 @@ lenses, and serves source-local node and comparison views.
   browser fixture bodies. Production builds do not enable `perf-fixtures`.
 - `src/bip110/` is the private pure seven-rule evaluator.
 - `web/` contains the node viewer and browser-derived comparison page.
+- `web/src/atlas-worker.ts` owns staged publication fetch, bounded decoding,
+  semantic validation, cache and retry behavior, and the worker message surface.
+- `web/src/publication-digest.ts` owns canonical classification-set and
+  publication preimages plus SHA-256 digest verification used by the worker.
 - `web/src/source-summary-view.ts` owns early source metadata, stale-state
   honesty, and the shared node/comparison loading phases.
 - `web/src/source-summary-styles.css` owns the node source-summary component

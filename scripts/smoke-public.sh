@@ -368,7 +368,8 @@ if jq -e '.transaction_count > 0' "$temp_dir/manifest.json" >/dev/null; then
             ;;
         503)
             jq -e --arg txid "$detail_txid" '
-                .error == ("transaction \"" + $txid + "\" is present but has no policy assessment in the current snapshot")
+                .error == ("transaction \"" + $txid + "\" is present but has no policy assessment in the current snapshot") or
+                (.type == "v2_unavailable" and .status == 503)
             ' "$temp_dir/detail.json" >/dev/null || {
                 printf 'transaction detail returned an unexpected 503 response\n' >&2
                 exit 1

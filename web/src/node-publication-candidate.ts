@@ -4,6 +4,7 @@ import {
 } from "./classification-view";
 import {
   awaitAtlasCandidateRelease,
+  awaitAtlasNodePublicationAttemptRelease,
   type AtlasCandidateReadyDetail,
 } from "./candidate-ready";
 import { bip110RulePopulationSummary } from "./bip110-rule-index";
@@ -281,6 +282,10 @@ export const prepareNodePublicationCommit = async (
           ))
       );
     };
+    await awaitAtlasNodePublicationAttemptRelease(
+      { attempt, complete },
+      signal,
+    );
     signal.throwIfAborted();
     if (!isCurrent()) {
       throw new DOMException("Node request was superseded", "AbortError");

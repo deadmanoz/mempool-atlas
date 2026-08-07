@@ -250,14 +250,31 @@ outside that budget.
 
 Atlas logs `publication_id`, `encoded_bytes`, and `classification_revision`
 whenever it promotes a publication. Combine those fields with the existing
-poll-round and classification logs. Monitor:
+poll-round and classification logs.
+
+Each changed stage content ID creates a new cacheable URL, but only requested
+objects occupy an edge cache. The one-year freshness lifetime is not a
+retention guarantee: Cloudflare documents that standard edge retention depends
+on relative popularity and cache size, with least-recently-used eviction.
+Routine purging of superseded content-addressed stages is not required for
+correctness and unnecessarily discards useful hits; reserve purges for release
+boundaries, rollback, or an explicit incident. Use Cache Analytics, when the
+selected plan provides it, to review cache status, data transfer, and top stage
+URLs. If Cache Reserve is enabled separately, monitor its persistent storage,
+operations, and retention policy as a distinct cost surface. See Cloudflare's
+[retention versus freshness](https://developers.cloudflare.com/cache/concepts/retention-vs-freshness/)
+and [Cache Analytics](https://developers.cloudflare.com/cache/performance-review/cache-analytics/)
+references.
+
+Monitor:
 
 - resident and peak memory;
 - full poll-round and per-source collection duration;
 - observation skew between configured sources;
 - classification state, remaining work, and pauses;
 - encoded publication size by source and revision;
-- Cloudflare cache status and origin request rate;
+- Cloudflare cache status, stage-URL churn, data transfer, and origin request
+  rate;
 - response bandwidth and compression ratio;
 - rate-limit and WAF actions; and
 - tunnel and Atlas service restarts.

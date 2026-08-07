@@ -35,11 +35,14 @@ if (FIXTURE_PORT > 65535) {
   writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_PORT\n");
   process.exit(2);
 }
-if (!/^(200|404|503)$/.test(FIXTURE_DETAIL_STATUS_TEXT)) {
+if (!/^(200|404|503|503-unavailable)$/.test(FIXTURE_DETAIL_STATUS_TEXT)) {
   writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_DETAIL_STATUS\n");
   process.exit(2);
 }
-const FIXTURE_DETAIL_STATUS = Number(FIXTURE_DETAIL_STATUS_TEXT);
+const FIXTURE_DETAIL_STATUS =
+  FIXTURE_DETAIL_STATUS_TEXT === "503-unavailable"
+    ? 503
+    : Number(FIXTURE_DETAIL_STATUS_TEXT);
 
 const failFixtureLoad = () => {
   writeSync(process.stderr.fd, `${FIXTURE_ERROR}\n`);
@@ -293,6 +296,23 @@ const server = createServer((request, response) => {
   const detailMatch = url.pathname.match(transactionDetailPath);
   if (detailMatch !== null && FIXTURE_DETAIL_STATUS !== 200) {
     const txid = detailMatch[1];
+    if (FIXTURE_DETAIL_STATUS_TEXT === "503-unavailable") {
+      send(
+        request,
+        response,
+        503,
+        Buffer.from(
+          JSON.stringify({
+            type: "v2_unavailable",
+            title: "Current v2 publication unavailable",
+            status: 503,
+            detail: "The source has not published a complete v2 snapshot yet.",
+          }),
+        ),
+        { "content-type": "application/problem+json" },
+      );
+      return;
+    }
     const detailError =
       FIXTURE_DETAIL_STATUS === 404
         ? `transaction "${txid}" is not in the current snapshot`

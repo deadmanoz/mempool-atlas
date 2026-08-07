@@ -36,6 +36,24 @@ export interface PreparedComparisonCommitCandidate {
   detail: AtlasCandidateReadyDetail;
 }
 
+export const commitPreparedComparisonDistributions = (
+  complete: boolean,
+  prepared: PreparedComparisonDistributions | null,
+  current: CurrentComparison,
+  distributionsView: ComparisonDistributionsView,
+): void => {
+  if (!complete) {
+    distributionsView.reset();
+    return;
+  }
+  if (prepared === null || !distributionsView.commit(prepared, current)) {
+    throw new DOMException(
+      "Comparison distribution candidate was superseded",
+      "AbortError",
+    );
+  }
+};
+
 const publicationKey = ({
   snapshot_identity,
 }: LoadedSourcePublication): string => snapshot_identity;

@@ -38,6 +38,7 @@ pub(super) struct CurrentStatePublisher {
 #[derive(Debug, Default)]
 struct CurrentState {
     last_poll_started_at_ms: Option<u64>,
+    pending_poll_started_at_ms: Option<u64>,
     poll_start_publication_failed: bool,
     membership: Option<Arc<MempoolSnapshot>>,
     latest: Option<Arc<MempoolSnapshot>>,
@@ -175,6 +176,7 @@ impl CurrentStatePublisher {
                         {
                             continue;
                         }
+                        state.pending_poll_started_at_ms = Some(started_at_ms);
                         state.poll_start_publication_failed = true;
                         state.status_revision = state.status_revision.wrapping_add(1);
                         return Err(error.into());
@@ -198,6 +200,7 @@ impl CurrentStatePublisher {
                 replace_manifest(&mut state, manifest)?;
             }
             state.last_poll_started_at_ms = Some(started_at_ms);
+            state.pending_poll_started_at_ms = None;
             state.poll_start_publication_failed = false;
             state.status_revision = state.status_revision.wrapping_add(1);
             return Ok(());
@@ -319,10 +322,7 @@ impl CurrentStatePublisher {
                 (
                     state.status_revision,
                     state.classification_generation,
-                    // A failed poll-start re-encode never committed the new
-                    // timestamp. Retain the last successfully published value
-                    // so the replacement source and manifest stay honest.
-                    state.last_poll_started_at_ms,
+                    poll_started_at_ms_for_outcome(&state),
                 )
             };
             if current_generation.is_some_and(|current| current >= generation) {
@@ -357,6 +357,7 @@ impl CurrentStatePublisher {
             state.classifications = prepared.classifications;
             debug_assert!(state.classifications.len() <= membership.transactions.len());
             state.last_poll_started_at_ms = last_poll_started_at_ms;
+            state.pending_poll_started_at_ms = None;
             state.poll_start_publication_failed = false;
             state.last_error = None;
             state.classification_generation = Some(generation);
@@ -637,9 +638,7 @@ impl CurrentStatePublisher {
                     state.status_revision,
                     state.classification_generation,
                     state.classification_revision,
-                    // Poll-start failures never advance this field, so it is
-                    // also the last value committed in the retained manifest.
-                    state.last_poll_started_at_ms,
+                    poll_started_at_ms_for_outcome(&state),
                     state.latest.clone(),
                     state.classification_state,
                     state
@@ -681,6 +680,9 @@ impl CurrentStatePublisher {
             } else {
                 (None, 0)
             };
+            state.last_poll_started_at_ms = last_poll_started_at_ms;
+            state.pending_poll_started_at_ms = None;
+            state.poll_start_publication_failed = false;
             state.last_error = Some(error);
             state.status_revision = state.status_revision.wrapping_add(1);
             let total_classified_count = state.classifications.len();
@@ -1014,6 +1016,19 @@ fn stage_etag(stage: &PublishedStage) -> String {
 pub(super) struct PublishedState {
     pub(super) source: SourceSummary,
     pub(super) snapshot: Option<Arc<MempoolSnapshot>>,
+}
+
+fn poll_started_at_ms_for_outcome(state: &CurrentState) -> Option<u64> {
+    debug_assert_eq!(
+        state.poll_start_publication_failed,
+        state.pending_poll_started_at_ms.is_some(),
+        "a failed poll-start publication must retain exactly one pending timestamp"
+    );
+    // The pending value remains private until this outcome's source and
+    // manifest can commit it together.
+    state
+        .pending_poll_started_at_ms
+        .or(state.last_poll_started_at_ms)
 }
 
 fn summary_from_state(publisher: &CurrentStatePublisher, state: &CurrentState) -> SourceSummary {

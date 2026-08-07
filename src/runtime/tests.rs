@@ -649,7 +649,7 @@ async fn one_source_failure_does_not_block_later_sources_in_the_round() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn poll_start_publication_failure_does_not_hide_the_rpc_outcome() {
+async fn poll_start_publication_failure_publishes_the_attempted_time_with_the_rpc_failure() {
     let probe = Arc::new(MembershipProbe::default());
     let (address, server) = start_membership_fixture("core", Arc::clone(&probe), true).await;
     let poll_interval = Duration::from_secs(60);
@@ -657,6 +657,10 @@ async fn poll_start_publication_failure_does_not_hide_the_rpc_outcome() {
         SourceRuntime::new("core".to_owned(), "Bitcoin Core".to_owned(), poll_interval)
             .expect("source runtime"),
     );
+    runtime
+        .record_poll_started(10)
+        .await
+        .expect("record initial poll start");
     runtime
         .record_success(observation(20))
         .await
@@ -684,7 +688,10 @@ async fn poll_start_publication_failure_does_not_hide_the_rpc_outcome() {
     assert_eq!(probe.source_order.lock().await.as_slice(), ["core"]);
     let summary = runtime.summary().await;
     assert_eq!(summary.availability, SourceAvailability::Stale);
-    assert_eq!(summary.last_poll_started_at_ms, None);
+    let attempted_poll_started_at_ms = summary
+        .last_poll_started_at_ms
+        .expect("attempted poll start is published with its outcome");
+    assert_ne!(attempted_poll_started_at_ms, 10);
     assert_eq!(
         summary.last_error.as_deref(),
         Some("Bitcoin node RPC is unavailable")
@@ -696,6 +703,10 @@ async fn poll_start_publication_failure_does_not_hide_the_rpc_outcome() {
     let manifest = serde_json::from_slice::<Value>(&manifest.body).expect("manifest JSON");
     assert_eq!(manifest["source"]["availability"], "stale");
     assert_eq!(
+        manifest["source"]["last_poll_started_at_ms"],
+        attempted_poll_started_at_ms
+    );
+    assert_eq!(
         manifest["source"]["last_error"],
         "Bitcoin node RPC is unavailable"
     );
@@ -704,7 +715,7 @@ async fn poll_start_publication_failure_does_not_hide_the_rpc_outcome() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn successful_poll_retains_the_last_published_start_time_after_poll_start_failure() {
+async fn successful_poll_promotes_the_pending_start_time_after_poll_start_failure() {
     let poll_interval = Duration::from_secs(60);
     let runtime = SourceRuntime::new("core".to_owned(), "Bitcoin Core".to_owned(), poll_interval)
         .expect("source runtime");
@@ -747,7 +758,7 @@ async fn successful_poll_retains_the_last_published_start_time_after_poll_start_
 
     let summary = runtime.summary().await;
     assert_eq!(summary.availability, SourceAvailability::Ready);
-    assert_eq!(summary.last_poll_started_at_ms, Some(10));
+    assert_eq!(summary.last_poll_started_at_ms, Some(30));
     assert_eq!(summary.snapshot_observed_at_ms, Some(40));
     assert_eq!(summary.last_error, None);
     let manifest = runtime
@@ -755,7 +766,7 @@ async fn successful_poll_retains_the_last_published_start_time_after_poll_start_
         .await
         .expect("fresh manifest");
     let manifest = serde_json::from_slice::<Value>(&manifest.body).expect("manifest JSON");
-    assert_eq!(manifest["source"]["last_poll_started_at_ms"], 10);
+    assert_eq!(manifest["source"]["last_poll_started_at_ms"], 30);
     assert_eq!(manifest["source"]["snapshot_observed_at_ms"], 40);
     assert_eq!(manifest["source"]["availability"], "ready");
 

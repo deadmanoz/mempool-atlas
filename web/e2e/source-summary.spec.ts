@@ -18,6 +18,11 @@ interface CandidateGate {
   wait(): Promise<void>;
 }
 
+interface NodePublicationAttemptGate {
+  release(): Promise<void>;
+  waitForAttempt(count: number): Promise<void>;
+}
+
 interface ComparisonPaintGate {
   release(): Promise<void>;
   waitForRequests(count: number): Promise<void>;
@@ -28,6 +33,15 @@ type CandidateGateWindow = Window &
     __atlasCandidateGateSeen?: number;
     __atlasCandidateGateRelease?: () => void;
     __atlasCandidateReadyHook?: () => void | Promise<void>;
+  };
+
+type NodePublicationAttemptGateWindow = Window &
+  typeof globalThis & {
+    __atlasNodePublicationAttemptSeen?: number;
+    __atlasNodePublicationAttemptRelease?: () => void;
+    __atlasNodePublicationAttemptHook?: (detail: {
+      complete: boolean;
+    }) => void | Promise<void>;
   };
 
 type ComparisonPaintGateWindow = Window &
@@ -282,6 +296,43 @@ const installCandidateGate = async (page: Page): Promise<CandidateGate> => {
     release: () =>
       page.evaluate(() => {
         (window as CandidateGateWindow).__atlasCandidateGateRelease?.();
+      }),
+  };
+};
+
+const installNodePublicationAttemptGate = async (
+  page: Page,
+): Promise<NodePublicationAttemptGate> => {
+  await page.addInitScript(() => {
+    const target = window as NodePublicationAttemptGateWindow;
+    target.__atlasNodePublicationAttemptSeen = 0;
+    target.__atlasNodePublicationAttemptHook = async ({ complete }) => {
+      if (complete) return;
+      target.__atlasNodePublicationAttemptSeen =
+        (target.__atlasNodePublicationAttemptSeen ?? 0) + 1;
+      await new Promise<void>((resolve) => {
+        target.__atlasNodePublicationAttemptRelease = resolve;
+      });
+    };
+  });
+  return {
+    waitForAttempt: async (count) => {
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              (window as NodePublicationAttemptGateWindow)
+                .__atlasNodePublicationAttemptSeen ?? 0,
+          ),
+        )
+        .toBe(count);
+    },
+    release: () =>
+      page.evaluate(() => {
+        const target = window as NodePublicationAttemptGateWindow;
+        const release = target.__atlasNodePublicationAttemptRelease;
+        delete target.__atlasNodePublicationAttemptRelease;
+        release?.();
       }),
   };
 };
@@ -616,6 +667,38 @@ test.describe("early source metadata", () => {
 });
 
 test.describe("progressive v2 publications", () => {
+  test("finishes loading after primary metric churn exhausts its commit budget", async ({
+    page,
+  }) => {
+    const gate = await installNodePublicationAttemptGate(page);
+    const pageErrors: Error[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error));
+    await page.goto("/");
+
+    const metrics = ["vsize", "count", "vsize", "count"] as const;
+    for (let index = 0; index < metrics.length; index += 1) {
+      await gate.waitForAttempt(index + 1);
+      const metric = metrics[index]!;
+      await page.locator(`#mode-${metric}`).evaluate((button) => {
+        (button as HTMLButtonElement).click();
+      });
+      await expect(page.locator(`#mode-${metric}`)).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      await gate.release();
+    }
+
+    const status = page.locator("#page-status");
+    await expect(status).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    await expect(status).toHaveAttribute("data-state", /ready|stale/);
+    await expect(page.getByText("Atlas website unavailable")).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+  });
+
   test("makes the primary node view interactive before membership completes", async ({
     page,
   }) => {
