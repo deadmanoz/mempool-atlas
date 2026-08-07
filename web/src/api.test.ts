@@ -258,6 +258,7 @@ const completeTransfer = () => ({
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -627,6 +628,89 @@ describe("transactionDetailMatchesSnapshot", () => {
 });
 
 describe("publication worker lifecycle", () => {
+  it("cancels a publication that exceeds the bounded load deadline", async () => {
+    vi.useFakeTimers();
+    class FakeWorker {
+      static instance: FakeWorker;
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+
+      constructor() {
+        FakeWorker.instance = this;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(data: unknown): void {
+        this.listeners
+          .get("message")
+          ?.forEach((listener) => listener({ data }));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    let releasePrimary = (): void => undefined;
+    const primaryPaint = new Promise<void>((resolve) => {
+      releasePrimary = resolve;
+    });
+    const request = fetchSourcePublication(
+      "core",
+      undefined,
+      "transaction_properties",
+      () => primaryPaint,
+    );
+    let rejected = false;
+    void request.catch(() => {
+      rejected = true;
+    });
+    FakeWorker.instance.emit({
+      type: "primary",
+      requestId: 1,
+      publication: {
+        manifest: publicationManifest,
+        population: populationTransfer,
+        classifiers: [],
+      },
+      timing: workerTiming,
+    });
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    expect(rejected).toBe(false);
+    expect(FakeWorker.instance.postMessage).toHaveBeenLastCalledWith({
+      type: "cancel",
+      requestId: 1,
+    });
+    releasePrimary();
+    await expect(request).rejects.toMatchObject({
+      message: "Atlas v2 publication timed out",
+      name: "TimeoutError",
+    });
+  });
+
+  it("cleans pending state when worker construction fails", async () => {
+    vi.useFakeTimers();
+    class FakeWorker {
+      constructor() {
+        throw new Error("worker construction failed");
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+
+    await expect(fetchSourcePublication("core")).rejects.toThrow(
+      "worker construction failed",
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("preserves a worker problem without duplicating the HTTP prefix", async () => {
     class FakeWorker {
       static instance: FakeWorker;

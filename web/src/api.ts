@@ -604,6 +604,7 @@ interface PendingPublication {
 let publicationWorker: Worker | null = null;
 let publicationSequence = 0;
 const pendingPublications = new Map<number, PendingPublication>();
+const PUBLICATION_DEADLINE_MS = 120_000;
 
 const errorValue = (error: unknown, fallback: string): Error =>
   error instanceof Error ? error : new Error(fallback);
@@ -636,6 +637,7 @@ const cancelPendingPublication = (
   requestId: number,
   pending: PendingPublication,
   error: unknown,
+  afterPrimary = false,
 ): void => {
   if (pendingPublications.get(requestId) !== pending) return;
   pendingPublications.delete(requestId);
@@ -654,7 +656,15 @@ const cancelPendingPublication = (
       );
     }
   }
-  pending.reject(error);
+  if (afterPrimary) {
+    void pending.primaryReady.then(
+      () => pending.reject(error),
+      (primaryError) =>
+        pending.reject(errorValue(primaryError, "Primary publication failed")),
+    );
+  } else {
+    pending.reject(error);
+  }
 };
 
 const worker = (): Worker => {
@@ -766,6 +776,16 @@ export const fetchSourcePublication = async (
       );
     };
     signal?.addEventListener("abort", abort, { once: true });
+    const deadline = globalThis.setTimeout(() => {
+      const pending = pendingPublications.get(requestId);
+      if (pending === undefined) return;
+      cancelPendingPublication(
+        requestId,
+        pending,
+        new DOMException("Atlas v2 publication timed out", "TimeoutError"),
+        true,
+      );
+    }, PUBLICATION_DEADLINE_MS);
     pendingPublications.set(requestId, {
       resolve,
       reject,
@@ -773,9 +793,25 @@ export const fetchSourcePublication = async (
       onPrimary,
       primaryReady: Promise.resolve(),
       primaryDelivered: false,
-      removeAbortListener: () => signal?.removeEventListener("abort", abort),
+      removeAbortListener: () => {
+        signal?.removeEventListener("abort", abort);
+        globalThis.clearTimeout(deadline);
+      },
     });
-    const activeWorker = worker();
+    let activeWorker: Worker;
+    try {
+      activeWorker = worker();
+    } catch (error) {
+      const pending = pendingPublications.get(requestId);
+      if (pending !== undefined) {
+        pendingPublications.delete(requestId);
+        pending.removeAbortListener();
+        pending.reject(
+          errorValue(error, "Atlas v2 worker construction failed"),
+        );
+      }
+      return;
+    }
     try {
       activeWorker.postMessage({
         type: "load",

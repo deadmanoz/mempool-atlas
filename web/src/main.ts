@@ -24,8 +24,8 @@ import {
   classificationResult,
   classifierDescriptor,
   classifierSummary,
-  firstPopulatedLabel,
 } from "./classification-view";
+import { createClassificationOverviewView } from "./classification-overview-view";
 import {
   bucketTerrainRegionCanShowLabel,
   hitTestBucketTerrain,
@@ -332,140 +332,24 @@ const renderCoverage = (): void => {
   coverageUnclassifiedLabel.textContent = "result unavailable";
 };
 
-const classifierMethodologyText = (
-  descriptor: ClassifierDescriptor,
-): string => {
-  if (descriptor.methodology === "exact") {
-    return "Exact observations";
-  }
-  if (descriptor.methodology === "heuristic") {
-    return "Heuristic signals, not proof of intent";
-  }
-  if (descriptor.methodology === "fingerprint") {
-    return "Byte and script fingerprints, not protocol-state validation";
-  }
-  return "Source-local policy compatibility";
-};
+const classificationOverviewView = createClassificationOverviewView(
+  {
+    lensSelect: classificationLensSelect,
+    method: classificationMethod,
+    empty: classificationEmpty,
+    labels: classificationLabels,
+    summary: classificationSummary,
+  },
+  (label) => selectClassifierLabel(label, false),
+);
 
 const renderClassificationOverview = (): void => {
-  const snapshot = currentSnapshot;
-  if (snapshot === null) {
-    classificationLensSelect.replaceChildren();
-    classificationLabels.replaceChildren();
-    classificationEmpty.hidden = false;
-    classificationMethod.replaceChildren();
-    const waiting = document.createElement("strong");
-    waiting.textContent = "Waiting for classifier catalog";
-    const detail = document.createElement("span");
-    detail.textContent =
-      "Atlas publishes the available lenses with each snapshot.";
-    classificationMethod.append(waiting, detail);
-    classificationSummary.textContent =
-      "Independent classifiers remain separate rather than forming one combined taxonomy.";
-    return;
-  }
-
-  const existingOptions = [...classificationLensSelect.options];
-  const optionsMatch =
-    existingOptions.length === snapshot.classifier_catalog.length &&
-    existingOptions.every(
-      (option, index) =>
-        option.value === snapshot.classifier_catalog[index]?.id,
-    );
-  if (optionsMatch) {
-    existingOptions.forEach((option, index) => {
-      option.textContent = snapshot.classifier_catalog[index]?.title ?? "";
-    });
-  } else {
-    classificationLensSelect.replaceChildren(
-      ...snapshot.classifier_catalog.map((descriptor) => {
-        const option = document.createElement("option");
-        option.value = descriptor.id;
-        option.textContent = descriptor.title;
-        return option;
-      }),
-    );
-  }
-  if (
-    !snapshot.classifier_catalog.some(({ id }) => id === selectedClassifierId)
-  ) {
-    selectedClassifierId =
-      snapshot.classifier_catalog[0]?.id ?? DEFAULT_CLASSIFIER_ID;
-  }
-  classificationLensSelect.value = selectedClassifierId;
-
-  const descriptor = currentClassifierDescriptor();
-  const summary = classifierSummary(snapshot, selectedClassifierId);
-  if (descriptor === null || summary === null) {
-    classificationLabels.replaceChildren();
-    classificationEmpty.hidden = false;
-    classificationEmpty.textContent = "This classifier is unavailable.";
-    return;
-  }
-  const selectedIsDeclared = descriptor.labels.some(
-    ({ key }) => key === selectedClassifierLabel,
-  );
-  if (!selectedIsDeclared) {
-    selectedClassifierLabel = firstPopulatedLabel(descriptor, summary);
-  }
-
-  classificationEmpty.hidden = snapshot.transaction_count !== 0;
-  classificationEmpty.textContent = "This snapshot contains an empty mempool.";
-  const methodTitle = document.createElement("strong");
-  methodTitle.textContent = `${classifierMethodologyText(descriptor)} · version ${descriptor.version}`;
-  const methodDetail = document.createElement("span");
-  methodDetail.textContent =
-    descriptor.semantics === "multi_label"
-      ? "Labels can overlap within this lens."
-      : "This lens reports a specialized rule-set outcome.";
-  classificationMethod.replaceChildren(methodTitle, methodDetail);
-
-  const existingButtons = new Map(
-    [...classificationLabels.querySelectorAll<HTMLButtonElement>("button")]
-      .filter(({ dataset }) => dataset.label !== undefined)
-      .map((button) => [button.dataset.label ?? "", button]),
-  );
-  const labelButtons = descriptor.labels.map((label) => {
-    const count = summary.label_counts[label.key] ?? 0;
-    const share =
-      snapshot.transaction_count === 0 ? 0 : count / snapshot.transaction_count;
-    let button = existingButtons.get(label.key);
-    if (button === undefined) {
-      button = document.createElement("button");
-      button.type = "button";
-      button.className = "classification-label";
-      button.dataset.label = label.key;
-      button.append(
-        document.createElement("span"),
-        document.createElement("strong"),
-        document.createElement("small"),
-      );
-      button.addEventListener("click", () => {
-        selectClassifierLabel(label.key, false);
-      });
-    }
-    button.setAttribute(
-      "aria-pressed",
-      String(label.key === selectedClassifierLabel),
-    );
-    button.style.setProperty("--label-share", `${share * 100}%`);
-    const heading = button.querySelector("span");
-    const total = button.querySelector("strong");
-    const description = button.querySelector("small");
-    if (heading !== null) heading.textContent = label.label;
-    if (total !== null) total.textContent = countFormat.format(count);
-    if (description !== null) description.textContent = label.description;
-    return button;
+  const selection = classificationOverviewView.render(currentSnapshot, {
+    classifierId: selectedClassifierId,
+    label: selectedClassifierLabel,
   });
-  const labelOrderMatches =
-    classificationLabels.children.length === labelButtons.length &&
-    labelButtons.every(
-      (button, index) => classificationLabels.children[index] === button,
-    );
-  if (!labelOrderMatches) {
-    classificationLabels.replaceChildren(...labelButtons);
-  }
-  classificationSummary.textContent = `${countFormat.format(summary.complete_count)} complete, ${countFormat.format(summary.partial_count)} partial, and ${countFormat.format(summary.unclassified_count)} unavailable results. Marginal label totals may overlap.`;
+  selectedClassifierId = selection.classifierId;
+  selectedClassifierLabel = selection.label;
 };
 
 const inspectorRules = (): RuleId[] => TERRAIN_RULES.map(({ id }) => id);
@@ -2240,14 +2124,22 @@ const loadSnapshot = async (): Promise<void> => {
       (partialAvailable
         ? `The selected classifier and transaction search remain available. Membership-dependent features did not finish loading: ${message}`
         : `The prior complete snapshot remains usable. Refresh failed: ${message}`);
-    if (currentSnapshot === null && source !== undefined) {
-      sourceSummaryView.renderMetadata(source, false);
-    } else if (currentSnapshot !== null) {
+    if (currentSnapshot === null) {
+      if (source === undefined) {
+        sourceSummaryView.renderDiscoveryFailure();
+      } else {
+        sourceSummaryView.renderMetadata(source, false);
+      }
+    } else {
       sourceSummaryView.setBusy(false);
     }
     setAtlasLoadPhase(
       pageStatus,
-      currentSnapshot === null ? "metadata-ready" : "interactive",
+      currentSnapshot === null && source === undefined
+        ? "discovering-sources"
+        : currentSnapshot === null
+          ? "metadata-ready"
+          : "interactive",
     );
   } finally {
     if (snapshotLifecycle.isCurrent(ticket)) {

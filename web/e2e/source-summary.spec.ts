@@ -303,6 +303,11 @@ const documentOverflow = async (page: Page): Promise<number> =>
   });
 
 test.describe("early source metadata", () => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    await useMinimumSupportedWidth(page, testInfo);
+    await installLayoutShiftObserver(page);
+  });
+
   test("presents an expected first publication wait without an outage", async ({
     page,
   }) => {
@@ -414,9 +419,62 @@ test.describe("early source metadata", () => {
     );
   });
 
-  test.beforeEach(async ({ page }, testInfo) => {
-    await useMinimumSupportedWidth(page, testInfo);
-    await installLayoutShiftObserver(page);
+  test("clears the busy summary when first-publication rediscovery fails", async ({
+    page,
+  }) => {
+    let discoveries = 0;
+    await page.route(/\/api\/v2\/sources(?:\?.*)?$/, async (route) => {
+      discoveries += 1;
+      if (discoveries === 1) {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 503,
+        contentType: "application/problem+json",
+        json: {
+          type: "sources_unavailable",
+          title: "Source discovery unavailable",
+          status: 503,
+          detail: "Unable to refresh source metadata.",
+        },
+      });
+    });
+    await page.route(
+      /\/api\/v2\/sources\/vps-core-01\/mempool(?:\?.*)?$/,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/problem+json",
+          json: {
+            type: "v2_unavailable",
+            title: "Current v2 publication unavailable",
+            status: 503,
+            detail:
+              "Atlas has not published a current complete snapshot for this source.",
+          },
+        });
+      },
+    );
+
+    await page.goto("/?source=vps-core-01");
+
+    const summary = page.locator("#source-summary");
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-phase",
+      "discovering-sources",
+    );
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-state",
+      "error",
+    );
+    await expect(summary).toHaveAttribute("data-phase", "discovering-sources");
+    await expect(summary).toHaveAttribute("data-state", "error");
+    await expect(summary).toHaveAttribute("aria-busy", "false");
+    await expect(page.locator("#status-title")).toHaveText(
+      "Atlas website unavailable",
+    );
+    await expect(page.locator("#refresh")).toBeEnabled();
   });
 
   test("keeps the node summary useful while the snapshot is loading", async ({

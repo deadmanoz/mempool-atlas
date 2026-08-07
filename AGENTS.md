@@ -32,6 +32,8 @@ lenses, and serves source-local node and comparison views.
   honesty, and the shared node/comparison loading phases.
 - `web/src/source-summary-styles.css` owns the node source-summary component
   and all of its breakpoints.
+- `web/src/classification-overview-view.ts` owns the node lens selector,
+  methodology, marginal-label controls, and classification summary subtree.
 - `web/src/snapshot-distributions.ts` owns aggregate-only distribution models
   and caching. The two `*-distributions-view.ts` modules own their complete
   node and comparison distribution DOM subtrees.
@@ -63,8 +65,11 @@ Use `just` targets whenever one exists:
   Atlas API, after a one-time `just test-web-e2e-install`.
 - `just functional-fixtures` exports the small Rust-owned functional profile.
 - `just perf-fixtures` also exports the 70,000-transaction performance profile.
+- `just stage-projection` regenerates and enforces the checked staged-byte
+  projection. Run it with exactly Node.js 22.23.2 so gzip output matches CI.
 - `just perf-web` builds the production web assets, runs the desktop and Slow
-  4G performance matrix in normal Chromium, and writes the merged result.
+  4G performance matrix in normal Chromium, and writes the merged result. Run
+  it with exactly Node.js 22.23.2 because it includes `stage-projection`.
 - `just lint` runs structure checks, Rust formatting and Clippy, Prettier, and
   TypeScript.
 - `just format` formats Rust and frontend source.

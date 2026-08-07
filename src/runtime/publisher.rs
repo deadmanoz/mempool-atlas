@@ -168,11 +168,11 @@ impl CurrentStatePublisher {
             {
                 continue;
             }
+            if let Some(manifest) = replacement {
+                replace_manifest(&mut state, manifest)?;
+            }
             state.last_poll_started_at_ms = Some(started_at_ms);
             state.status_revision = state.status_revision.wrapping_add(1);
-            if let Some(manifest) = replacement {
-                replace_manifest(&mut state, manifest);
-            }
             return Ok(());
         }
     }
@@ -567,11 +567,11 @@ impl CurrentStatePublisher {
             {
                 continue;
             }
-            state.classification_state = Some(classification_state);
-            state.status_revision = state.status_revision.wrapping_add(1);
             let encoded_bytes = manifest.bytes.len();
             let publication_id = manifest.value.publication_id.clone();
-            replace_manifest(&mut state, manifest);
+            replace_manifest(&mut state, manifest)?;
+            state.classification_state = Some(classification_state);
+            state.status_revision = state.status_revision.wrapping_add(1);
             let total_classified_count = state.classifications.len();
             let commit_ms = commit_started_at.elapsed().as_millis();
             drop(state);
@@ -640,16 +640,16 @@ impl CurrentStatePublisher {
             {
                 continue;
             }
-            state.last_error = Some(error);
-            state.status_revision = state.status_revision.wrapping_add(1);
             let (publication_id, encoded_bytes) = if let Some(manifest) = manifest {
                 let publication_id = manifest.value.publication_id.clone();
                 let encoded_bytes = manifest.bytes.len();
-                replace_manifest(&mut state, manifest);
+                replace_manifest(&mut state, manifest)?;
                 (Some(publication_id), encoded_bytes)
             } else {
                 (None, 0)
             };
+            state.last_error = Some(error);
+            state.status_revision = state.status_revision.wrapping_add(1);
             let total_classified_count = state.classifications.len();
             let commit_ms = commit_started_at.elapsed().as_millis();
             drop(state);
@@ -898,13 +898,17 @@ fn published_stage(stage: EncodedStage) -> PublishedStage {
     }
 }
 
-fn replace_manifest(state: &mut CurrentState, manifest: EncodedManifest) {
+fn replace_manifest(
+    state: &mut CurrentState,
+    manifest: EncodedManifest,
+) -> Result<(), RuntimeError> {
     let publication = state
         .publication
         .as_mut()
-        .expect("a retained manifest is only replaced for an existing publication");
+        .ok_or(RuntimeError::PublicationStateWithoutBundle)?;
     publication.manifest_value = manifest.value;
     publication.manifest = encoded_manifest_body(manifest.content_id, manifest.bytes);
+    Ok(())
 }
 
 fn manifest_etag(content_id: &str) -> String {
@@ -983,5 +987,53 @@ fn summary_from_parts(
         total_vsize: latest.map(|snapshot| snapshot.total_vsize),
         classification,
         last_error: last_error.map(str::to_owned),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ChainTip;
+
+    #[test]
+    fn manifest_replacement_reports_a_missing_publication_bundle() {
+        let publisher = CurrentStatePublisher::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            Duration::from_secs(30),
+        );
+        let snapshot = Arc::new(
+            MempoolSnapshot::new(
+                "core".to_owned(),
+                "Bitcoin Core".to_owned(),
+                1_700_000_000_000,
+                ChainTip {
+                    height: 900_000,
+                    hash: "00".repeat(32),
+                },
+                Vec::new(),
+            )
+            .expect("snapshot"),
+        );
+        let source = summary_from_parts(
+            &publisher,
+            None,
+            Some(&snapshot),
+            Some(ClassificationState::Complete),
+            None,
+        );
+        let manifest = encode_staged_snapshot_with_limits(
+            &source,
+            &snapshot,
+            None,
+            StagedSnapshotLimits::default(),
+        )
+        .expect("encoded staged snapshot")
+        .manifest;
+
+        let error = replace_manifest(&mut CurrentState::default(), manifest)
+            .expect_err("missing publication bundle must be reported");
+
+        assert!(matches!(error, RuntimeError::PublicationStateWithoutBundle));
     }
 }

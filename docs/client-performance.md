@@ -111,6 +111,11 @@ Both products must retain their primary view during bounded publication churn.
 They may replace it only with another internally coherent publication and must
 never combine stages declared by different manifests.
 
+Each per-source publication load has a 120-second browser deadline. This leaves
+headroom above the 94-second comparison readiness gate while ensuring a stalled
+manifest or stage request returns control to the existing retained-publication
+and partial-availability handling.
+
 The node performance case activates and settles the complete BIP-110 terrain as
 setup, then cycles all seven rule controls inside a dedicated responsiveness
 interval. The release gate covers both the synchronous handlers and the cached

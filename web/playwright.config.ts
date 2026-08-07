@@ -8,7 +8,9 @@ import { defineConfig, devices } from "@playwright/test";
 // attaches to, or fights with, a `just web-dev` server already in use. The
 // fixture API port is fixed by `vite.config.ts`'s `/api` proxy. Every run owns
 // a fresh fixture process so it must load the manifest generated immediately
-// before Playwright starts.
+// before Playwright starts. `reuseExistingServer: false` also means an occupied
+// port fails the run instead of attaching to a stale fixture or Vite process;
+// stop any process on 3101 or 5174 before rerunning the suite.
 const FIXTURE_API_PORT = 3101;
 const PREVIEW_PORT = 5174;
 

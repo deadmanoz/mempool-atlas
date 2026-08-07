@@ -171,11 +171,27 @@ prescribing unavailable per-route rules. The production arm matches
 `atlas.example.com` with paths beginning `/api/v2/`, allows 50 requests per
 IP per 10 seconds, and blocks for 10 seconds when exceeded.
 
-A normal node view requests one manifest and progressively requests its stages.
-A normal comparison does the same for two sources concurrently. Choose
-thresholds from observed traffic and allow those flows without a challenge.
-Apply the strongest limit to population and membership stages because they
-carry the largest bandwidth and slow-reader cost.
+A stable cold node publication load makes two manifest reads and seven stage
+reads, for nine staged-publication requests. The first manifest plus the
+population and selected-classifier stages make the primary view interactive;
+the second manifest precedes the complete seven-stage publication, with the two
+already loaded stages reused in the browser. A stable cold comparison performs
+that flow for both sources concurrently: four manifest reads and fourteen stage
+reads, for eighteen staged-publication requests. Source discovery is one
+additional request per page load, and opening transaction detail adds another.
+
+Treat those counts as the no-retry floor, not as the rate-limit threshold.
+Every `429` request can be retried up to three times after its initial attempt,
+and a superseded `409` can restart a whole-publication load up to three times;
+unchanged content-addressed stages are reused where possible. The documented
+50-request window admits a stable comparison with headroom, but five
+simultaneous cold node loads consume 45 staged requests plus five
+source-discovery requests before any detail, retry, or supersession. Choose the
+production threshold from observed cold-burst traffic and origin capacity, and
+do not count client retries as spare capacity. Apply the strongest separate
+limit available to population and membership stages because they carry the
+largest bandwidth and slow-reader cost.
+
 Validate the rule in staging before enabling a blocking action. Cloudflare's
 [rate-limiting documentation](https://developers.cloudflare.com/waf/rate-limiting-rules/)
 describes the fields and actions available to each plan.
@@ -247,24 +263,29 @@ The application package exposes `/api/v2` as its single public API contract.
 
 1. Add a temporary fail-closed edge rule for the Atlas hostname while the
    release is switched.
-2. Preflight the manifest/stage cache rules, no-stale behavior, CSP worker
+2. Delete every old `/api/v1` Cache Rule, cache exception, transform, and rate
+   limit path arm while the temporary block remains active. Do not retain a
+   compatibility route or proxy.
+3. Preflight the v2 manifest/stage cache rules, no-stale behavior, CSP worker
    allowance, method rule, WAF policy, and rate limits. Keep the temporary block
    active.
-3. Switch the single pinned Nix package containing the matching server and
+4. Switch the single pinned Nix package containing the matching server and
    browser.
-4. Verify loopback discovery, manifest, every declared stage, detail, and
+5. Verify loopback discovery, manifest, every declared stage, detail, and
    validators. Then remove the temporary edge block.
-5. Run `just smoke-public`, ten cold sequential node loads, five cold concurrent
+6. Run `just smoke-public`, ten cold sequential node loads, five cold concurrent
    node loads, and the worst-case comparison load through the public hostname.
 
 The edge and Nix control planes cannot change atomically. The temporary block
 makes the gap fail closed instead of serving mixed generations.
 
 Rollback is limited to another reviewed v2 revision with the same edge
-contract. First restore the temporary edge block. Switch the fleet lock,
-restore the matching Cloudflare cache and security rules, purge the
-`atlas.example.com/api/v2` prefix, and only then remove the block and run the
-smoke test. A Nix rollback does not revert Cloudflare state by itself.
+contract. There is no rollback to v1, and no v1 route, adapter, or Cache Rule
+should remain after this cutover. First restore the temporary edge block.
+Switch the fleet lock, restore the matching Cloudflare cache and security
+rules, purge the `atlas.example.com/api/v2` prefix, and only then remove the
+block and run the smoke test. A Nix rollback does not revert Cloudflare state
+by itself.
 
 ## Failure and rollback checks
 

@@ -799,9 +799,18 @@ mod tests {
             .to_str()
             .expect("ETag")
             .to_owned();
+        let content_id = response.headers()[X_ATLAS_CONTENT_ID]
+            .to_str()
+            .expect("content ID")
+            .to_owned();
+        let uncompressed_length = response.headers()[X_ATLAS_UNCOMPRESSED_LENGTH]
+            .to_str()
+            .expect("uncompressed length")
+            .to_owned();
         assert!(etag.starts_with("W/\"atlas-v2-manifest-"));
 
         let response = application
+            .clone()
             .oneshot(
                 Request::get(path)
                     .header(header::IF_NONE_MATCH, format!("\"other\", {etag}"))
@@ -815,6 +824,33 @@ mod tests {
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
             SNAPSHOT_CACHE_CONTROL
+        );
+        assert!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body")
+                .is_empty()
+        );
+
+        let response = application
+            .oneshot(
+                Request::head(path)
+                    .header(header::IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()[header::ETAG], etag);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            SNAPSHOT_CACHE_CONTROL
+        );
+        assert_eq!(response.headers()[X_ATLAS_CONTENT_ID], content_id);
+        assert_eq!(
+            response.headers()[X_ATLAS_UNCOMPRESSED_LENGTH],
+            uncompressed_length
         );
         assert!(
             to_bytes(response.into_body(), usize::MAX)
@@ -1154,6 +1190,14 @@ mod tests {
 
         let (status, policy) = cache_control(
             application.clone(),
+            "/api/v2/sources/core/mempool?variant=old",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(policy.as_deref(), Some(NO_STORE));
+
+        let (status, policy) = cache_control(
+            application.clone(),
             &format!(
                 "/api/v2/sources/core/mempool/stages/population/{}",
                 "00".repeat(32)
@@ -1223,6 +1267,17 @@ mod tests {
             ),
             (
                 format!("/api/v2/sources/core/mempool/stages/membership/{population_id}"),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/api/v2/sources/knots/mempool/stages/population/not-a-digest".to_owned(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                format!(
+                    "/api/v2/sources/knots/mempool/stages/population/{}",
+                    "00".repeat(32)
+                ),
                 StatusCode::NOT_FOUND,
             ),
         ] {

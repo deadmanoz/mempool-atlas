@@ -205,9 +205,12 @@ therefore visible before stage loading begins. The shared source
 view keeps discovery, metadata, snapshot loading, derivation, and interactive
 phases separate from ready, stale, waiting, and error availability.
 
-A dedicated worker fetches and validates the current manifest, population, and
-selected classifier lane for the primary view. Membership, structure, and the
-remaining catalog lanes progress behind that primary quorum. Stage digests,
+A dedicated worker first fetches and validates the current manifest,
+population, and selected classifier lane for the primary view. It then reads
+the manifest again before completing membership, structure, and the remaining
+catalog lanes behind that primary quorum. On a stable publication, the second
+pass reuses the population and selected-classifier stages already held by the
+worker. Stage digests,
 dependency identifiers, row counts, and publication identity are checked before
 the worker commits one internally coherent packed store. Superseded-stage `409`
 responses trigger a bounded whole-publication retry; the browser never combines
@@ -218,7 +221,10 @@ on demand rather than retaining the former full-row object graph.
 The node viewer renders one source snapshot. Its default Classifications view
 lets the user select one declared lens, inspect marginal label populations, and
 open matching transaction samples. Multi-label populations can overlap. The
-browser does not combine labels from different classifiers.
+browser does not combine labels from different classifiers. The dedicated
+classification overview view owns that lens selector, methodology, marginal
+label controls, and summary DOM subtree while `main.ts` coordinates it with
+the remaining node-page views.
 
 The same selection drives the Buckets view. Classifier lenses partition
 transactions by complete, partial, or unavailable coverage and a lens-specific
