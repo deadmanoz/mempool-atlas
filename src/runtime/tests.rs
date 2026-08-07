@@ -17,6 +17,8 @@ use crate::{
     ClassificationLimits,
 };
 
+mod staged_publication;
+
 #[derive(Debug)]
 struct BlockingClassificationFixture {
     raw_transactions: BTreeMap<String, String>,
@@ -280,7 +282,7 @@ async fn wait_for_classified(runtime: &SourceRuntime, expected: u64) {
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let snapshot = runtime
-                .snapshot_response()
+                .published_state()
                 .await
                 .snapshot
                 .expect("published snapshot");
@@ -472,7 +474,7 @@ fn classification_report(
 }
 
 fn assert_classification_progress(
-    response: &SourceSnapshotResponse,
+    response: &publisher::PublishedState,
     state: ClassificationState,
     revision: u64,
     classified_count: u64,
@@ -552,12 +554,15 @@ async fn successful_snapshot_replaces_current_state() {
         SourceAvailability::Waiting
     );
 
-    runtime.record_poll_started(10).await;
+    runtime
+        .record_poll_started(10)
+        .await
+        .expect("record poll start");
     runtime
         .record_success(observation(20))
         .await
         .expect("record snapshot");
-    let response = runtime.snapshot_response().await;
+    let response = runtime.published_state().await;
 
     assert_eq!(response.source.availability, SourceAvailability::Ready);
     assert_eq!(response.source.last_poll_started_at_ms, Some(10));
@@ -988,7 +993,7 @@ async fn membership_publishes_before_background_slices_drain_one_wakeup() {
     runtime.classification_wakeup.notify_one();
     wait_for_raw_batches(&fixture, 1).await;
 
-    let before_release = runtime.snapshot_response().await;
+    let before_release = runtime.published_state().await;
     assert_classification_progress(&before_release, ClassificationState::Classifying, 0, 0, 3);
     let before_release_snapshot = before_release.snapshot.expect("published membership");
     assert_eq!(
@@ -1009,7 +1014,7 @@ async fn membership_publishes_before_background_slices_drain_one_wakeup() {
     fixture.release_raw_batch.add_permits(1);
     wait_for_raw_batches(&fixture, 2).await;
     wait_for_classified(&runtime, 2).await;
-    let after_first_slice = runtime.snapshot_response().await;
+    let after_first_slice = runtime.published_state().await;
     assert_classification_progress(
         &after_first_slice,
         ClassificationState::Classifying,
@@ -1031,7 +1036,7 @@ async fn membership_publishes_before_background_slices_drain_one_wakeup() {
 
     fixture.release_raw_batch.add_permits(1);
     wait_for_classified(&runtime, 3).await;
-    let complete_response = runtime.snapshot_response().await;
+    let complete_response = runtime.published_state().await;
     assert_classification_progress(&complete_response, ClassificationState::Complete, 2, 3, 0);
     let complete = complete_response.snapshot.expect("complete snapshot");
     assert_eq!(complete.observed_at_ms, 20);
@@ -1074,7 +1079,7 @@ async fn revision_zero_lifecycle_uses_actual_eligible_work_and_exact_carry() {
         .record_membership(first_publication)
         .await
         .expect("publish first membership");
-    let initial = runtime.snapshot_response().await;
+    let initial = runtime.published_state().await;
     assert_classification_progress(&initial, ClassificationState::Classifying, 0, 0, 1);
 
     fixture.release_raw_batch.add_permits(1);
@@ -1089,7 +1094,7 @@ async fn revision_zero_lifecycle_uses_actual_eligible_work_and_exact_carry() {
             .await
             .expect("publish completed first membership")
     );
-    let first_complete = runtime.snapshot_response().await;
+    let first_complete = runtime.published_state().await;
     assert_classification_progress(&first_complete, ClassificationState::Complete, 1, 1, 0);
 
     let carried_publication = classification
@@ -1106,7 +1111,7 @@ async fn revision_zero_lifecycle_uses_actual_eligible_work_and_exact_carry() {
         .await
         .expect("publish replacement membership");
 
-    let carried = runtime.snapshot_response().await;
+    let carried = runtime.published_state().await;
     assert_classification_progress(&carried, ClassificationState::Complete, 0, 1, 0);
     assert_eq!(
         carried
@@ -1122,14 +1127,14 @@ async fn revision_zero_lifecycle_uses_actual_eligible_work_and_exact_carry() {
 }
 
 #[tokio::test]
-async fn state_only_completion_preserves_unclassified_revision_and_reencodes_response() {
+async fn state_only_completion_preserves_unclassified_revision_and_reencodes_manifest() {
     let runtime = runtime();
     runtime
         .record_membership(membership_publication(1, true, observation(20)))
         .await
         .expect("publish membership");
     let before = runtime
-        .snapshot_response_bytes()
+        .manifest_bytes()
         .await
         .expect("classifying response");
 
@@ -1144,26 +1149,23 @@ async fn state_only_completion_preserves_unclassified_revision_and_reencodes_res
             .expect("publish state-only completion")
     );
 
-    let response = runtime.snapshot_response().await;
+    let response = runtime.published_state().await;
     assert_classification_progress(&response, ClassificationState::Complete, 0, 0, 1);
     let snapshot = response.snapshot.as_ref().expect("retained snapshot");
     assert_eq!(snapshot.classification_revision, 0);
     assert_eq!(snapshot.bip110_summary.unclassified_count, 1);
 
-    let after = runtime
-        .snapshot_response_bytes()
-        .await
-        .expect("completed response");
+    let after = runtime.manifest_bytes().await.expect("completed response");
     assert_ne!(before.as_ptr(), after.as_ptr());
     let encoded = serde_json::from_slice::<Value>(&after).expect("response JSON");
     assert_eq!(encoded["source"]["classification"]["state"], "complete");
     assert_eq!(encoded["source"]["classification"]["revision"], 0);
-    assert_eq!(encoded["snapshot"]["classification_revision"], 0);
+    assert_eq!(encoded["classification_revision"], 0);
     assert_eq!(encoded["source"]["classification"]["unclassified_count"], 1);
 }
 
 #[tokio::test]
-async fn publication_and_pause_replace_snapshot_and_lifecycle_atomically() {
+async fn publication_and_pause_replace_domain_bundle_and_lifecycle_atomically() {
     let runtime = runtime();
     let txid = "00".repeat(32);
     runtime
@@ -1183,7 +1185,7 @@ async fn publication_and_pause_replace_snapshot_and_lifecycle_atomically() {
             .expect("publish assessment and pause")
     );
 
-    let response = runtime.snapshot_response().await;
+    let response = runtime.published_state().await;
     assert_classification_progress(&response, ClassificationState::Paused, 1, 1, 0);
     let snapshot = response.snapshot.as_ref().expect("paused snapshot");
     assert_eq!(snapshot.classification_revision, 1);
@@ -1196,14 +1198,11 @@ async fn publication_and_pause_replace_snapshot_and_lifecycle_atomically() {
         })
     ));
 
-    let encoded = runtime
-        .snapshot_response_bytes()
-        .await
-        .expect("paused response");
+    let encoded = runtime.manifest_bytes().await.expect("paused response");
     let encoded = serde_json::from_slice::<Value>(&encoded).expect("response JSON");
     assert_eq!(encoded["source"]["classification"]["state"], "paused");
     assert_eq!(encoded["source"]["classification"]["revision"], 1);
-    assert_eq!(encoded["snapshot"]["classification_revision"], 1);
+    assert_eq!(encoded["classification_revision"], 1);
 }
 
 #[tokio::test]
@@ -1225,7 +1224,7 @@ async fn retryable_replacement_updates_summary_and_detail_atomically() {
             .await
             .expect("publish retryable classification")
     );
-    let retryable = runtime.snapshot_response().await;
+    let retryable = runtime.published_state().await;
     assert_classification_progress(&retryable, ClassificationState::Classifying, 1, 1, 0);
     assert_eq!(
         retryable
@@ -1261,7 +1260,7 @@ async fn retryable_replacement_updates_summary_and_detail_atomically() {
             .await
             .expect("replace retryable classification")
     );
-    let complete = runtime.snapshot_response().await;
+    let complete = runtime.published_state().await;
     assert_classification_progress(&complete, ClassificationState::Complete, 2, 1, 0);
     let summary = &complete.snapshot.expect("complete snapshot").bip110_summary;
     assert_eq!(summary.compatible_count, 1);
@@ -1315,7 +1314,7 @@ async fn stale_generation_during_preparation_cannot_replace_body_or_etag() {
         .await
         .expect("publish replacement membership");
     let replacement = runtime
-        .snapshot_response_payload()
+        .current_manifest_payload()
         .await
         .expect("replacement payload");
     block.release();
@@ -1327,7 +1326,7 @@ async fn stale_generation_during_preparation_cannot_replace_body_or_etag() {
     );
 
     let after_stale = runtime
-        .snapshot_response_payload()
+        .current_manifest_payload()
         .await
         .expect("payload after stale prepare");
     assert_eq!(replacement.body.as_ptr(), after_stale.body.as_ptr());
@@ -1358,7 +1357,7 @@ async fn publisher_rejects_more_retained_classifications_than_membership() {
         .next()
         .expect("extra classification");
     let before = runtime
-        .snapshot_response_payload()
+        .current_manifest_payload()
         .await
         .expect("membership payload");
 
@@ -1376,7 +1375,7 @@ async fn publisher_rejects_more_retained_classifications_than_membership() {
         })
     ));
     let after = runtime
-        .snapshot_response_payload()
+        .current_manifest_payload()
         .await
         .expect("unchanged membership payload");
     assert_eq!(before.body.as_ptr(), after.body.as_ptr());
@@ -1441,7 +1440,7 @@ async fn stale_slice_waits_for_replacement_membership_publication() {
     fixture.release_raw_batch.add_permits(1);
     wait_for_classified(&runtime, 1).await;
     let replacement = runtime
-        .snapshot_response()
+        .published_state()
         .await
         .snapshot
         .expect("replacement progress");
@@ -1509,7 +1508,7 @@ async fn replacement_generation_cannot_start_before_membership_publication() {
     fixture.release_raw_batch.add_permits(1);
     wait_for_classified(&runtime, 1).await;
     let replacement = runtime
-        .snapshot_response()
+        .published_state()
         .await
         .snapshot
         .expect("replacement progress");
@@ -1562,7 +1561,7 @@ async fn systemic_classification_failure_pauses_until_the_next_membership() {
         .is_err(),
         "a systemic classification failure must not drain the remaining generation"
     );
-    let paused = runtime.snapshot_response().await;
+    let paused = runtime.published_state().await;
     assert_classification_progress(&paused, ClassificationState::Paused, 0, 0, 3);
     let snapshot = paused.snapshot.expect("membership remains visible");
     assert_eq!(snapshot.transaction_count, 3);
@@ -1576,7 +1575,7 @@ async fn systemic_classification_failure_pauses_until_the_next_membership() {
         .record_membership(replacement)
         .await
         .expect("publish replacement membership");
-    let restarted = runtime.snapshot_response().await;
+    let restarted = runtime.published_state().await;
     assert_classification_progress(&restarted, ClassificationState::Classifying, 0, 0, 3);
     assert_eq!(
         restarted
@@ -1611,10 +1610,7 @@ async fn stale_or_nonadvancing_classification_progress_cannot_replace_runtime_st
         ))
         .await
         .expect("record current membership");
-    let before_stale = runtime
-        .snapshot_response_bytes()
-        .await
-        .expect("current bytes");
+    let before_stale = runtime.manifest_bytes().await.expect("current bytes");
     let current_lifecycle = runtime
         .summary()
         .await
@@ -1633,7 +1629,7 @@ async fn stale_or_nonadvancing_classification_progress_cannot_replace_runtime_st
             .expect("discard stale outcome")
     );
     let after_stale_outcome = runtime
-        .snapshot_response_bytes()
+        .manifest_bytes()
         .await
         .expect("bytes after stale outcome");
     assert_eq!(before_stale.as_ptr(), after_stale_outcome.as_ptr());
@@ -1653,13 +1649,13 @@ async fn stale_or_nonadvancing_classification_progress_cannot_replace_runtime_st
             .expect("discard stale progress")
     );
     let after_stale = runtime
-        .snapshot_response_bytes()
+        .manifest_bytes()
         .await
         .expect("bytes after stale progress");
     assert_eq!(before_stale.as_ptr(), after_stale.as_ptr());
     assert_eq!(
         runtime
-            .snapshot_response()
+            .published_state()
             .await
             .snapshot
             .expect("current snapshot")
@@ -1696,7 +1692,7 @@ async fn stale_or_nonadvancing_classification_progress_cannot_replace_runtime_st
             .expect("complete current generation")
     );
     let current_bytes = runtime
-        .snapshot_response_bytes()
+        .manifest_bytes()
         .await
         .expect("current progress bytes");
     let completed_lifecycle = runtime
@@ -1729,7 +1725,7 @@ async fn stale_or_nonadvancing_classification_progress_cannot_replace_runtime_st
                 .expect("discard non-advancing progress")
         );
         let after_nonadvancing = runtime
-            .snapshot_response_bytes()
+            .manifest_bytes()
             .await
             .expect("bytes after non-advancing progress");
         assert_eq!(current_bytes.as_ptr(), after_nonadvancing.as_ptr());
@@ -1761,17 +1757,20 @@ async fn failed_poll_retains_last_good_snapshot_as_stale() {
             .await
             .expect("complete classification")
     );
-    let before_response = runtime.snapshot_response().await;
+    let before_response = runtime.published_state().await;
     assert_classification_progress(&before_response, ClassificationState::Complete, 0, 0, 1);
     let before_progress = before_response.source.classification.clone();
     let before = before_response.snapshot.expect("snapshot");
 
-    runtime.record_poll_started(30).await;
+    runtime
+        .record_poll_started(30)
+        .await
+        .expect("record poll start");
     runtime
         .record_failure("node unavailable".to_owned())
         .await
         .expect("record failure");
-    let response = runtime.snapshot_response().await;
+    let response = runtime.published_state().await;
     let after = response.snapshot.expect("retained snapshot");
 
     assert_eq!(response.source.availability, SourceAvailability::Stale);
@@ -1792,7 +1791,7 @@ async fn failure_before_first_snapshot_is_an_error() {
         .await
         .expect("record failure");
 
-    let response = runtime.snapshot_response().await;
+    let response = runtime.published_state().await;
     assert_eq!(response.source.availability, SourceAvailability::Error);
     assert!(response.snapshot.is_none());
 }
@@ -1831,25 +1830,19 @@ async fn registry_keeps_sources_independent() {
 }
 
 #[tokio::test]
-async fn encoded_snapshot_response_is_shared_between_requests() {
+async fn encoded_manifest_is_shared_between_requests() {
     let runtime = runtime();
     runtime
         .record_success(observation(20))
         .await
         .expect("record snapshot");
 
-    let first = runtime
-        .snapshot_response_bytes()
-        .await
-        .expect("first response");
-    let second = runtime
-        .snapshot_response_bytes()
-        .await
-        .expect("second response");
+    let first = runtime.manifest_bytes().await.expect("first response");
+    let second = runtime.manifest_bytes().await.expect("second response");
 
     assert_eq!(first.as_ptr(), second.as_ptr());
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&first).expect("JSON response")["snapshot"]["transaction_count"],
+        serde_json::from_slice::<serde_json::Value>(&first).expect("JSON response")["transaction_count"],
         1
     );
 }

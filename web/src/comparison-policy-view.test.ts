@@ -7,6 +7,7 @@ import {
   COMPARISON_POLICY_MATRIX_CHIP_LIMIT,
   COMPARISON_POLICY_SAMPLE_LIMIT,
   buildComparisonPolicyView,
+  buildComparisonPolicyViewCooperatively,
   comparisonPolicyMatrixRowPresentation,
   comparisonPolicyMatrixTarget,
 } from "./comparison-policy-view";
@@ -413,6 +414,42 @@ describe("comparison policy view", () => {
     expect(first.sample.map(({ txid: id }) => id)).toEqual(expected);
     expect(first).not.toHaveProperty("entries");
     expect(first).not.toHaveProperty("transactions");
+  });
+
+  it("builds the same aggregates cooperatively across bounded batches", async () => {
+    const synchronous = buildComparisonPolicyView(comparison);
+    let yields = 0;
+    const cooperative = await buildComparisonPolicyViewCooperatively(
+      comparison,
+      {
+        batchSize: 2,
+        yieldBetweenBatches: () => {
+          yields += 1;
+        },
+      },
+    );
+
+    expect(cooperative.rows).toEqual(synchronous.rows);
+    for (const [region, side] of [
+      ["left_only", "left"],
+      ["common", "left"],
+      ["common", "right"],
+      ["right_only", "right"],
+    ] as const) {
+      expect(cooperative.slice(region, side)).toEqual(
+        synchronous.slice(region, side),
+      );
+      for (const filter of [
+        { kind: "all" } as const,
+        { kind: "status", status: "violating" } as const,
+        { kind: "rule", rule: "element_size" } as const,
+      ]) {
+        expect(cooperative.population(region, side, filter)).toEqual(
+          synchronous.population(region, side, filter),
+        );
+      }
+    }
+    expect(yields).toBeGreaterThan(0);
   });
 
   it("caches zero-total populations without scanning source entries", () => {

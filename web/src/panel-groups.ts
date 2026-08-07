@@ -6,6 +6,7 @@ import {
 } from "./classifier-terrain";
 import type { DistributionMetric, TransactionGroup } from "./fee-distribution";
 import { countFormat } from "./format";
+import { concatenateTransactionViews } from "./transaction-view";
 import type { ClassifierDescriptor, MempoolTransaction } from "./types";
 
 export const PANEL_GROUP_LIMIT = 6;
@@ -54,7 +55,7 @@ export const panelBucketGroups = (
       .slice(0, limit),
   );
   const groups: PanelBucketGroup[] = [];
-  const rest: MempoolTransaction[] = [];
+  const rest: (readonly MempoolTransaction[])[] = [];
   let restCount = 0;
   for (const bucket of buckets) {
     if (largest.has(bucket)) {
@@ -68,7 +69,7 @@ export const panelBucketGroups = (
         bucketKey: bucket.key,
       });
     } else {
-      rest.push(...bucket.transactions);
+      rest.push(bucket.transactions);
       restCount += 1;
     }
   }
@@ -77,7 +78,7 @@ export const panelBucketGroups = (
       key: "overflow",
       label: `${countFormat.format(restCount)} more buckets`,
       color: OVERFLOW_GROUP_COLOR,
-      transactions: rest,
+      transactions: concatenateTransactionViews(transactions, rest),
       bucketKey: null,
     });
   }

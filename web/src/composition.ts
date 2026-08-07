@@ -3,6 +3,10 @@ import {
   classifierBucketLabel,
   classifierBuckets,
 } from "./classifier-terrain";
+import {
+  forEachCooperatively,
+  type CooperativeWorkOptions,
+} from "./cooperative-work";
 import type { DistributionMetric } from "./fee-distribution";
 import type { ClassifierDescriptor, MempoolTransaction } from "./types";
 
@@ -39,12 +43,13 @@ export const buildCompositionBar = (
   metric: DistributionMetric,
   maxSegments: number = COMPOSITION_MAX_SEGMENTS,
 ): CompositionBar => {
-  const totalWeight = transactions.reduce(
-    (total, transaction) =>
-      total + (metric === "count" ? 1 : transaction.vsize),
+  const classifierPopulations = classifierBuckets(transactions, descriptor);
+  const totalWeight = classifierPopulations.reduce(
+    (total, bucket) =>
+      total + (metric === "count" ? bucket.count : bucket.vsize),
     0,
   );
-  const buckets = classifierBuckets(transactions, descriptor).map((bucket) => ({
+  const buckets = classifierPopulations.map((bucket) => ({
     key: bucket.key,
     label: classifierBucketLabel(descriptor, bucket),
     color: classifierBucketColor(descriptor, bucket),
@@ -139,52 +144,64 @@ const relativeBand = (count: number): RelativeBand => {
   return RELATIVE_BANDS[RELATIVE_BANDS.length - 1] as RelativeBand;
 };
 
+type RelativeBandTotals = Map<
+  string,
+  { band: RelativeBand; count: number; vsize: number }
+>;
+
+const addRelative = (
+  totals: RelativeBandTotals,
+  transaction: MempoolTransaction,
+  count: number,
+): void => {
+  const band = relativeBand(count);
+  const entry = totals.get(band.key) ?? { band, count: 0, vsize: 0 };
+  entry.count += 1;
+  entry.vsize += transaction.vsize;
+  totals.set(band.key, entry);
+};
+
+const finishRelativeBar = (
+  title: string,
+  totals: RelativeBandTotals,
+  totalWeight: number,
+  metric: DistributionMetric,
+): CompositionBar => ({
+  classifierId: title,
+  title,
+  segments: RELATIVE_BANDS.flatMap((band) => {
+    const entry = totals.get(band.key);
+    if (entry === undefined) return [];
+    return [
+      {
+        key: band.key,
+        label: band.label,
+        color: band.color,
+        count: entry.count,
+        vsize: entry.vsize,
+        share:
+          totalWeight === 0
+            ? 0
+            : (metric === "count" ? entry.count : entry.vsize) / totalWeight,
+        bucketCount: 0,
+      },
+    ];
+  }),
+});
+
 const relativeBar = (
   title: string,
   transactions: readonly MempoolTransaction[],
   metric: DistributionMetric,
   countOf: (transaction: MempoolTransaction) => number,
 ): CompositionBar => {
-  const totalWeight = transactions.reduce(
-    (total, transaction) =>
-      total + (metric === "count" ? 1 : transaction.vsize),
-    0,
-  );
-  const byBand = new Map<
-    string,
-    { band: RelativeBand; count: number; vsize: number }
-  >();
+  const totals: RelativeBandTotals = new Map();
+  let totalWeight = 0;
   for (const transaction of transactions) {
-    const band = relativeBand(countOf(transaction));
-    const entry = byBand.get(band.key) ?? { band, count: 0, vsize: 0 };
-    entry.count += 1;
-    entry.vsize += transaction.vsize;
-    byBand.set(band.key, entry);
+    totalWeight += metric === "count" ? 1 : transaction.vsize;
+    addRelative(totals, transaction, countOf(transaction));
   }
-  return {
-    classifierId: title,
-    title,
-    segments: RELATIVE_BANDS.flatMap((band) => {
-      const entry = byBand.get(band.key);
-      if (entry === undefined) {
-        return [];
-      }
-      return [
-        {
-          key: band.key,
-          label: band.label,
-          color: band.color,
-          count: entry.count,
-          vsize: entry.vsize,
-          share:
-            totalWeight === 0
-              ? 0
-              : (metric === "count" ? entry.count : entry.vsize) / totalWeight,
-          bucketCount: 0,
-        },
-      ];
-    }),
-  };
+  return finishRelativeBar(title, totals, totalWeight, metric);
 };
 
 /**
@@ -203,3 +220,44 @@ export const buildEntanglementBars = (
     Math.max(0, transaction.descendant_count - 1),
   ),
 ];
+
+export const buildEntanglementBarsCooperatively = async (
+  transactions: readonly MempoolTransaction[],
+  metric: DistributionMetric,
+  options: CooperativeWorkOptions = {},
+): Promise<CompositionBar[]> => {
+  const ancestorTotals: RelativeBandTotals = new Map();
+  const descendantTotals: RelativeBandTotals = new Map();
+  let totalWeight = 0;
+  await forEachCooperatively(
+    transactions,
+    (transaction) => {
+      totalWeight += metric === "count" ? 1 : transaction.vsize;
+      addRelative(
+        ancestorTotals,
+        transaction,
+        Math.max(0, transaction.ancestor_count - 1),
+      );
+      addRelative(
+        descendantTotals,
+        transaction,
+        Math.max(0, transaction.descendant_count - 1),
+      );
+    },
+    options,
+  );
+  return [
+    finishRelativeBar(
+      "Unconfirmed ancestors",
+      ancestorTotals,
+      totalWeight,
+      metric,
+    ),
+    finishRelativeBar(
+      "Unconfirmed descendants",
+      descendantTotals,
+      totalWeight,
+      metric,
+    ),
+  ];
+};

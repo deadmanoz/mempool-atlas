@@ -10,7 +10,7 @@ use super::support;
 
 use crate::bip110::{
     EvaluationContext, EvaluationMode, Missing, PrevoutFacts, PrevoutSet, RuleId, RuleVerdict,
-    Violation, evaluate, evaluate_mempool_policy,
+    Violation, evaluate_consensus, evaluate_mempool_policy,
 };
 use bitcoin::hashes::Hash;
 use bitcoin::{
@@ -139,7 +139,7 @@ fn eval_spend(
     let tx = make_tx(witness_items, vec![spk_of_len_nonopreturn(1)]);
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, creation))]);
     let ctx = EvaluationContext::new(Some(ACTIVATION), SPEND);
-    evaluate(&tx, &ctx, &prevouts)
+    evaluate_consensus(&tx, &ctx, &prevouts)
 }
 
 fn verdict(ev: &crate::bip110::TxEvidence, rule: RuleId) -> &RuleVerdict {
@@ -156,7 +156,7 @@ fn rule1_nonopreturn_boundaries_33_34_35() {
     for (n, expect_pass) in [(33usize, true), (34, true), (35, false)] {
         let tx = make_tx(&w, vec![spk_of_len_nonopreturn(n)]);
         let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk.clone(), Some(POST)))]);
-        let ev = evaluate(
+        let ev = evaluate_consensus(
             &tx,
             &EvaluationContext::new(Some(ACTIVATION), SPEND),
             &prevouts,
@@ -176,7 +176,7 @@ fn rule1_opreturn_boundaries_82_83_84() {
     for (n, expect_pass) in [(82usize, true), (83, true), (84, false)] {
         let tx = make_tx(&w, vec![spk_op_return(n)]);
         let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk.clone(), Some(POST)))]);
-        let ev = evaluate(
+        let ev = evaluate_consensus(
             &tx,
             &EvaluationContext::new(Some(ACTIVATION), SPEND),
             &prevouts,
@@ -195,7 +195,7 @@ fn rule1_empty_scriptpubkey_is_skipped() {
     let w = vec![vec![0x51u8]];
     let tx = make_tx(&w, vec![ScriptBuf::new()]);
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), SPEND),
         &prevouts,
@@ -209,7 +209,7 @@ fn rule1_evidence_carries_counts() {
     let w = vec![vec![0x51u8]];
     let tx = make_tx(&w, vec![spk_op_return(84)]);
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), SPEND),
         &prevouts,
@@ -495,7 +495,7 @@ fn grandfathered_input_still_bound_by_rule1() {
     let spk = p2wsh_spk();
     let tx = make_tx(&[vec![0x51u8]], vec![spk_of_len_nonopreturn(35)]);
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(PRE)))]);
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), SPEND),
         &prevouts,
@@ -561,7 +561,7 @@ fn missing_scriptpubkey_yields_unknown_for_input_rules() {
         vec![spk_of_len_nonopreturn(1)],
     );
     let prevouts = PrevoutSet::from_vec(vec![None]);
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), SPEND),
         &prevouts,
@@ -633,7 +633,7 @@ fn missing_creation_height_with_violation_is_unknown() {
         vec![spk_of_len_nonopreturn(1)],
     );
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, None))]);
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), SPEND),
         &prevouts,
@@ -661,7 +661,7 @@ fn missing_creation_height_without_violation_is_pass() {
 fn coinbase_only_checks_rule1() {
     let tx = coinbase_tx(vec![spk_of_len_nonopreturn(35)]);
     let prevouts = PrevoutSet::from_vec(vec![]);
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), SPEND),
         &prevouts,
@@ -689,7 +689,7 @@ fn inactive_context_passes_everything() {
         vec![spk_of_len_nonopreturn(35)],
     );
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), ACTIVATION - 1),
         &prevouts,
@@ -707,7 +707,7 @@ fn expired_context_is_inactive() {
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
     // activation + ACTIVE_DURATION is the first expired height.
     let expiry = ACTIVATION + crate::bip110::ACTIVE_DURATION;
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), expiry),
         &prevouts,
@@ -746,7 +746,7 @@ fn legacy_scriptsig_push_over_256_violates_rule2() {
         }],
     };
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), SPEND),
         &prevouts,
@@ -848,7 +848,7 @@ fn grandfathered_p2sh_spend_is_exempt_from_consensus_input_rules() {
     let (tx, spk) = p2sh_tx(&redeem_script, &[vec![0x42; 257]], &[]);
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(PRE)))]);
 
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), SPEND),
         &prevouts,
@@ -876,7 +876,7 @@ fn current_p2sh_spend_is_evaluated_under_consensus_rules() {
     let (tx, spk) = p2sh_tx(&redeem_script, &[vec![0x42; 257]], &[]);
     let prevouts = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
 
-    let ev = evaluate(
+    let ev = evaluate_consensus(
         &tx,
         &EvaluationContext::new(Some(ACTIVATION), SPEND),
         &prevouts,
@@ -925,14 +925,16 @@ fn p2sh_wrapped_rule3_respects_consensus_grandfathering() {
         let (tx, spk) = p2sh_tx(&redeem_script, &[], &[]);
 
         let pre = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk.clone(), Some(PRE)))]);
-        let grandfathered = evaluate(&tx, &EvaluationContext::new(Some(ACTIVATION), SPEND), &pre);
+        let grandfathered =
+            evaluate_consensus(&tx, &EvaluationContext::new(Some(ACTIVATION), SPEND), &pre);
         assert!(
             verdict(&grandfathered, RuleId::UndefinedVersion).is_pass(),
             "pre-activation P2SH-wrapped witness program must be grandfathered"
         );
 
         let post = PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(spk, Some(POST)))]);
-        let current = evaluate(&tx, &EvaluationContext::new(Some(ACTIVATION), SPEND), &post);
+        let current =
+            evaluate_consensus(&tx, &EvaluationContext::new(Some(ACTIVATION), SPEND), &post);
         assert!(
             verdict(&current, RuleId::UndefinedVersion).is_violate(),
             "current P2SH-wrapped witness program must receive Rule 3"

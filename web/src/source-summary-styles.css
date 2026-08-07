@@ -1,0 +1,41 @@
+.source-summary {
+  display: grid;
+  grid-template-rows: auto minmax(2.75rem, auto);
+  min-width: 0;
+}
+
+#source-classification-summary {
+  display: grid;
+  min-width: 0;
+  min-block-size: 2.75rem;
+  align-items: center;
+  margin: 0;
+  padding: 0.48rem 0.9rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+#source-classification-summary[data-state="classifying"] {
+  color: #b9e9ec;
+}
+
+#source-classification-summary[data-state="paused"] {
+  color: #c9b989;
+}
+
+@media (max-width: 900px) {
+  .source-summary {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    border-top: 1px solid var(--border);
+  }
+}
+
+@media (max-width: 620px) {
+  #source-classification-summary {
+    min-block-size: 7.5rem;
+    padding: 0.48rem 0.65rem;
+  }
+}

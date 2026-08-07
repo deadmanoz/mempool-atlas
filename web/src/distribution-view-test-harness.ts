@@ -10,7 +10,11 @@ export interface DistributionViewTestHarness {
     setTransform: Mock;
     clearRect: Mock;
     fillRect: Mock;
+    beginPath: Mock;
+    rect: Mock;
+    fill: Mock;
     fillStyle: string;
+    globalAlpha: number;
   };
   readonly resizeObservers: ControlledResizeObserver[];
   readonly cancelledAnimationFrames: number[];
@@ -29,7 +33,11 @@ export const installDistributionViewTestHarness =
       setTransform: vi.fn(),
       clearRect: vi.fn(),
       fillRect: vi.fn(),
+      beginPath: vi.fn(),
+      rect: vi.fn(),
+      fill: vi.fn(),
       fillStyle: "",
+      globalAlpha: 1,
     };
 
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
@@ -71,6 +79,26 @@ export const installDistributionViewTestHarness =
     }
 
     vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    class TestIntersectionObserver {
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+
+      observe(target: Element): void {
+        this.callback(
+          [{ isIntersecting: true, target } as IntersectionObserverEntry],
+          this as unknown as IntersectionObserver,
+        );
+      }
+
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+    }
+    vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
       () => canvasContext as unknown as CanvasRenderingContext2D,
     );

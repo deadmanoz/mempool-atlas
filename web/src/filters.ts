@@ -1,4 +1,5 @@
 import type { MempoolTransaction } from "./types";
+import { filterTransactionView } from "./transaction-view";
 
 export interface MempoolFilters {
   minimumFeeRate: number;
@@ -12,12 +13,18 @@ export const DEFAULT_FILTERS: Readonly<MempoolFilters> = {
   minimumVsize: 0,
 };
 
+export const filtersAreDefault = (filters: Readonly<MempoolFilters>): boolean =>
+  filters.minimumFeeRate === DEFAULT_FILTERS.minimumFeeRate &&
+  filters.maximumAgeMs === DEFAULT_FILTERS.maximumAgeMs &&
+  filters.minimumVsize === DEFAULT_FILTERS.minimumVsize;
+
 export const filterTransactions = (
   transactions: readonly MempoolTransaction[],
   filters: Readonly<MempoolFilters>,
   observedAtMs: number,
-): MempoolTransaction[] =>
-  transactions.filter((transaction) => {
+): MempoolTransaction[] => {
+  if (filtersAreDefault(filters)) return transactions as MempoolTransaction[];
+  return filterTransactionView(transactions, (transaction) => {
     const feeRate = transaction.fee_sats / transaction.vsize;
     const ageMs = Math.max(0, observedAtMs - transaction.entered_at_ms);
     return (
@@ -26,3 +33,4 @@ export const filterTransactions = (
       (filters.maximumAgeMs === null || ageMs <= filters.maximumAgeMs)
     );
   });
+};

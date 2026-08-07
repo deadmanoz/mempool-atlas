@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createComparisonDistributionsView,
@@ -149,7 +149,7 @@ describe("createComparisonDistributionsView", () => {
     harness.cleanup();
   });
 
-  it("owns descendant lookup, axes, rendering, and density scheduling", () => {
+  it("owns descendant lookup, axes, rendering, and density scheduling", async () => {
     const root = document.querySelector<HTMLElement>(
       "section#comparison-distributions",
     );
@@ -163,7 +163,7 @@ describe("createComparisonDistributionsView", () => {
       1,
     );
 
-    view.render(comparison);
+    await view.render(comparison);
 
     expect(root!.hidden).toBe(false);
     expect(root!.querySelector("#dist-comp-left-title")?.textContent).toContain(
@@ -177,17 +177,24 @@ describe("createComparisonDistributionsView", () => {
     harness.resizeObservers[0]?.trigger();
     expect(harness.pendingAnimationFrames()).toBe(1);
     harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
     expect(harness.canvasContext.setTransform).toHaveBeenCalled();
   });
 
-  it("rerenders source-local empty state when a one-sided scope is selected", () => {
+  it("rerenders source-local empty state when a one-sided scope is selected", async () => {
     const root = document.querySelector<HTMLElement>(
       "section#comparison-distributions",
     )!;
     const view = createComparisonDistributionsView(root);
-    view.render(comparison);
+    await view.render(comparison);
 
     root.querySelector<HTMLButtonElement>("#dist-scope-left")?.click();
+
+    await vi.waitFor(() => {
+      expect(
+        root.querySelector("#spectrum-right .empty-state")?.textContent,
+      ).toBe("This population has no members on this source.");
+    });
 
     expect(
       root.querySelector("#dist-scope-left")?.getAttribute("aria-pressed"),
@@ -204,18 +211,59 @@ describe("createComparisonDistributionsView", () => {
     ).toBe("This population has no members on this source.");
   });
 
-  it("replaces a nonempty owner with empty aggregates and resets its lifecycle", () => {
+  it("prepares a replacement off-view and synchronously commits only its exact identity and scope", async () => {
     const root = document.querySelector<HTMLElement>(
       "section#comparison-distributions",
     )!;
     const view = createComparisonDistributionsView(root);
-    view.render(comparison);
+    await view.render(comparison);
+    const activeSpectrum = root.querySelector("#spectrum-left svg");
+    const candidate = compareCurrentSnapshots(
+      loadedSource("candidate-a", [transaction(50)]),
+      loadedSource("candidate-b", [transaction(50)]),
+    );
+
+    const prepared = await view.prepare(candidate);
+
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector("#spectrum-left svg")).toBe(activeSpectrum);
+    expect(root.querySelector("#dist-comp-left-title")?.textContent).toContain(
+      "CORE node",
+    );
+    expect(view.canCommit(prepared, candidate)).toBe(true);
+    expect(view.canCommit(prepared, { ...candidate })).toBe(false);
+    expect(view.commit(prepared, { ...candidate })).toBe(false);
+
+    root.querySelector<HTMLButtonElement>("#dist-scope-left")?.click();
+    expect(view.canCommit(prepared, candidate)).toBe(false);
+    expect(view.commit(prepared, candidate)).toBe(false);
+    await vi.waitFor(() => {
+      expect(root.getAttribute("aria-busy")).toBe("false");
+    });
+    root.querySelector<HTMLButtonElement>("#dist-scope-all")?.click();
+    await vi.waitFor(() => {
+      expect(root.getAttribute("aria-busy")).toBe("false");
+    });
+
+    expect(view.commit(prepared, candidate)).toBe(true);
+    expect(root.querySelector("#dist-comp-left-title")?.textContent).toContain(
+      "CANDIDATE-A node",
+    );
+    expect(root.querySelector("#spectrum-left svg")).not.toBe(activeSpectrum);
+  });
+
+  it("replaces a nonempty owner with empty aggregates and resets its lifecycle", async () => {
+    const root = document.querySelector<HTMLElement>(
+      "section#comparison-distributions",
+    )!;
+    const view = createComparisonDistributionsView(root);
+    await view.render(comparison);
     const emptyComparison = compareCurrentSnapshots(
       loadedSource("core", []),
       loadedSource("knots", []),
     );
 
-    view.render(emptyComparison);
+    await view.render(emptyComparison);
 
     expect(root.querySelector("#spectrum-left svg")).toBeNull();
     expect(root.querySelector("#spectrum-left .empty-state")).not.toBeNull();
@@ -229,6 +277,70 @@ describe("createComparisonDistributionsView", () => {
       root.querySelector("#dist-scope-all")?.getAttribute("aria-pressed"),
     ).toBe("true");
     expect(harness.pendingAnimationFrames()).toBe(0);
-    expect(harness.cancelledAnimationFrames).toHaveLength(1);
+    expect(harness.cancelledAnimationFrames).toHaveLength(2);
+  });
+
+  it("keeps only the latest scope when cooperative derivations overlap", async () => {
+    const root = document.querySelector<HTMLElement>(
+      "section#comparison-distributions",
+    )!;
+    const view = createComparisonDistributionsView(root);
+    const transactions = Array.from({ length: 900 }, (_, index) =>
+      transaction(index + 10_000),
+    );
+    const largeComparison = compareCurrentSnapshots(
+      loadedSource("core", transactions),
+      loadedSource("knots", transactions),
+    );
+
+    const obsolete = view.render(largeComparison);
+    root.querySelector<HTMLButtonElement>("#dist-scope-left")?.click();
+    await obsolete;
+
+    await vi.waitFor(() => {
+      expect(
+        root.querySelector("#dist-spectrum-right-title")?.textContent,
+      ).toContain("only in Source A");
+      expect(
+        root.querySelector("#spectrum-right .empty-state")?.textContent,
+      ).toBe("This population has no members on this source.");
+    });
+    expect(root.querySelector("#spectrum-right svg")).toBeNull();
+  });
+
+  it("aborts obsolete owners and reset work without stale DOM or density frames", async () => {
+    const root = document.querySelector<HTMLElement>(
+      "section#comparison-distributions",
+    )!;
+    const view = createComparisonDistributionsView(root);
+    const transactions = Array.from({ length: 900 }, (_, index) =>
+      transaction(index + 20_000),
+    );
+    const largeComparison = compareCurrentSnapshots(
+      loadedSource("core", transactions),
+      loadedSource("knots", transactions),
+    );
+    const emptyComparison = compareCurrentSnapshots(
+      loadedSource("core", []),
+      loadedSource("knots", []),
+    );
+
+    const obsoleteOwner = view.render(largeComparison);
+    const currentOwner = view.render(emptyComparison);
+    await Promise.all([obsoleteOwner, currentOwner]);
+
+    expect(root.querySelector("#spectrum-left svg")).toBeNull();
+    expect(root.querySelector("#spectrum-left .empty-state")).not.toBeNull();
+    expect(harness.pendingAnimationFrames()).toBe(1);
+
+    harness.flushAnimationFrames();
+    const obsoleteReset = view.render(largeComparison);
+    view.reset();
+    await obsoleteReset;
+
+    expect(root.hidden).toBe(true);
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector("#spectrum-left")?.childElementCount).toBe(0);
+    expect(harness.pendingAnimationFrames()).toBe(0);
   });
 });

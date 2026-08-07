@@ -27,30 +27,42 @@
           </div>
         </div>
 
-        <dl class="header-facts" aria-label="Current snapshot">
-          <div>
-            <dt>Source</dt>
-            <dd>
-              <strong id="source-label">Loading</strong>
-              <code id="source-id">unknown</code>
-            </dd>
-          </div>
-          <div>
-            <dt>Snapshot</dt>
-            <dd id="observed-value">Waiting</dd>
-          </div>
-          <div>
-            <dt>Height</dt>
-            <dd id="tip-value">Unknown</dd>
-          </div>
-          <div>
-            <dt>Transactions</dt>
-            <dd>
-              <span id="transaction-count">Waiting</span>
-              <small id="total-vsize">Waiting</small>
-            </dd>
-          </div>
-        </dl>
+        <section
+          id="source-summary"
+          class="source-summary"
+          data-phase="discovering-sources"
+          data-state="waiting"
+          aria-label="Current source state"
+          aria-busy="true"
+        >
+          <dl class="header-facts" aria-label="Current snapshot">
+            <div>
+              <dt>Source</dt>
+              <dd>
+                <strong id="source-label">Loading</strong>
+                <code id="source-id">unknown</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Snapshot</dt>
+              <dd id="observed-value">Waiting</dd>
+            </div>
+            <div>
+              <dt>Height</dt>
+              <dd id="tip-value">Unknown</dd>
+            </div>
+            <div>
+              <dt>Transactions</dt>
+              <dd>
+                <span id="transaction-count">Waiting</span>
+                <small id="total-vsize">Waiting</small>
+              </dd>
+            </div>
+          </dl>
+          <p id="source-classification-summary" data-state="waiting">
+            Classification waiting for source metadata.
+          </p>
+        </section>
 
         <button id="refresh" class="refresh-button" type="button">
           Refresh
@@ -61,6 +73,7 @@
         id="page-status"
         class="status-strip"
         data-state="waiting"
+        data-phase="discovering-sources"
         aria-live="polite"
       >
         <span class="status-light" aria-hidden="true"></span>

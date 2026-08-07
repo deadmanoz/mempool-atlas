@@ -1234,12 +1234,6 @@ pub struct SourcesResponse {
     pub sources: Vec<SourceSummary>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct SourceSnapshotResponse {
-    pub source: SourceSummary,
-    pub snapshot: Option<Arc<MempoolSnapshot>>,
-}
-
 pub fn validate_source_id(value: &str) -> Result<(), ModelError> {
     if value.is_empty()
         || matches!(value, "." | "..")

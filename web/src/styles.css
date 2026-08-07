@@ -152,6 +152,8 @@ h1 {
 }
 
 .atlas-version {
+  display: inline-block;
+  min-inline-size: 3.5rem;
   color: var(--faint);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.58rem;
@@ -209,6 +211,8 @@ h3 {
 .header-facts {
   display: grid;
   grid-template-columns: repeat(4, minmax(110px, 1fr));
+  grid-auto-rows: minmax(4.5rem, auto);
+  min-block-size: 4.5rem;
   min-width: 0;
   margin: 0;
 }
@@ -610,6 +614,11 @@ h3 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
   gap: 0.5rem;
+  min-block-size: 32rem;
+}
+
+#overview-view:has(#classification-empty:not([hidden])) .classification-labels {
+  min-block-size: 0;
 }
 
 .classification-label {
@@ -1487,12 +1496,6 @@ tr.selected td {
     grid-template-columns: 1fr auto;
   }
 
-  .header-facts {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    border-top: 1px solid var(--border);
-  }
-
   .brand-block {
     border-right: 1px solid var(--border);
   }
@@ -1576,9 +1579,16 @@ tr.selected td {
     padding: 0 0.4rem;
   }
 
+  .brand-title-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
   .status-strip {
     align-items: flex-start;
     flex-wrap: wrap;
+    min-block-size: 3.1rem;
   }
 
   .classification-lifecycle {
@@ -1825,6 +1835,7 @@ tr.selected td {
 /* Snapshot distributions */
 
 .distribution-panel {
+  min-block-size: 16rem;
   min-width: 0;
   margin-top: 0.65rem;
   padding: 0.75rem;
@@ -1947,6 +1958,7 @@ tr.selected td {
 .joint-chart-wrap {
   flex: 1;
   min-width: 0;
+  aspect-ratio: 1.7;
 }
 
 .joint-chart-wrap canvas {
@@ -1958,6 +1970,14 @@ tr.selected td {
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
+}
+
+#composition-bars {
+  min-block-size: 20.25rem;
+}
+
+#entanglement-bars {
+  min-block-size: 8.125rem;
 }
 
 .composition-bar-title {
@@ -2007,6 +2027,14 @@ button.composition-segment[aria-pressed="true"] {
   width: 100%;
   height: auto;
   background: #0b121a;
+}
+
+.spectrum-wrap {
+  aspect-ratio: 2.55;
+}
+
+.mosaic-wrap {
+  min-block-size: 18.5rem;
 }
 
 .chart-baseline {

@@ -5,6 +5,7 @@ import {
   buildCompositionBar,
   buildCompositionBars,
   buildEntanglementBars,
+  buildEntanglementBarsCooperatively,
 } from "./composition";
 import { mempoolTransaction, txid } from "./test-fixtures";
 import type {
@@ -190,5 +191,19 @@ describe("buildEntanglementBars", () => {
       "vsize",
     );
     expect(bars[0]?.segments.map(({ share }) => share)).toEqual([0.5, 0.5]);
+  });
+
+  it("matches the cooperative entanglement builder exactly", async () => {
+    const transactions = [
+      withAncestry(1, 1, 1),
+      withAncestry(2, 3, 2),
+      withAncestry(3, 12, 8),
+    ];
+    await expect(
+      buildEntanglementBarsCooperatively(transactions, "vsize", {
+        batchSize: 1,
+        yieldBetweenBatches: () => Promise.resolve(),
+      }),
+    ).resolves.toEqual(buildEntanglementBars(transactions, "vsize"));
   });
 });

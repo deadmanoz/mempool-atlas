@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { compareCurrentSnapshots } from "./comparison-model";
 import { loadedSource } from "./comparison-test-fixtures";
@@ -6,6 +6,7 @@ import { mempoolTransaction, txid } from "./test-fixtures";
 import {
   SnapshotDistributionCache,
   buildSnapshotDistributionModel,
+  buildSnapshotDistributionModelCooperatively,
   type SnapshotDistributionInput,
   type SnapshotDistributionModel,
 } from "./snapshot-distributions";
@@ -244,6 +245,54 @@ describe("buildSnapshotDistributionModel", () => {
 
     inspect(model);
   });
+
+  it.each(["count", "vsize"] as const)(
+    "matches the synchronous %s reference model exactly",
+    async (metric) => {
+      const expected = buildSnapshotDistributionModel(input(metric));
+
+      await expect(
+        buildSnapshotDistributionModelCooperatively(input(metric), {
+          batchSize: 1,
+          yieldBetweenBatches: () => Promise.resolve(),
+        }),
+      ).resolves.toEqual(expected);
+    },
+  );
+
+  it("yields repeatedly while deriving one uncached population", async () => {
+    const population = [...transactions];
+    const yieldBetweenBatches = vi.fn(async () => Promise.resolve());
+
+    await buildSnapshotDistributionModelCooperatively(
+      input("vsize", population),
+      { batchSize: 1, yieldBetweenBatches },
+    );
+
+    expect(yieldBetweenBatches.mock.calls.length).toBeGreaterThan(2);
+  });
+
+  it("aborts without returning a partial model", async () => {
+    const controller = new AbortController();
+    const population = [...transactions];
+
+    await expect(
+      buildSnapshotDistributionModelCooperatively(input("count", population), {
+        batchSize: 1,
+        signal: controller.signal,
+        yieldBetweenBatches: () => controller.abort(),
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    await expect(
+      buildSnapshotDistributionModelCooperatively(input("count", population), {
+        batchSize: 1,
+        yieldBetweenBatches: () => Promise.resolve(),
+      }),
+    ).resolves.toEqual(
+      buildSnapshotDistributionModel(input("count", population)),
+    );
+  });
 });
 
 describe("SnapshotDistributionCache", () => {
@@ -273,6 +322,17 @@ describe("SnapshotDistributionCache", () => {
     expect(builds).toBe(2);
   });
 
+  it("adopts a prepared variant without rebuilding it", () => {
+    const cache = new SnapshotDistributionCache();
+    const owner = {};
+    const prepared = buildSnapshotDistributionModel(input("count"));
+    const build = vi.fn(() => buildSnapshotDistributionModel(input("vsize")));
+
+    expect(cache.adopt(owner, "metric=count", prepared)).toBe(prepared);
+    expect(cache.get(owner, "metric=count", build)).toBe(prepared);
+    expect(build).not.toHaveBeenCalled();
+  });
+
   it("invalidates variants when the owner changes or the cache resets", () => {
     const cache = new SnapshotDistributionCache();
     const firstOwner = {};
@@ -293,5 +353,83 @@ describe("SnapshotDistributionCache", () => {
     expect(returnedOwner).not.toBe(first);
     expect(afterReset).not.toBe(returnedOwner);
     expect(builds).toBe(4);
+  });
+
+  it("deduplicates one in-flight async variant and reuses its result", async () => {
+    const cache = new SnapshotDistributionCache();
+    const owner = {};
+    const build = vi.fn(async () =>
+      buildSnapshotDistributionModel(input("count")),
+    );
+
+    const first = cache.getAsync(owner, "metric=count", build);
+    const repeated = cache.getAsync(owner, "metric=count", build);
+
+    expect(repeated).toBe(first);
+    const model = await first;
+    await expect(cache.getAsync(owner, "metric=count", build)).resolves.toBe(
+      model,
+    );
+    expect(build).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts an old owner and never caches its stale completion", async () => {
+    const cache = new SnapshotDistributionCache();
+    const firstOwner = {};
+    const secondOwner = {};
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stale = cache.getAsync(firstOwner, "metric=count", async () => {
+      await gate;
+      return buildSnapshotDistributionModel(input("count"));
+    });
+    const staleExpectation = expect(stale).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    const current = cache.getAsync(secondOwner, "metric=count", async () =>
+      buildSnapshotDistributionModel(input("vsize")),
+    );
+    release?.();
+
+    await staleExpectation;
+    const currentModel = await current;
+    await expect(
+      cache.getAsync(secondOwner, "metric=count", async () =>
+        buildSnapshotDistributionModel(input("count")),
+      ),
+    ).resolves.toBe(currentModel);
+  });
+
+  it("lets a same-owner render abort an obsolete variant", async () => {
+    const cache = new SnapshotDistributionCache();
+    const owner = {};
+    const controller = new AbortController();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const obsolete = cache.getAsync(
+      owner,
+      "metric=count",
+      async () => {
+        await gate;
+        return buildSnapshotDistributionModel(input("count"));
+      },
+      controller.signal,
+    );
+    const obsoleteExpectation = expect(obsolete).rejects.toMatchObject({
+      name: "AbortError",
+    });
+
+    controller.abort();
+    release?.();
+    await obsoleteExpectation;
+
+    const current = await cache.getAsync(owner, "metric=vsize", async () =>
+      buildSnapshotDistributionModel(input("vsize")),
+    );
+    expect(current.totals.population.vsize).toBe(750);
   });
 });

@@ -1,5 +1,4 @@
 import {
-  comparisonRegionEntries,
   policySideForRegion,
   sourceEntry,
   type ComparedTransaction,
@@ -17,6 +16,10 @@ import {
   type ViolationSignature,
   type ViolationSignatureKey,
 } from "./terrain";
+import {
+  forEachCooperatively,
+  type CooperativeWorkOptions,
+} from "./cooperative-work";
 import { RULE_IDS, type MempoolTransaction, type RuleId } from "./types";
 
 export const COMPARISON_POLICY_MATRIX_CHIP_LIMIT = 3;
@@ -157,11 +160,13 @@ interface SliceAccumulator {
   statusTotals: ComparisonPolicyStatusTotals;
   ruleTotals: ComparisonPolicyRuleTotals;
   signatures: Map<ViolationSignatureKey, SignatureAccumulator>;
+  samples: Map<string, ComparedTransaction[]>;
 }
 
 interface SliceState {
   slice: ComparisonPolicySlice;
   signatureTotals: Map<ViolationSignatureKey, ComparisonPolicyTotals>;
+  samples: Map<string, ComparedTransaction[]>;
 }
 
 const SLICE_SPECS: readonly SliceSpec[] = [
@@ -202,6 +207,7 @@ const accumulatorFor = (spec: SliceSpec): SliceAccumulator => ({
   statusTotals: emptyStatusTotals(),
   ruleTotals: emptyRuleTotals(),
   signatures: new Map(),
+  samples: new Map(),
 });
 
 const policyStatus = (
@@ -211,29 +217,36 @@ const policyStatus = (
 const addTransaction = (
   accumulator: SliceAccumulator,
   transaction: MempoolTransaction,
+  entry: ComparedTransaction,
 ): void => {
+  const sampleKeys = ["all", `status:${policyStatus(transaction)}`];
   addToTotals(accumulator.population, transaction);
   addToTotals(accumulator.statusTotals[policyStatus(transaction)], transaction);
   const assessment = transaction.bip110;
-  if (assessment === null) {
-    return;
+  if (assessment !== null) {
+    for (const rule of assessment.violated_rules) {
+      addToTotals(accumulator.ruleTotals[rule], transaction);
+      sampleKeys.push(`rule:${rule}`);
+    }
+    const signature = violationSignature(assessment);
+    if (signature !== null) {
+      sampleKeys.push(`signature:${signature.key}`);
+      const totals = accumulator.signatures.get(signature.key);
+      if (totals === undefined) {
+        accumulator.signatures.set(signature.key, {
+          signature,
+          count: 1,
+          vsize: transaction.vsize,
+        });
+      } else {
+        addToTotals(totals, transaction);
+      }
+    }
   }
-  for (const rule of assessment.violated_rules) {
-    addToTotals(accumulator.ruleTotals[rule], transaction);
-  }
-  const signature = violationSignature(assessment);
-  if (signature === null) {
-    return;
-  }
-  const totals = accumulator.signatures.get(signature.key);
-  if (totals === undefined) {
-    accumulator.signatures.set(signature.key, {
-      signature,
-      count: 1,
-      vsize: transaction.vsize,
-    });
-  } else {
-    addToTotals(totals, transaction);
+  for (const key of sampleKeys) {
+    const sample = accumulator.samples.get(key) ?? [];
+    addToBoundedSample(sample, entry, accumulator.spec.side);
+    accumulator.samples.set(key, sample);
   }
 };
 
@@ -278,6 +291,7 @@ const finishSlice = (accumulator: SliceAccumulator): SliceState => {
         { count, vsize },
       ]),
     ),
+    samples: accumulator.samples,
   };
 };
 
@@ -344,26 +358,6 @@ const filterKey = (filter: ComparisonPolicyFilter): string => {
   return `signature:${filter.signature}`;
 };
 
-const filterMatches = (
-  transaction: MempoolTransaction,
-  filter: ComparisonPolicyFilter,
-): boolean => {
-  if (filter.kind === "all") {
-    return true;
-  }
-  if (filter.kind === "status") {
-    return policyStatus(transaction) === filter.status;
-  }
-  if (filter.kind === "rule") {
-    return transaction.bip110?.violated_rules.includes(filter.rule) ?? false;
-  }
-  const assessment = transaction.bip110;
-  return (
-    assessment !== null &&
-    violationSignature(assessment)?.key === filter.signature
-  );
-};
-
 const compareSampleEntries = (
   left: ComparedTransaction,
   right: ComparedTransaction,
@@ -395,46 +389,140 @@ const addToBoundedSample = (
   }
 };
 
+const createSliceAccumulators = (): Map<
+  ComparisonPolicyMatrixRowKey,
+  SliceAccumulator
+> => new Map(SLICE_SPECS.map((spec) => [spec.key, accumulatorFor(spec)]));
+
+const requiredAccumulator = (
+  accumulators: Map<ComparisonPolicyMatrixRowKey, SliceAccumulator>,
+  spec: SliceSpec,
+): SliceAccumulator => {
+  const accumulator = accumulators.get(spec.key);
+  if (accumulator === undefined) {
+    throw new Error(`Missing comparison policy slice ${spec.key}`);
+  }
+  return accumulator;
+};
+
+const accumulateComparison = (
+  comparison: CurrentComparison,
+): Map<ComparisonPolicyMatrixRowKey, SliceAccumulator> => {
+  const accumulators = createSliceAccumulators();
+  const [leftSpec, commonLeftSpec, commonRightSpec, rightSpec] = SLICE_SPECS;
+  if (!leftSpec || !commonLeftSpec || !commonRightSpec || !rightSpec) {
+    throw new Error("Comparison policy slice configuration is incomplete");
+  }
+  const leftAccumulator = requiredAccumulator(accumulators, leftSpec);
+  const commonLeftAccumulator = requiredAccumulator(
+    accumulators,
+    commonLeftSpec,
+  );
+  const commonRightAccumulator = requiredAccumulator(
+    accumulators,
+    commonRightSpec,
+  );
+  const rightAccumulator = requiredAccumulator(accumulators, rightSpec);
+  for (const entry of comparison.left_only) {
+    addTransaction(
+      leftAccumulator,
+      requiredTransaction(entry, leftSpec),
+      entry,
+    );
+  }
+  for (const entry of comparison.common) {
+    addTransaction(
+      commonLeftAccumulator,
+      requiredTransaction(entry, commonLeftSpec),
+      entry,
+    );
+    addTransaction(
+      commonRightAccumulator,
+      requiredTransaction(entry, commonRightSpec),
+      entry,
+    );
+  }
+  for (const entry of comparison.right_only) {
+    addTransaction(
+      rightAccumulator,
+      requiredTransaction(entry, rightSpec),
+      entry,
+    );
+  }
+  return accumulators;
+};
+
+const accumulateComparisonCooperatively = async (
+  comparison: CurrentComparison,
+  options: CooperativeWorkOptions,
+): Promise<Map<ComparisonPolicyMatrixRowKey, SliceAccumulator>> => {
+  const accumulators = createSliceAccumulators();
+  const [leftSpec, commonLeftSpec, commonRightSpec, rightSpec] = SLICE_SPECS;
+  if (!leftSpec || !commonLeftSpec || !commonRightSpec || !rightSpec) {
+    throw new Error("Comparison policy slice configuration is incomplete");
+  }
+  const leftAccumulator = requiredAccumulator(accumulators, leftSpec);
+  const commonLeftAccumulator = requiredAccumulator(
+    accumulators,
+    commonLeftSpec,
+  );
+  const commonRightAccumulator = requiredAccumulator(
+    accumulators,
+    commonRightSpec,
+  );
+  const rightAccumulator = requiredAccumulator(accumulators, rightSpec);
+  await forEachCooperatively(
+    comparison.left_only,
+    (entry) => {
+      addTransaction(
+        leftAccumulator,
+        requiredTransaction(entry, leftSpec),
+        entry,
+      );
+    },
+    options,
+  );
+  await forEachCooperatively(
+    comparison.common,
+    (entry) => {
+      addTransaction(
+        commonLeftAccumulator,
+        requiredTransaction(entry, commonLeftSpec),
+        entry,
+      );
+      addTransaction(
+        commonRightAccumulator,
+        requiredTransaction(entry, commonRightSpec),
+        entry,
+      );
+    },
+    options,
+  );
+  await forEachCooperatively(
+    comparison.right_only,
+    (entry) => {
+      addTransaction(
+        rightAccumulator,
+        requiredTransaction(entry, rightSpec),
+        entry,
+      );
+    },
+    options,
+  );
+  return accumulators;
+};
+
 export class ComparisonPolicyView {
   readonly rows: ComparisonPolicyMatrixRow[];
   private readonly slices = new Map<string, SliceState>();
   private readonly populations = new Map<string, ComparisonPolicyPopulation>();
 
-  constructor(private readonly comparison: CurrentComparison) {
-    const accumulators = new Map(
-      SLICE_SPECS.map((spec) => [spec.key, accumulatorFor(spec)]),
-    );
-    const requiredAccumulator = (spec: SliceSpec): SliceAccumulator => {
-      const accumulator = accumulators.get(spec.key);
-      if (accumulator === undefined) {
-        throw new Error(`Missing comparison policy slice ${spec.key}`);
-      }
-      return accumulator;
-    };
-    const leftOnlySpec = SLICE_SPECS[0]!;
-    const commonLeftSpec = SLICE_SPECS[1]!;
-    const commonRightSpec = SLICE_SPECS[2]!;
-    const rightOnlySpec = SLICE_SPECS[3]!;
-    const leftOnly = requiredAccumulator(leftOnlySpec);
-    const commonLeft = requiredAccumulator(commonLeftSpec);
-    const commonRight = requiredAccumulator(commonRightSpec);
-    const rightOnly = requiredAccumulator(rightOnlySpec);
-    for (const entry of comparison.left_only) {
-      addTransaction(leftOnly, requiredTransaction(entry, leftOnlySpec));
-    }
-    for (const entry of comparison.common) {
-      addTransaction(commonLeft, requiredTransaction(entry, commonLeftSpec));
-      addTransaction(commonRight, requiredTransaction(entry, commonRightSpec));
-    }
-    for (const entry of comparison.right_only) {
-      addTransaction(rightOnly, requiredTransaction(entry, rightOnlySpec));
-    }
-
+  constructor(
+    comparison: CurrentComparison,
+    accumulators = accumulateComparison(comparison),
+  ) {
     for (const spec of SLICE_SPECS) {
-      const accumulator = accumulators.get(spec.key);
-      if (accumulator === undefined) {
-        throw new Error(`Missing comparison policy accumulator ${spec.key}`);
-      }
+      const accumulator = requiredAccumulator(accumulators, spec);
       this.slices.set(
         sliceKey(spec.region, spec.side),
         finishSlice(accumulator),
@@ -490,13 +578,7 @@ export class ComparisonPolicyView {
       this.populations.set(key, population);
       return population;
     }
-    const sample: ComparedTransaction[] = [];
-    for (const entry of comparisonRegionEntries(this.comparison, region)) {
-      const transaction = sourceEntry(entry, effectiveSide);
-      if (transaction !== null && filterMatches(transaction, filter)) {
-        addToBoundedSample(sample, entry, effectiveSide);
-      }
-    }
+    const sample = state.samples.get(filterKey(filter)) ?? [];
     const population = { count: totals.count, vsize: totals.vsize, sample };
     this.populations.set(key, population);
     return population;
@@ -506,6 +588,15 @@ export class ComparisonPolicyView {
 export const buildComparisonPolicyView = (
   comparison: CurrentComparison,
 ): ComparisonPolicyView => new ComparisonPolicyView(comparison);
+
+export const buildComparisonPolicyViewCooperatively = async (
+  comparison: CurrentComparison,
+  options: CooperativeWorkOptions = {},
+): Promise<ComparisonPolicyView> =>
+  new ComparisonPolicyView(
+    comparison,
+    await accumulateComparisonCooperatively(comparison, options),
+  );
 
 export const comparisonPolicyMatrixTarget = (
   row: Pick<ComparisonPolicyMatrixRow, "region" | "side">,

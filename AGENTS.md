@@ -24,19 +24,28 @@ lenses, and serves source-local node and comparison views.
   and transaction detail.
 - `src/api.rs` serves health, readiness, source APIs, and static web
   assets.
+- `src/perf_fixtures.rs` is the feature-gated canonical exporter for generated
+  browser fixture bodies. Production builds do not enable `perf-fixtures`.
 - `src/bip110/` is the private pure seven-rule evaluator.
 - `web/` contains the node viewer and browser-derived comparison page.
+- `web/src/source-summary-view.ts` owns early source metadata, stale-state
+  honesty, and the shared node/comparison loading phases.
+- `web/src/source-summary-styles.css` owns the node source-summary component
+  and all of its breakpoints.
 - `web/src/snapshot-distributions.ts` owns aggregate-only distribution models
   and caching. The two `*-distributions-view.ts` modules own their complete
   node and comparison distribution DOM subtrees.
 - `web/src/comparison-policy-view.ts` owns source-local policy aggregates and
   bounded samples. `web/src/comparison-view-transition.ts` classifies
   interactive state changes before the controller applies effects.
-- `web/src/styles.css` owns every shared shell, header, toolbar, and terrain
-  rule, including their breakpoints. `web/src/comparison-styles.css` adds only
+- `web/src/styles.css` owns shared shell, header, toolbar, terrain, and chart
+  rules, including their breakpoints. `web/src/comparison-styles.css` adds only
   comparison-page selectors.
-- `web/e2e/` holds Playwright viewport coverage driven by the fixture Atlas API
-  in `web/dev/fixture-server.mjs`.
+- `web/e2e/` holds Playwright viewport, early-metadata, and layout-shift
+  coverage driven by the fixture Atlas API in `web/dev/fixture-server.mjs`.
+- `web/perf/` holds the production-build performance server, Playwright
+  measurement harness, and result merger. Generated profiles and results live
+  under gitignored `web/.perf-fixtures/` and `web/.perf-results/`.
 - `docs/architecture.md` is the current system reference.
 - `docs/classification.md` is the behavioral specification for classifier
   contracts, rules, thresholds, and limitations.
@@ -52,6 +61,10 @@ Use `just` targets whenever one exists:
 - `just test` runs Rust and website unit tests.
 - `just test-web-e2e` runs Playwright viewport coverage against the fixture
   Atlas API, after a one-time `just test-web-e2e-install`.
+- `just functional-fixtures` exports the small Rust-owned functional profile.
+- `just perf-fixtures` also exports the 70,000-transaction performance profile.
+- `just perf-web` builds the production web assets, runs the desktop and Slow
+  4G performance matrix in normal Chromium, and writes the merged result.
 - `just lint` runs structure checks, Rust formatting and Clippy, Prettier, and
   TypeScript.
 - `just format` formats Rust and frontend source.
@@ -78,8 +91,8 @@ newer and npm 10 or newer.
 - Tokio owns runtime loops, locks, the listener, and shutdown.
 - Vite and TypeScript build the browser client.
 - `happy-dom` is a test-only browser DOM used for view-factory lifecycle tests.
-- `@playwright/test` is a test-only browser driver for viewport coverage. It
-  never runs against a live node.
+- `@playwright/test` is a test-only browser driver for viewport and local
+  production-build performance coverage. It never runs against a live node.
 
 ## Current-state invariants
 
@@ -136,6 +149,13 @@ newer and npm 10 or newer.
 
 ### Browser
 
+- Render the selected `SourceSummary` before requesting its complete snapshot.
+  Keep `discovering-sources`, `metadata-ready`, `loading-snapshot`,
+  `deriving-view`, and `interactive` separate from source availability.
+- Replace early node and comparison summaries in place, preserve retained
+  observation errors, and stop `aria-busy` when a request terminates.
+- Reserve source-summary, primary workspace, and derived-panel geometry. Keep
+  the primary comparison workspace before secondary distributions and policy.
 - Make the Classifications lens selector the default node view. Treat
   multi-label populations as marginal and potentially overlapping.
 - Use the selected classifier for both the Classifications overview and Buckets

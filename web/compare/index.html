@@ -41,6 +41,7 @@
         id="comparison-status"
         class="status-strip"
         data-state="waiting"
+        data-phase="discovering-sources"
         aria-live="polite"
       >
         <span class="status-light" aria-hidden="true"></span>
@@ -82,11 +83,23 @@
           </label>
         </div>
         <div class="source-card-grid">
-          <article id="left-source-card" class="source-card" data-side="left">
+          <article
+            id="left-source-card"
+            class="source-card"
+            data-side="left"
+            data-phase="discovering-sources"
+            aria-busy="true"
+          >
             <p>Source A</p>
             <h3>Waiting</h3>
           </article>
-          <article id="right-source-card" class="source-card" data-side="right">
+          <article
+            id="right-source-card"
+            class="source-card"
+            data-side="right"
+            data-phase="discovering-sources"
+            aria-busy="true"
+          >
             <p>Source B</p>
             <h3>Waiting</h3>
           </article>
@@ -126,6 +139,214 @@
         </div>
       </section>
 
+      <section
+        id="comparison-regions"
+        class="comparison-region-controls"
+        aria-label="Membership regions"
+      >
+        <button type="button" data-region="left_only" aria-pressed="false">
+          <span>Observed only in source A</span>
+          <strong>0</strong>
+          <small>0 vB</small>
+        </button>
+        <button type="button" data-region="common" aria-pressed="true">
+          <span>Present in both snapshots</span>
+          <strong>0</strong>
+          <small>0 vB in each source</small>
+        </button>
+        <button type="button" data-region="right_only" aria-pressed="false">
+          <span>Observed only in source B</span>
+          <strong>0</strong>
+          <small>0 vB</small>
+        </button>
+      </section>
+
+      <div class="workspace comparison-workspace">
+        <section
+          class="terrain-panel"
+          aria-label="Current membership comparison"
+        >
+          <div class="terrain-heading comparison-terrain-heading">
+            <div>
+              <p class="eyebrow">Current membership union</p>
+              <h2>Snapshot overlap</h2>
+            </div>
+            <dl class="comparison-union-total">
+              <div>
+                <dt>Union</dt>
+                <dd id="union-count">0 txids</dd>
+              </div>
+            </dl>
+          </div>
+          <p id="comparison-empty" class="empty-state">
+            Choose two sources with complete snapshots.
+          </p>
+          <div id="comparison-stage" class="comparison-stage" hidden>
+            <canvas
+              id="comparison-canvas"
+              tabindex="0"
+              role="img"
+              aria-describedby="comparison-visual-summary comparison-navigator-instructions"
+            ></canvas>
+          </div>
+          <div
+            id="comparison-transaction-navigator"
+            class="comparison-transaction-navigator"
+            hidden
+          >
+            <div class="comparison-navigator-heading">
+              <span class="toolbar-label">Keyboard transaction navigator</span>
+              <span id="comparison-navigator-summary">No transactions</span>
+            </div>
+            <div
+              id="comparison-transaction-listbox"
+              class="comparison-transaction-listbox"
+              role="listbox"
+              tabindex="0"
+              aria-label="Transactions in the selected membership region"
+              aria-activedescendant="comparison-active-transaction"
+              aria-describedby="comparison-navigator-instructions"
+            >
+              <div
+                id="comparison-active-transaction"
+                class="comparison-active-transaction"
+                role="option"
+                aria-selected="true"
+                aria-live="polite"
+              >
+                <code id="comparison-navigator-txid">Waiting</code>
+                <span id="comparison-navigator-variant"></span>
+              </div>
+            </div>
+            <p id="comparison-navigator-instructions">
+              Use arrow keys to visit every transaction in this region, Home or
+              End to jump, Page Up or Page Down to move by 100, and Enter to
+              inspect the current transaction.
+            </p>
+          </div>
+          <p id="comparison-visual-summary" class="visual-summary">
+            Each transaction ID appears once: present in both snapshots,
+            observed only in source A snapshot, or observed only in source B
+            snapshot.
+          </p>
+        </section>
+
+        <aside
+          class="inspector-panel comparison-inspector"
+          aria-labelledby="region-name"
+        >
+          <div class="inspector-heading">
+            <div>
+              <p id="region-eyebrow" class="eyebrow">Membership region</p>
+              <h2 id="region-name">Present in both snapshots</h2>
+            </div>
+            <span class="policy-badge">Current snapshots</span>
+          </div>
+          <p id="region-description" class="rule-description">
+            Transaction IDs observed in both independently sampled mempools.
+          </p>
+          <p class="policy-note">
+            Presence and absence describe these two sampled mempools only. They
+            do not establish why the memberships differ.
+          </p>
+
+          <div id="policy-source-row" class="mode-row">
+            <span class="toolbar-label">Policy source</span>
+            <div
+              class="segmented compact"
+              aria-label="Policy classification source"
+            >
+              <button id="policy-left" type="button" aria-pressed="true">
+                Source A
+              </button>
+              <button id="policy-right" type="button" aria-pressed="false">
+                Source B
+              </button>
+            </div>
+          </div>
+
+          <dl class="population-metrics comparison-population-metrics">
+            <div>
+              <dt>Matches</dt>
+              <dd id="comparison-match-count">0</dd>
+            </div>
+            <div>
+              <dt>Virtual size</dt>
+              <dd id="comparison-match-vsize">0 vB</dd>
+            </div>
+            <div>
+              <dt>Union share</dt>
+              <dd id="comparison-match-share">0%</dd>
+            </div>
+          </dl>
+
+          <section
+            class="comparison-policy-section"
+            aria-labelledby="marginal-rules-heading"
+          >
+            <div class="section-heading">
+              <h3 id="marginal-rules-heading">Marginal rule filters</h3>
+              <button id="clear-policy-filter" type="button">Show all</button>
+            </div>
+            <nav
+              id="comparison-rule-list"
+              class="rule-list"
+              aria-label="BIP-110 marginal rule filters"
+            ></nav>
+            <p class="rule-overlap-note">
+              Rule totals overlap. Exact and partial combinations remain
+              separate below.
+            </p>
+          </section>
+
+          <section
+            class="comparison-bucket-section"
+            aria-labelledby="policy-buckets-heading"
+          >
+            <div class="section-heading">
+              <h3 id="policy-buckets-heading">Observed policy buckets</h3>
+              <span id="policy-bucket-summary">No snapshot</span>
+            </div>
+            <div id="policy-buckets" class="policy-bucket-list"></div>
+          </section>
+
+          <section
+            class="sample-section"
+            aria-labelledby="comparison-sample-heading"
+          >
+            <div class="section-heading">
+              <h3 id="comparison-sample-heading">Sample transactions</h3>
+              <span id="comparison-sample-summary">No matches</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Transaction</th>
+                    <th scope="col">Source A policy</th>
+                    <th scope="col">Source B policy</th>
+                    <th scope="col">Variant</th>
+                  </tr>
+                </thead>
+                <tbody id="comparison-transactions"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section
+            class="detail-section"
+            aria-labelledby="comparison-detail-heading"
+          >
+            <div class="section-heading">
+              <h3 id="comparison-detail-heading">Selected transaction</h3>
+              <span id="comparison-detail-status">Choose a sample</span>
+            </div>
+            <div id="comparison-detail" class="comparison-detail"></div>
+          </section>
+        </aside>
+      </div>
+
+      <!-- Secondary derived panels follow the primary comparison workspace so deferred rendering cannot displace the interactive view. -->
       <section
         id="comparison-distributions"
         class="comparison-distributions"
@@ -385,213 +606,6 @@
           unavailable after its pass completes or pauses.
         </p>
       </section>
-
-      <section
-        id="comparison-regions"
-        class="comparison-region-controls"
-        aria-label="Membership regions"
-      >
-        <button type="button" data-region="left_only" aria-pressed="false">
-          <span>Observed only in source A</span>
-          <strong>0</strong>
-          <small>0 vB</small>
-        </button>
-        <button type="button" data-region="common" aria-pressed="true">
-          <span>Present in both snapshots</span>
-          <strong>0</strong>
-          <small>0 vB in each source</small>
-        </button>
-        <button type="button" data-region="right_only" aria-pressed="false">
-          <span>Observed only in source B</span>
-          <strong>0</strong>
-          <small>0 vB</small>
-        </button>
-      </section>
-
-      <div class="workspace comparison-workspace">
-        <section
-          class="terrain-panel"
-          aria-label="Current membership comparison"
-        >
-          <div class="terrain-heading comparison-terrain-heading">
-            <div>
-              <p class="eyebrow">Current membership union</p>
-              <h2>Snapshot overlap</h2>
-            </div>
-            <dl class="comparison-union-total">
-              <div>
-                <dt>Union</dt>
-                <dd id="union-count">0 txids</dd>
-              </div>
-            </dl>
-          </div>
-          <p id="comparison-empty" class="empty-state">
-            Choose two sources with complete snapshots.
-          </p>
-          <div id="comparison-stage" class="comparison-stage" hidden>
-            <canvas
-              id="comparison-canvas"
-              tabindex="0"
-              role="img"
-              aria-describedby="comparison-visual-summary comparison-navigator-instructions"
-            ></canvas>
-          </div>
-          <div
-            id="comparison-transaction-navigator"
-            class="comparison-transaction-navigator"
-            hidden
-          >
-            <div class="comparison-navigator-heading">
-              <span class="toolbar-label">Keyboard transaction navigator</span>
-              <span id="comparison-navigator-summary">No transactions</span>
-            </div>
-            <div
-              id="comparison-transaction-listbox"
-              class="comparison-transaction-listbox"
-              role="listbox"
-              tabindex="0"
-              aria-label="Transactions in the selected membership region"
-              aria-activedescendant="comparison-active-transaction"
-              aria-describedby="comparison-navigator-instructions"
-            >
-              <div
-                id="comparison-active-transaction"
-                class="comparison-active-transaction"
-                role="option"
-                aria-selected="true"
-                aria-live="polite"
-              >
-                <code id="comparison-navigator-txid">Waiting</code>
-                <span id="comparison-navigator-variant"></span>
-              </div>
-            </div>
-            <p id="comparison-navigator-instructions">
-              Use arrow keys to visit every transaction in this region, Home or
-              End to jump, Page Up or Page Down to move by 100, and Enter to
-              inspect the current transaction.
-            </p>
-          </div>
-          <p id="comparison-visual-summary" class="visual-summary">
-            Each transaction ID appears once: present in both snapshots,
-            observed only in source A snapshot, or observed only in source B
-            snapshot.
-          </p>
-        </section>
-
-        <aside
-          class="inspector-panel comparison-inspector"
-          aria-labelledby="region-name"
-        >
-          <div class="inspector-heading">
-            <div>
-              <p id="region-eyebrow" class="eyebrow">Membership region</p>
-              <h2 id="region-name">Present in both snapshots</h2>
-            </div>
-            <span class="policy-badge">Current snapshots</span>
-          </div>
-          <p id="region-description" class="rule-description">
-            Transaction IDs observed in both independently sampled mempools.
-          </p>
-          <p class="policy-note">
-            Presence and absence describe these two sampled mempools only. They
-            do not establish why the memberships differ.
-          </p>
-
-          <div id="policy-source-row" class="mode-row">
-            <span class="toolbar-label">Policy source</span>
-            <div
-              class="segmented compact"
-              aria-label="Policy classification source"
-            >
-              <button id="policy-left" type="button" aria-pressed="true">
-                Source A
-              </button>
-              <button id="policy-right" type="button" aria-pressed="false">
-                Source B
-              </button>
-            </div>
-          </div>
-
-          <dl class="population-metrics comparison-population-metrics">
-            <div>
-              <dt>Matches</dt>
-              <dd id="comparison-match-count">0</dd>
-            </div>
-            <div>
-              <dt>Virtual size</dt>
-              <dd id="comparison-match-vsize">0 vB</dd>
-            </div>
-            <div>
-              <dt>Union share</dt>
-              <dd id="comparison-match-share">0%</dd>
-            </div>
-          </dl>
-
-          <section
-            class="comparison-policy-section"
-            aria-labelledby="marginal-rules-heading"
-          >
-            <div class="section-heading">
-              <h3 id="marginal-rules-heading">Marginal rule filters</h3>
-              <button id="clear-policy-filter" type="button">Show all</button>
-            </div>
-            <nav
-              id="comparison-rule-list"
-              class="rule-list"
-              aria-label="BIP-110 marginal rule filters"
-            ></nav>
-            <p class="rule-overlap-note">
-              Rule totals overlap. Exact and partial combinations remain
-              separate below.
-            </p>
-          </section>
-
-          <section
-            class="comparison-bucket-section"
-            aria-labelledby="policy-buckets-heading"
-          >
-            <div class="section-heading">
-              <h3 id="policy-buckets-heading">Observed policy buckets</h3>
-              <span id="policy-bucket-summary">No snapshot</span>
-            </div>
-            <div id="policy-buckets" class="policy-bucket-list"></div>
-          </section>
-
-          <section
-            class="sample-section"
-            aria-labelledby="comparison-sample-heading"
-          >
-            <div class="section-heading">
-              <h3 id="comparison-sample-heading">Sample transactions</h3>
-              <span id="comparison-sample-summary">No matches</span>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">Transaction</th>
-                    <th scope="col">Source A policy</th>
-                    <th scope="col">Source B policy</th>
-                    <th scope="col">Variant</th>
-                  </tr>
-                </thead>
-                <tbody id="comparison-transactions"></tbody>
-              </table>
-            </div>
-          </section>
-
-          <section
-            class="detail-section"
-            aria-labelledby="comparison-detail-heading"
-          >
-            <div class="section-heading">
-              <h3 id="comparison-detail-heading">Selected transaction</h3>
-              <span id="comparison-detail-status">Choose a sample</span>
-            </div>
-            <div id="comparison-detail" class="comparison-detail"></div>
-          </section>
-        </aside>
-      </div>
     </main>
 
     <script type="module" src="/src/comparison-main.ts"></script>

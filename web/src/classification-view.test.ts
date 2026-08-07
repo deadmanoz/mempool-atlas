@@ -49,9 +49,16 @@ describe("classification view model", () => {
       transaction(2, ["p2tr"], 200),
       transaction(3, ["p2wpkh", "signals_rbf"], 100),
     ];
-    expect(
-      classificationPopulation(transactions, "transaction_properties", "p2tr"),
-    ).toMatchObject({ count: 2, vsize: 500, totalShare: 2 / 3 });
+    const p2tr = classificationPopulation(
+      transactions,
+      "transaction_properties",
+      "p2tr",
+    );
+    expect(p2tr).toMatchObject({ count: 2, vsize: 500, totalShare: 2 / 3 });
+    expect(p2tr.transactions.map(({ txid }) => txid)).toEqual([
+      transactions[0]?.txid,
+      transactions[1]?.txid,
+    ]);
     expect(
       classificationPopulation(
         transactions,

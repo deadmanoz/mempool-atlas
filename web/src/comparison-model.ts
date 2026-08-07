@@ -1,10 +1,17 @@
 import type { ViolationSignatureKey } from "./terrain";
+import {
+  comparePackedSnapshotRows,
+  packedSnapshotRowCount,
+  packedSnapshotRowVsize,
+  packedSnapshotRowsShareWtxid,
+  packedSnapshotTransaction,
+} from "./packed-store";
 import type {
   Bip110Status,
   MempoolSnapshot,
   MempoolTransaction,
   RuleId,
-  SourceSnapshotResponse,
+  LoadedSourcePublication,
 } from "./types";
 
 export type ComparisonSide = "left" | "right";
@@ -12,7 +19,7 @@ export type ComparisonRegionKey = "common" | "left_only" | "right_only";
 export type ComparisonPolicyStatus = Bip110Status | "unclassified";
 
 export interface LoadedSourceSnapshot {
-  source: SourceSnapshotResponse["source"];
+  source: LoadedSourcePublication["source"];
   snapshot: MempoolSnapshot;
 }
 
@@ -48,6 +55,7 @@ export interface CurrentComparison {
   common: ComparedTransaction[];
   left_only: ComparedTransaction[];
   right_only: ComparedTransaction[];
+  common_differing_wtxids: Uint8Array;
   totals: ComparisonTotals;
 }
 
@@ -57,29 +65,289 @@ export type ComparisonPolicyFilter =
   | { kind: "status"; status: ComparisonPolicyStatus }
   | { kind: "signature"; signature: ViolationSignatureKey };
 
-const addVsize = (total: number, transaction: MempoolTransaction): number =>
-  total + transaction.vsize;
+const COMPARISON_ROW_CACHE_LIMIT = 256;
+
+interface ComparisonMembership {
+  common: ComparedTransaction[];
+  left_only: ComparedTransaction[];
+  right_only: ComparedTransaction[];
+  common_differing_wtxids: Uint8Array;
+  totals: ComparisonTotals;
+}
 
 const comparedEntry = (
   left: MempoolTransaction | null,
   right: MempoolTransaction | null,
+  membershipReady: boolean,
 ): ComparedTransaction => ({
   txid: left?.txid ?? right?.txid ?? "",
   left,
   right,
   same_wtxid:
-    left === null || right === null ? null : left.wtxid === right.wtxid,
+    left === null || right === null || !membershipReady
+      ? null
+      : left.wtxid === right.wtxid,
 });
 
-export const requireLoadedSnapshot = (
-  response: SourceSnapshotResponse,
-): LoadedSourceSnapshot => {
-  if (response.snapshot === null) {
-    throw new Error(
-      `${response.source.source_label} has no complete mempool snapshot yet`,
-    );
+const isArrayIndex = (property: PropertyKey): number | null => {
+  if (typeof property !== "string" || !/^(0|[1-9][0-9]*)$/.test(property)) {
+    return null;
   }
-  return { source: response.source, snapshot: response.snapshot };
+  const index = Number(property);
+  return Number.isSafeInteger(index) ? index : null;
+};
+
+const lazyComparedEntries = (
+  length: number,
+  materialize: (index: number) => ComparedTransaction,
+): ComparedTransaction[] => {
+  const target: ComparedTransaction[] = [];
+  const cache = new Map<number, ComparedTransaction>();
+  const entryAt = (index: number): ComparedTransaction | undefined => {
+    if (index < 0 || index >= length) return undefined;
+    const cached = cache.get(index);
+    if (cached !== undefined) {
+      cache.delete(index);
+      cache.set(index, cached);
+      return cached;
+    }
+    const entry = materialize(index);
+    cache.set(index, entry);
+    if (cache.size > COMPARISON_ROW_CACHE_LIMIT) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    return entry;
+  };
+
+  return new Proxy(target, {
+    get(array, property, receiver) {
+      if (property === "length") return length;
+      if (property === Symbol.iterator) {
+        return function* (): IterableIterator<ComparedTransaction> {
+          for (let index = 0; index < length; index += 1) {
+            const entry = entryAt(index);
+            if (entry !== undefined) yield entry;
+          }
+        };
+      }
+      const index = isArrayIndex(property);
+      return index === null
+        ? Reflect.get(array, property, receiver)
+        : entryAt(index);
+    },
+    has(array, property) {
+      const index = isArrayIndex(property);
+      return index === null
+        ? Reflect.has(array, property)
+        : index >= 0 && index < length;
+    },
+    getOwnPropertyDescriptor(array, property) {
+      const index = isArrayIndex(property);
+      if (index !== null && index < length) {
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: false,
+          value: entryAt(index),
+        };
+      }
+      return Reflect.getOwnPropertyDescriptor(array, property);
+    },
+  });
+};
+
+interface PackedMergeVisitor {
+  common(leftRow: number, rightRow: number): void;
+  leftOnly(leftRow: number): void;
+  rightOnly(rightRow: number): void;
+}
+
+const visitPackedMerge = (
+  leftSnapshot: MempoolSnapshot,
+  leftCount: number,
+  rightSnapshot: MempoolSnapshot,
+  rightCount: number,
+  visitor: PackedMergeVisitor,
+): void => {
+  let leftRow = 0;
+  let rightRow = 0;
+  while (leftRow < leftCount || rightRow < rightCount) {
+    if (leftRow >= leftCount) {
+      visitor.rightOnly(rightRow);
+      rightRow += 1;
+      continue;
+    }
+    if (rightRow >= rightCount) {
+      visitor.leftOnly(leftRow);
+      leftRow += 1;
+      continue;
+    }
+    const order = comparePackedSnapshotRows(
+      leftSnapshot,
+      leftRow,
+      rightSnapshot,
+      rightRow,
+    );
+    if (order === 0) {
+      visitor.common(leftRow, rightRow);
+      leftRow += 1;
+      rightRow += 1;
+    } else if (order < 0) {
+      visitor.leftOnly(leftRow);
+      leftRow += 1;
+    } else {
+      visitor.rightOnly(rightRow);
+      rightRow += 1;
+    }
+  }
+};
+
+const requirePackedVsize = (snapshot: MempoolSnapshot, row: number): number => {
+  const vsize = packedSnapshotRowVsize(snapshot, row);
+  if (vsize === undefined) {
+    throw new TypeError("Packed transaction vsize is unavailable");
+  }
+  return vsize;
+};
+
+const requirePackedTransaction = (
+  snapshot: MempoolSnapshot,
+  row: number,
+): MempoolTransaction => {
+  const transaction = packedSnapshotTransaction(snapshot, row);
+  if (transaction === undefined) {
+    throw new TypeError("Packed transaction row is unavailable");
+  }
+  return transaction;
+};
+
+const comparePackedMembership = (
+  left: LoadedSourceSnapshot,
+  right: LoadedSourceSnapshot,
+  membershipReady: boolean,
+): ComparisonMembership => {
+  const leftCount = packedSnapshotRowCount(left.snapshot);
+  const rightCount = packedSnapshotRowCount(right.snapshot);
+  if (leftCount > 0xffff_ffff || rightCount > 0xffff_ffff) {
+    throw new RangeError("Packed comparison row count exceeds Uint32 capacity");
+  }
+
+  let commonCount = 0;
+  let leftOnlyCount = 0;
+  let rightOnlyCount = 0;
+  let commonLeftVsize = 0;
+  let commonRightVsize = 0;
+  let leftOnlyVsize = 0;
+  let rightOnlyVsize = 0;
+  visitPackedMerge(left.snapshot, leftCount, right.snapshot, rightCount, {
+    common: (leftRow, rightRow) => {
+      commonCount += 1;
+      commonLeftVsize += requirePackedVsize(left.snapshot, leftRow);
+      commonRightVsize += requirePackedVsize(right.snapshot, rightRow);
+    },
+    leftOnly: (leftRow) => {
+      leftOnlyCount += 1;
+      leftOnlyVsize += requirePackedVsize(left.snapshot, leftRow);
+    },
+    rightOnly: (rightRow) => {
+      rightOnlyCount += 1;
+      rightOnlyVsize += requirePackedVsize(right.snapshot, rightRow);
+    },
+  });
+
+  const commonRows = new Uint32Array(commonCount * 2);
+  const commonDifferingWtxids = new Uint8Array(commonCount);
+  const leftOnlyRows = new Uint32Array(leftOnlyCount);
+  const rightOnlyRows = new Uint32Array(rightOnlyCount);
+  let commonIndex = 0;
+  let leftOnlyIndex = 0;
+  let rightOnlyIndex = 0;
+  visitPackedMerge(left.snapshot, leftCount, right.snapshot, rightCount, {
+    common: (leftRow, rightRow) => {
+      commonRows[commonIndex * 2] = leftRow;
+      commonRows[commonIndex * 2 + 1] = rightRow;
+      if (membershipReady) {
+        const sameWtxid = packedSnapshotRowsShareWtxid(
+          left.snapshot,
+          leftRow,
+          right.snapshot,
+          rightRow,
+        );
+        if (sameWtxid === null) {
+          throw new TypeError("Packed witness comparison is unavailable");
+        }
+        commonDifferingWtxids[commonIndex] = sameWtxid ? 0 : 1;
+      }
+      commonIndex += 1;
+    },
+    leftOnly: (leftRow) => {
+      leftOnlyRows[leftOnlyIndex] = leftRow;
+      leftOnlyIndex += 1;
+    },
+    rightOnly: (rightRow) => {
+      rightOnlyRows[rightOnlyIndex] = rightRow;
+      rightOnlyIndex += 1;
+    },
+  });
+
+  return {
+    common: lazyComparedEntries(commonCount, (index) => {
+      const leftRow = commonRows[index * 2];
+      const rightRow = commonRows[index * 2 + 1];
+      if (leftRow === undefined || rightRow === undefined) {
+        throw new RangeError("Packed common comparison index is unavailable");
+      }
+      return comparedEntry(
+        requirePackedTransaction(left.snapshot, leftRow),
+        requirePackedTransaction(right.snapshot, rightRow),
+        membershipReady,
+      );
+    }),
+    left_only: lazyComparedEntries(leftOnlyCount, (index) => {
+      const row = leftOnlyRows[index];
+      if (row === undefined) {
+        throw new RangeError(
+          "Packed left-only comparison index is unavailable",
+        );
+      }
+      return comparedEntry(
+        requirePackedTransaction(left.snapshot, row),
+        null,
+        membershipReady,
+      );
+    }),
+    right_only: lazyComparedEntries(rightOnlyCount, (index) => {
+      const row = rightOnlyRows[index];
+      if (row === undefined) {
+        throw new RangeError(
+          "Packed right-only comparison index is unavailable",
+        );
+      }
+      return comparedEntry(
+        null,
+        requirePackedTransaction(right.snapshot, row),
+        membershipReady,
+      );
+    }),
+    common_differing_wtxids: commonDifferingWtxids,
+    totals: {
+      union_count: commonCount + leftOnlyCount + rightOnlyCount,
+      common_count: commonCount,
+      common_left_vsize: commonLeftVsize,
+      common_right_vsize: commonRightVsize,
+      left_only_count: leftOnlyCount,
+      left_only_vsize: leftOnlyVsize,
+      right_only_count: rightOnlyCount,
+      right_only_vsize: rightOnlyVsize,
+    },
+  };
+};
+
+export const requireLoadedSnapshot = (
+  response: LoadedSourcePublication,
+): LoadedSourceSnapshot => {
+  return { source: response.source, snapshot: response.publication };
 };
 
 /**
@@ -90,60 +358,13 @@ export const requireLoadedSnapshot = (
 export const compareCurrentSnapshots = (
   left: LoadedSourceSnapshot,
   right: LoadedSourceSnapshot,
+  membershipReady = true,
 ): CurrentComparison => {
   if (left.snapshot.source_id === right.snapshot.source_id) {
     throw new Error("A comparison requires two distinct sources");
   }
 
-  const common: ComparedTransaction[] = [];
-  const leftOnly: ComparedTransaction[] = [];
-  const rightOnly: ComparedTransaction[] = [];
-  let commonLeftVsize = 0;
-  let commonRightVsize = 0;
-  let leftOnlyVsize = 0;
-  let rightOnlyVsize = 0;
-  let leftIndex = 0;
-  let rightIndex = 0;
-
-  while (
-    leftIndex < left.snapshot.transactions.length ||
-    rightIndex < right.snapshot.transactions.length
-  ) {
-    const leftTransaction = left.snapshot.transactions[leftIndex];
-    const rightTransaction = right.snapshot.transactions[rightIndex];
-    if (leftTransaction === undefined) {
-      if (rightTransaction === undefined) {
-        break;
-      }
-      rightOnly.push(comparedEntry(null, rightTransaction));
-      rightOnlyVsize = addVsize(rightOnlyVsize, rightTransaction);
-      rightIndex += 1;
-      continue;
-    }
-    if (rightTransaction === undefined) {
-      leftOnly.push(comparedEntry(leftTransaction, null));
-      leftOnlyVsize = addVsize(leftOnlyVsize, leftTransaction);
-      leftIndex += 1;
-      continue;
-    }
-    if (leftTransaction.txid === rightTransaction.txid) {
-      common.push(comparedEntry(leftTransaction, rightTransaction));
-      commonLeftVsize = addVsize(commonLeftVsize, leftTransaction);
-      commonRightVsize = addVsize(commonRightVsize, rightTransaction);
-      leftIndex += 1;
-      rightIndex += 1;
-      continue;
-    }
-    if (leftTransaction.txid < rightTransaction.txid) {
-      leftOnly.push(comparedEntry(leftTransaction, null));
-      leftOnlyVsize = addVsize(leftOnlyVsize, leftTransaction);
-      leftIndex += 1;
-    } else {
-      rightOnly.push(comparedEntry(null, rightTransaction));
-      rightOnlyVsize = addVsize(rightOnlyVsize, rightTransaction);
-      rightIndex += 1;
-    }
-  }
+  const membership = comparePackedMembership(left, right, membershipReady);
 
   const leftObserved = left.snapshot.observed_at_ms;
   const rightObserved = right.snapshot.observed_at_ms;
@@ -157,19 +378,7 @@ export const compareCurrentSnapshots = (
         : leftObserved < rightObserved
           ? "left"
           : "right",
-    common,
-    left_only: leftOnly,
-    right_only: rightOnly,
-    totals: {
-      union_count: common.length + leftOnly.length + rightOnly.length,
-      common_count: common.length,
-      common_left_vsize: commonLeftVsize,
-      common_right_vsize: commonRightVsize,
-      left_only_count: leftOnly.length,
-      left_only_vsize: leftOnlyVsize,
-      right_only_count: rightOnly.length,
-      right_only_vsize: rightOnlyVsize,
-    },
+    ...membership,
   };
 };
 

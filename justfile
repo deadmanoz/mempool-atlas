@@ -25,7 +25,7 @@ test-release:
     ./scripts/test-release-head.sh
 
 test-rust:
-    cargo test
+    cargo test --features perf-fixtures
 
 test-web:
     npm --prefix web test
@@ -33,6 +33,7 @@ test-web:
 # Browser-level viewport coverage. Playwright starts the fixture Atlas API and
 # Vite itself; run `just test-web-e2e-install` once to fetch the browser.
 test-web-e2e:
+    just functional-fixtures
     npm --prefix web run test:e2e
 
 test-web-e2e-install:
@@ -41,7 +42,7 @@ test-web-e2e-install:
 lint:
     just structure
     cargo fmt --all -- --check
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --features perf-fixtures -- -D warnings
     npm --prefix web run check
 
 structure:
@@ -59,8 +60,27 @@ run: dev
 web-dev:
     npm --prefix web run dev
 
-# Run the deterministic fixture Atlas API for frontend-only development.
-web-fixtures:
+# Export the small canonical fixture set used by frontend development and E2E.
+functional-fixtures:
+    cargo run --release --features perf-fixtures --bin export-perf-fixture -- --profile functional
+
+# Export the functional fixtures plus the production-scale performance set.
+perf-fixtures: functional-fixtures
+    cargo run --release --features perf-fixtures --bin export-perf-fixture -- --profile performance
+
+# Record exact identity/gzip projections and enforce the v2 staged byte gates.
+stage-projection: perf-fixtures
+    node web/perf/project-stages.mjs
+
+# Benchmark the production web build against the production-scale fixtures.
+perf-web: stage-projection
+    npm --prefix web run build
+    rm -rf web/.perf-results/raw
+    npm --prefix web run test:perf
+    node web/perf/merge-results.mjs
+
+# Run the generated fixture Atlas API for frontend-only development.
+web-fixtures: functional-fixtures
     node web/dev/fixture-server.mjs
 
 smoke-public base_url source_id:
@@ -69,3 +89,5 @@ smoke-public base_url source_id:
 clean:
     cargo clean
     npm --prefix web run clean
+    rm -rf web/.perf-fixtures web/dist-perf
+    rm -rf web/.perf-results

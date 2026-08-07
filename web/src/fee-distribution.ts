@@ -1,3 +1,7 @@
+import {
+  forEachCooperatively,
+  type CooperativeWorkOptions,
+} from "./cooperative-work";
 import type { MempoolTransaction } from "./types";
 
 export type DistributionMetric = "count" | "vsize";
@@ -104,6 +108,52 @@ export interface JointDensity {
 export const JOINT_COLUMNS = 22;
 export const JOINT_ROWS = 14;
 
+interface DensityAccumulator extends JointDensity {}
+
+const createDensityAccumulator = (
+  columns: number,
+  rows: number,
+): DensityAccumulator => ({
+  columns,
+  rows,
+  cells: new Array<number>(columns * rows).fill(0),
+  columnTotals: new Array<number>(columns).fill(0),
+  rowTotals: new Array<number>(rows).fill(0),
+  maxCell: 0,
+  totalWeight: 0,
+});
+
+const addDensityTransaction = (
+  accumulator: DensityAccumulator,
+  transaction: MempoolTransaction,
+  metric: DistributionMetric,
+  xDomain: Readonly<LogDomain>,
+  xValue: (transaction: MempoolTransaction) => number,
+  yDomain: Readonly<LogDomain>,
+  yValue: (transaction: MempoolTransaction) => number,
+): void => {
+  const weight = metricWeight(transaction, metric);
+  if (weight <= 0) return;
+  const xPosition = logDomainPosition(xDomain, xValue(transaction));
+  const yPosition = logDomainPosition(yDomain, yValue(transaction));
+  const column = Math.min(
+    accumulator.columns - 1,
+    Math.floor(xPosition * accumulator.columns),
+  );
+  const row = Math.min(
+    accumulator.rows - 1,
+    Math.floor(yPosition * accumulator.rows),
+  );
+  const index = row * accumulator.columns + column;
+  const updated = (accumulator.cells[index] ?? 0) + weight;
+  accumulator.cells[index] = updated;
+  accumulator.columnTotals[column] =
+    (accumulator.columnTotals[column] ?? 0) + weight;
+  accumulator.rowTotals[row] = (accumulator.rowTotals[row] ?? 0) + weight;
+  accumulator.totalWeight += weight;
+  if (updated > accumulator.maxCell) accumulator.maxCell = updated;
+};
+
 export const buildDensity = (
   transactions: readonly MempoolTransaction[],
   metric: DistributionMetric,
@@ -113,40 +163,54 @@ export const buildDensity = (
   yValue: (transaction: MempoolTransaction) => number,
   columns: number = JOINT_COLUMNS,
   rows: number = JOINT_ROWS,
+  keep: (transaction: MempoolTransaction) => boolean = () => true,
 ): JointDensity => {
-  const cells = new Array<number>(columns * rows).fill(0);
-  const columnTotals = new Array<number>(columns).fill(0);
-  const rowTotals = new Array<number>(rows).fill(0);
-  let totalWeight = 0;
-  let maxCell = 0;
+  const accumulator = createDensityAccumulator(columns, rows);
   for (const transaction of transactions) {
-    const weight = metricWeight(transaction, metric);
-    if (weight <= 0) {
-      continue;
-    }
-    const xPosition = logDomainPosition(xDomain, xValue(transaction));
-    const yPosition = logDomainPosition(yDomain, yValue(transaction));
-    const column = Math.min(columns - 1, Math.floor(xPosition * columns));
-    const row = Math.min(rows - 1, Math.floor(yPosition * rows));
-    const index = row * columns + column;
-    const updated = (cells[index] ?? 0) + weight;
-    cells[index] = updated;
-    columnTotals[column] = (columnTotals[column] ?? 0) + weight;
-    rowTotals[row] = (rowTotals[row] ?? 0) + weight;
-    totalWeight += weight;
-    if (updated > maxCell) {
-      maxCell = updated;
-    }
+    if (!keep(transaction)) continue;
+    addDensityTransaction(
+      accumulator,
+      transaction,
+      metric,
+      xDomain,
+      xValue,
+      yDomain,
+      yValue,
+    );
   }
-  return {
-    columns,
-    rows,
-    cells,
-    columnTotals,
-    rowTotals,
-    maxCell,
-    totalWeight,
-  };
+  return accumulator;
+};
+
+export const buildDensityCooperatively = async (
+  transactions: readonly MempoolTransaction[],
+  metric: DistributionMetric,
+  xDomain: Readonly<LogDomain>,
+  xValue: (transaction: MempoolTransaction) => number,
+  yDomain: Readonly<LogDomain>,
+  yValue: (transaction: MempoolTransaction) => number,
+  columns: number = JOINT_COLUMNS,
+  rows: number = JOINT_ROWS,
+  options: CooperativeWorkOptions = {},
+  keep: (transaction: MempoolTransaction) => boolean = () => true,
+): Promise<JointDensity> => {
+  const accumulator = createDensityAccumulator(columns, rows);
+  await forEachCooperatively(
+    transactions,
+    (transaction) => {
+      if (!keep(transaction)) return;
+      addDensityTransaction(
+        accumulator,
+        transaction,
+        metric,
+        xDomain,
+        xValue,
+        yDomain,
+        yValue,
+      );
+    },
+    options,
+  );
+  return accumulator;
 };
 
 export const buildJointDensity = (
@@ -166,6 +230,25 @@ export const buildJointDensity = (
     rows,
   );
 
+export const buildJointDensityCooperatively = (
+  transactions: readonly MempoolTransaction[],
+  metric: DistributionMetric,
+  options: CooperativeWorkOptions = {},
+  columns: number = JOINT_COLUMNS,
+  rows: number = JOINT_ROWS,
+): Promise<JointDensity> =>
+  buildDensityCooperatively(
+    transactions,
+    metric,
+    FEE_RATE_DOMAIN,
+    transactionFeeRate,
+    VSIZE_DOMAIN,
+    ({ vsize }) => vsize,
+    columns,
+    rows,
+    options,
+  );
+
 /**
  * Input-count by output-count density over transactions with structure facts.
  * Transactions whose structure has not arrived are skipped.
@@ -177,7 +260,7 @@ export const buildComplexityDensity = (
   rows: number = JOINT_ROWS,
 ): JointDensity =>
   buildDensity(
-    transactions.filter(({ structure }) => structure !== null),
+    transactions,
     metric,
     IO_COUNT_DOMAIN,
     ({ structure }) => structure?.input_count ?? 0,
@@ -185,6 +268,27 @@ export const buildComplexityDensity = (
     ({ structure }) => structure?.output_count ?? 0,
     columns,
     rows,
+    ({ structure }) => structure !== null,
+  );
+
+export const buildComplexityDensityCooperatively = (
+  transactions: readonly MempoolTransaction[],
+  metric: DistributionMetric,
+  options: CooperativeWorkOptions = {},
+  columns: number = JOINT_COLUMNS,
+  rows: number = JOINT_ROWS,
+): Promise<JointDensity> =>
+  buildDensityCooperatively(
+    transactions,
+    metric,
+    IO_COUNT_DOMAIN,
+    ({ structure }) => structure?.input_count ?? 0,
+    IO_COUNT_DOMAIN,
+    ({ structure }) => structure?.output_count ?? 0,
+    columns,
+    rows,
+    options,
+    ({ structure }) => structure !== null,
   );
 
 export interface SpectrumBinSegment {
@@ -207,6 +311,59 @@ export interface FeeSpectrum {
 
 export const SPECTRUM_BINS = 22;
 
+interface SpectrumAccumulator extends FeeSpectrum {}
+
+const createSpectrumAccumulator = (binCount: number): SpectrumAccumulator => ({
+  bins: Array.from({ length: binCount }, () => ({
+    total: 0,
+    segments: [],
+  })),
+  maxBin: 0,
+  totalWeight: 0,
+});
+
+const addSpectrumTransaction = (
+  weights: number[],
+  transaction: MempoolTransaction,
+  metric: DistributionMetric,
+  domain: Readonly<LogDomain>,
+  value: (transaction: MempoolTransaction) => number,
+): number => {
+  const weight = metricWeight(transaction, metric);
+  if (weight <= 0) return 0;
+  const position = logDomainPosition(domain, value(transaction));
+  const bin = Math.min(
+    weights.length - 1,
+    Math.floor(position * weights.length),
+  );
+  weights[bin] = (weights[bin] ?? 0) + weight;
+  return weight;
+};
+
+const finishSpectrumGroup = (
+  accumulator: SpectrumAccumulator,
+  group: TransactionGroup,
+  weights: readonly number[],
+  groupWeight: number,
+): void => {
+  if (groupWeight === 0) return;
+  accumulator.totalWeight += groupWeight;
+  for (let bin = 0; bin < weights.length; bin += 1) {
+    const weight = weights[bin] ?? 0;
+    if (weight <= 0) continue;
+    const entry = accumulator.bins[bin];
+    if (entry === undefined) continue;
+    entry.total += weight;
+    entry.segments.push({
+      key: group.key,
+      label: group.label,
+      color: group.color,
+      weight,
+    });
+    if (entry.total > accumulator.maxBin) accumulator.maxBin = entry.total;
+  }
+};
+
 /**
  * Stacked fee-rate histogram: per log-scale fee bin, one segment per group in
  * group order. Groups must partition their population; bins cover the whole
@@ -219,51 +376,55 @@ export const buildSpectrum = (
   value: (transaction: MempoolTransaction) => number,
   binCount: number = SPECTRUM_BINS,
 ): FeeSpectrum => {
-  const bins: SpectrumBin[] = Array.from({ length: binCount }, () => ({
-    total: 0,
-    segments: [],
-  }));
-  let totalWeight = 0;
-  let maxBin = 0;
+  const accumulator = createSpectrumAccumulator(binCount);
   for (const group of groups) {
     const weights = new Array<number>(binCount).fill(0);
     let groupWeight = 0;
     for (const transaction of group.transactions) {
-      const weight = metricWeight(transaction, metric);
-      if (weight <= 0) {
-        continue;
-      }
-      const position = logDomainPosition(domain, value(transaction));
-      const bin = Math.min(binCount - 1, Math.floor(position * binCount));
-      weights[bin] = (weights[bin] ?? 0) + weight;
-      groupWeight += weight;
+      groupWeight += addSpectrumTransaction(
+        weights,
+        transaction,
+        metric,
+        domain,
+        value,
+      );
     }
-    if (groupWeight === 0) {
-      continue;
-    }
-    totalWeight += groupWeight;
-    for (let bin = 0; bin < binCount; bin += 1) {
-      const weight = weights[bin] ?? 0;
-      if (weight <= 0) {
-        continue;
-      }
-      const entry = bins[bin];
-      if (entry === undefined) {
-        continue;
-      }
-      entry.total += weight;
-      entry.segments.push({
-        key: group.key,
-        label: group.label,
-        color: group.color,
-        weight,
-      });
-      if (entry.total > maxBin) {
-        maxBin = entry.total;
-      }
-    }
+    finishSpectrumGroup(accumulator, group, weights, groupWeight);
   }
-  return { bins, maxBin, totalWeight };
+  return accumulator;
+};
+
+export const buildSpectrumCooperatively = async (
+  groups: readonly TransactionGroup[],
+  metric: DistributionMetric,
+  domain: Readonly<LogDomain>,
+  value: (transaction: MempoolTransaction) => number,
+  options: CooperativeWorkOptions = {},
+  binCount: number = SPECTRUM_BINS,
+  keep: (transaction: MempoolTransaction) => boolean = () => true,
+): Promise<FeeSpectrum> => {
+  const accumulator = createSpectrumAccumulator(binCount);
+  for (const group of groups) {
+    const weights = new Array<number>(binCount).fill(0);
+    let groupWeight = 0;
+    await forEachCooperatively(
+      group.transactions,
+      (transaction) => {
+        if (!keep(transaction)) return;
+        groupWeight += addSpectrumTransaction(
+          weights,
+          transaction,
+          metric,
+          domain,
+          value,
+        );
+      },
+      options,
+    );
+    finishSpectrumGroup(accumulator, group, weights, groupWeight);
+  }
+  options.signal?.throwIfAborted();
+  return accumulator;
 };
 
 export const buildFeeSpectrum = (
@@ -276,5 +437,20 @@ export const buildFeeSpectrum = (
     metric,
     FEE_RATE_DOMAIN,
     (transaction) => transactionFeeRate(transaction),
+    binCount,
+  );
+
+export const buildFeeSpectrumCooperatively = (
+  groups: readonly TransactionGroup[],
+  metric: DistributionMetric,
+  options: CooperativeWorkOptions = {},
+  binCount: number = SPECTRUM_BINS,
+): Promise<FeeSpectrum> =>
+  buildSpectrumCooperatively(
+    groups,
+    metric,
+    FEE_RATE_DOMAIN,
+    transactionFeeRate,
+    options,
     binCount,
   );

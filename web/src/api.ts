@@ -1,27 +1,29 @@
 import type {
   Bip110Assessment,
   Bip110Status,
-  Bip110Summary,
   ChainTip,
   ClassificationResult,
   ClassificationProgress,
-  ClassifierDescriptor,
-  ClassifierMethodology,
-  ClassifierSemantics,
-  ClassifierSummary,
   MempoolSnapshot,
   MempoolTransaction,
   RuleAssessment,
   RuleId,
   RuleVerdict,
   SourceAvailability,
-  SourceSnapshotResponse,
+  LoadedSourcePublication,
   SourceSummary,
   SourcesResponse,
   TransactionDetailResponse,
-  TransactionStructure,
 } from "./types";
 import { RULE_IDS } from "./types";
+import type {
+  AtlasWorkerRequest,
+  AtlasWorkerResponse,
+} from "./atlas-worker-protocol";
+import {
+  createLoadedSourcePublication,
+  createPrimarySourcePublication,
+} from "./packed-store";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
@@ -38,13 +40,6 @@ export class AtlasRequestError extends Error {
 
 const isNonNegativeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-
-/**
- * Signed counterpart for delta-adjusted amounts. `prioritisetransaction` can
- * drive an ancestor fee below zero, so those fields admit negative integers.
- */
-const isSignedInteger = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value);
 
 const isSourceId = (value: unknown): value is string =>
   typeof value === "string" &&
@@ -181,25 +176,6 @@ const isTxid = (value: unknown): value is string =>
 const isClassifierKey = (value: unknown): value is string =>
   typeof value === "string" && /^[a-z][a-z0-9_]*$/.test(value);
 
-const parseClassifierMethodology = (value: unknown): ClassifierMethodology => {
-  if (
-    value === "exact" ||
-    value === "heuristic" ||
-    value === "fingerprint" ||
-    value === "policy"
-  ) {
-    return value;
-  }
-  throw new TypeError("Invalid classifier methodology");
-};
-
-const parseClassifierSemantics = (value: unknown): ClassifierSemantics => {
-  if (value === "multi_label" || value === "rule_set") {
-    return value;
-  }
-  throw new TypeError("Invalid classifier semantics");
-};
-
 const parseStringKeys = (value: unknown, field: string): string[] => {
   if (
     !Array.isArray(value) ||
@@ -209,153 +185,6 @@ const parseStringKeys = (value: unknown, field: string): string[] => {
     throw new TypeError(`Invalid ${field}`);
   }
   return value as string[];
-};
-
-const parseClassifierCatalog = (value: unknown): ClassifierDescriptor[] => {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new TypeError("Invalid classifier catalog");
-  }
-  const ids = new Set<string>();
-  const catalog = value.map((item, classifierIndex) => {
-    if (
-      !isRecord(item) ||
-      !hasOnlyKeys(item, [
-        "id",
-        "version",
-        "title",
-        "methodology",
-        "semantics",
-        "required_facts",
-        "labels",
-      ]) ||
-      !isClassifierKey(item.id) ||
-      ids.has(item.id) ||
-      typeof item.version !== "string" ||
-      item.version.trim().length === 0 ||
-      typeof item.title !== "string" ||
-      item.title.trim().length === 0 ||
-      !Array.isArray(item.labels) ||
-      item.labels.length === 0
-    ) {
-      throw new TypeError(
-        `Invalid classifier descriptor at index ${classifierIndex}`,
-      );
-    }
-    ids.add(item.id);
-    parseClassifierMethodology(item.methodology);
-    parseClassifierSemantics(item.semantics);
-    parseStringKeys(item.required_facts, "classifier required facts");
-    const labelKeys = new Set<string>();
-    for (const [labelIndex, label] of item.labels.entries()) {
-      if (
-        !isRecord(label) ||
-        !hasOnlyKeys(label, ["key", "label", "description"]) ||
-        !isClassifierKey(label.key) ||
-        labelKeys.has(label.key) ||
-        typeof label.label !== "string" ||
-        label.label.trim().length === 0 ||
-        typeof label.description !== "string" ||
-        label.description.trim().length === 0
-      ) {
-        throw new TypeError(
-          `Invalid classifier label at ${classifierIndex}:${labelIndex}`,
-        );
-      }
-      labelKeys.add(label.key);
-    }
-    return item as unknown as ClassifierDescriptor;
-  });
-  return catalog;
-};
-
-const parseClassificationResult = (
-  value: unknown,
-  descriptor: ClassifierDescriptor,
-  detailed: boolean,
-): ClassificationResult => {
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      "classifier_id",
-      "state",
-      "primary_label",
-      "labels",
-      "missing_facts",
-      "evidence",
-    ]) ||
-    value.classifier_id !== descriptor.id ||
-    (value.state !== "complete" && value.state !== "partial") ||
-    (value.primary_label !== null && !isClassifierKey(value.primary_label)) ||
-    (detailed ? value.evidence === null : value.evidence !== null)
-  ) {
-    throw new TypeError(`Invalid ${descriptor.id} classification result`);
-  }
-  const labels = parseStringKeys(value.labels, `${descriptor.id} labels`);
-  const missingFacts = parseStringKeys(
-    value.missing_facts,
-    `${descriptor.id} missing facts`,
-  );
-  const declaredLabels = new Set(descriptor.labels.map(({ key }) => key));
-  // A partial result may carry no labels at all: nothing was proven while a
-  // rule remained unresolved. A complete result always names a label.
-  if (
-    (labels.length === 0 && value.state !== "partial") ||
-    labels.some((label) => !declaredLabels.has(label)) ||
-    (value.primary_label !== null && !labels.includes(value.primary_label)) ||
-    (value.state === "complete" && missingFacts.length !== 0) ||
-    (value.state === "partial" && missingFacts.length === 0)
-  ) {
-    throw new TypeError(`Inconsistent ${descriptor.id} classification result`);
-  }
-  return value as unknown as ClassificationResult;
-};
-
-const parseClassificationResults = (
-  value: unknown,
-  catalog: ClassifierDescriptor[],
-  detailed: boolean,
-): ClassificationResult[] => {
-  if (!Array.isArray(value) || value.length !== catalog.length) {
-    throw new TypeError("Invalid transaction classifications");
-  }
-  return value.map((result, index) =>
-    parseClassificationResult(result, catalog[index]!, detailed),
-  );
-};
-
-const parseClassifierSummary = (
-  value: unknown,
-  descriptor: ClassifierDescriptor,
-  transactionCount: number,
-): ClassifierSummary => {
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      "classifier_id",
-      "complete_count",
-      "partial_count",
-      "unclassified_count",
-      "label_counts",
-    ]) ||
-    value.classifier_id !== descriptor.id ||
-    !isNonNegativeInteger(value.complete_count) ||
-    !isNonNegativeInteger(value.partial_count) ||
-    !isNonNegativeInteger(value.unclassified_count) ||
-    value.complete_count + value.partial_count + value.unclassified_count !==
-      transactionCount ||
-    !isRecord(value.label_counts)
-  ) {
-    throw new TypeError(`Invalid ${descriptor.id} classifier summary`);
-  }
-  const labelCounts = value.label_counts;
-  const expectedLabels = descriptor.labels.map(({ key }) => key);
-  if (
-    !hasOnlyKeys(labelCounts, expectedLabels) ||
-    !expectedLabels.every((key) => isNonNegativeInteger(labelCounts[key]))
-  ) {
-    throw new TypeError(`Invalid ${descriptor.id} label counts`);
-  }
-  return value as unknown as ClassifierSummary;
 };
 
 const parseRuleId = (value: unknown): RuleId => {
@@ -430,33 +259,6 @@ export const parseBip110Assessment = (
   }
 
   return value as unknown as Bip110Assessment;
-};
-
-const parseBip110Summary = (value: unknown): Bip110Summary => {
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      "evaluator_id",
-      "evaluator_version",
-      "scope",
-      "compatible_count",
-      "violating_count",
-      "indeterminate_count",
-      "unclassified_count",
-    ]) ||
-    typeof value.evaluator_id !== "string" ||
-    value.evaluator_id.trim().length === 0 ||
-    typeof value.evaluator_version !== "string" ||
-    value.evaluator_version.trim().length === 0 ||
-    value.scope !== "knots_mempool_policy" ||
-    !isNonNegativeInteger(value.compatible_count) ||
-    !isNonNegativeInteger(value.violating_count) ||
-    !isNonNegativeInteger(value.indeterminate_count) ||
-    !isNonNegativeInteger(value.unclassified_count)
-  ) {
-    throw new TypeError("Invalid BIP-110 summary");
-  }
-  return value as unknown as Bip110Summary;
 };
 
 export const parseSourceSummary = (value: unknown): SourceSummary => {
@@ -552,273 +354,6 @@ export const parseSourceSummary = (value: unknown): SourceSummary => {
   }
 
   return value as unknown as SourceSummary;
-};
-
-const parseTransactionStructure = (
-  value: unknown,
-  index: number,
-): TransactionStructure | null => {
-  if (value === null) {
-    return null;
-  }
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      "input_count",
-      "output_count",
-      "op_return_bytes",
-      "output_sats",
-      "witness_bytes",
-    ]) ||
-    !isNonNegativeInteger(value.input_count) ||
-    value.input_count === 0 ||
-    !isNonNegativeInteger(value.output_count) ||
-    value.output_count === 0 ||
-    !isNonNegativeInteger(value.op_return_bytes) ||
-    !isNonNegativeInteger(value.output_sats) ||
-    !isNonNegativeInteger(value.witness_bytes)
-  ) {
-    throw new TypeError(`Invalid transaction structure at index ${index}`);
-  }
-  return value as unknown as TransactionStructure;
-};
-
-const parseTransaction = (
-  value: unknown,
-  index: number,
-  catalog: ClassifierDescriptor[],
-): MempoolTransaction => {
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      "txid",
-      "wtxid",
-      "vsize",
-      "weight",
-      "fee_sats",
-      "entered_at_ms",
-      "ancestor_count",
-      "ancestor_vsize",
-      "ancestor_fee_sats",
-      "descendant_count",
-      "descendant_vsize",
-      "replaceable",
-      "structure",
-      "classifications",
-      "bip110",
-    ]) ||
-    !isTxid(value.txid) ||
-    !isTxid(value.wtxid) ||
-    !isNonNegativeInteger(value.vsize) ||
-    value.vsize === 0 ||
-    !isNonNegativeInteger(value.weight) ||
-    !isNonNegativeInteger(value.fee_sats) ||
-    !isNonNegativeInteger(value.entered_at_ms) ||
-    !isNonNegativeInteger(value.ancestor_count) ||
-    !isNonNegativeInteger(value.ancestor_vsize) ||
-    !isSignedInteger(value.ancestor_fee_sats) ||
-    !isNonNegativeInteger(value.descendant_count) ||
-    !isNonNegativeInteger(value.descendant_vsize) ||
-    typeof value.replaceable !== "boolean"
-  ) {
-    throw new TypeError(`Invalid transaction at index ${index}`);
-  }
-  if (value.weight === 0 || value.weight > value.vsize * 4) {
-    throw new TypeError(
-      `Transaction at index ${index} reports an inconsistent weight`,
-    );
-  }
-  if (
-    value.ancestor_count === 0 ||
-    value.descendant_count === 0 ||
-    value.ancestor_vsize < value.vsize ||
-    value.descendant_vsize < value.vsize
-  ) {
-    throw new TypeError(
-      `Transaction at index ${index} reports inconsistent ancestry`,
-    );
-  }
-  const structure = parseTransactionStructure(value.structure, index);
-  const assessment = parseBip110Assessment(value.bip110);
-  if ((structure === null) !== (assessment === null)) {
-    throw new TypeError(
-      `Transaction at index ${index} couples structure and assessment inconsistently`,
-    );
-  }
-  const classifications =
-    assessment === null
-      ? (() => {
-          if (
-            !Array.isArray(value.classifications) ||
-            value.classifications.length !== 0
-          ) {
-            throw new TypeError(
-              `Unclassified transaction at index ${index} contains classifier results`,
-            );
-          }
-          return [];
-        })()
-      : parseClassificationResults(value.classifications, catalog, false);
-  const policy = classifications.find(
-    ({ classifier_id }) => classifier_id === "knots_bip110",
-  );
-  if (
-    assessment !== null &&
-    (policy === undefined ||
-      policy.primary_label !== assessment.status ||
-      (assessment.unknown_rules.length === 0
-        ? policy.state !== "complete" || policy.missing_facts.length !== 0
-        : policy.state !== "partial" ||
-          !policy.missing_facts.includes("policy_facts")))
-  ) {
-    throw new TypeError(
-      `Transaction at index ${index} has inconsistent policy projections`,
-    );
-  }
-  return value as unknown as MempoolTransaction;
-};
-
-export const parseMempoolSnapshot = (value: unknown): MempoolSnapshot => {
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      "source_id",
-      "source_label",
-      "collection_started_at_ms",
-      "collection_completed_at_ms",
-      "collection_duration_ms",
-      "observed_at_ms",
-      "classification_revision",
-      "chain_tip",
-      "transaction_count",
-      "total_vsize",
-      "classifier_catalog",
-      "classification_summaries",
-      "bip110_summary",
-      "transactions",
-    ]) ||
-    !isSourceId(value.source_id) ||
-    typeof value.source_label !== "string" ||
-    value.source_label.trim().length === 0 ||
-    !isNonNegativeInteger(value.collection_started_at_ms) ||
-    !isNonNegativeInteger(value.collection_completed_at_ms) ||
-    !isNonNegativeInteger(value.collection_duration_ms) ||
-    !isNonNegativeInteger(value.observed_at_ms) ||
-    !isNonNegativeInteger(value.classification_revision) ||
-    !isNonNegativeInteger(value.transaction_count) ||
-    !isNonNegativeInteger(value.total_vsize) ||
-    !Array.isArray(value.transactions)
-  ) {
-    throw new TypeError("Invalid mempool snapshot");
-  }
-
-  if (
-    value.collection_completed_at_ms < value.collection_started_at_ms ||
-    value.collection_duration_ms !==
-      value.collection_completed_at_ms - value.collection_started_at_ms ||
-    value.observed_at_ms !== value.collection_completed_at_ms
-  ) {
-    throw new TypeError("Invalid mempool snapshot collection timing");
-  }
-
-  parseChainTip(value.chain_tip);
-  const transactionCount = value.transaction_count;
-  const classifierCatalog = parseClassifierCatalog(value.classifier_catalog);
-  const bip110Summary = parseBip110Summary(value.bip110_summary);
-  let totalVsize = 0;
-  let previousTxid: string | null = null;
-  const statusCounts = {
-    compatible: 0,
-    violating: 0,
-    indeterminate: 0,
-    unclassified: 0,
-  };
-  const resultCounts = classifierCatalog.map((descriptor) => ({
-    classifierId: descriptor.id,
-    complete: 0,
-    partial: 0,
-    unclassified: 0,
-    labels: Object.fromEntries(
-      descriptor.labels.map(({ key }) => [key, 0]),
-    ) as Record<string, number>,
-  }));
-  for (const [index, item] of value.transactions.entries()) {
-    const transaction = parseTransaction(item, index, classifierCatalog);
-    if (previousTxid !== null && transaction.txid <= previousTxid) {
-      throw new TypeError("Transactions are not strictly ordered by txid");
-    }
-    previousTxid = transaction.txid;
-    totalVsize += transaction.vsize;
-    if (!Number.isSafeInteger(totalVsize)) {
-      throw new TypeError("Snapshot total vsize is not safely representable");
-    }
-    if (transaction.bip110 === null) {
-      statusCounts.unclassified += 1;
-    } else {
-      statusCounts[transaction.bip110.status] += 1;
-    }
-    for (const [classifierIndex, descriptor] of classifierCatalog.entries()) {
-      const counts = resultCounts[classifierIndex]!;
-      const result = transaction.classifications[classifierIndex];
-      if (result === undefined) {
-        counts.unclassified += 1;
-        continue;
-      }
-      if (result.classifier_id !== descriptor.id) {
-        throw new TypeError(
-          "Transaction classifier order does not match catalog",
-        );
-      }
-      counts[result.state] += 1;
-      for (const label of result.labels) {
-        counts.labels[label] = (counts.labels[label] ?? 0) + 1;
-      }
-    }
-  }
-  if (value.transaction_count !== value.transactions.length) {
-    throw new TypeError("Snapshot transaction count does not match payload");
-  }
-  if (value.total_vsize !== totalVsize) {
-    throw new TypeError("Snapshot total vsize does not match payload");
-  }
-  if (
-    !Array.isArray(value.classification_summaries) ||
-    value.classification_summaries.length !== classifierCatalog.length
-  ) {
-    throw new TypeError("Invalid classification summaries");
-  }
-  const classifierSummaries = value.classification_summaries.map(
-    (summary, index) =>
-      parseClassifierSummary(
-        summary,
-        classifierCatalog[index]!,
-        transactionCount,
-      ),
-  );
-  if (
-    bip110Summary.compatible_count !== statusCounts.compatible ||
-    bip110Summary.violating_count !== statusCounts.violating ||
-    bip110Summary.indeterminate_count !== statusCounts.indeterminate ||
-    bip110Summary.unclassified_count !== statusCounts.unclassified
-  ) {
-    throw new TypeError("BIP-110 summary does not match payload");
-  }
-  for (const [index, summary] of classifierSummaries.entries()) {
-    const counts = resultCounts[index]!;
-    if (
-      summary.classifier_id !== counts.classifierId ||
-      summary.complete_count !== counts.complete ||
-      summary.partial_count !== counts.partial ||
-      summary.unclassified_count !== counts.unclassified ||
-      Object.entries(summary.label_counts).some(
-        ([label, count]) => counts.labels[label] !== count,
-      )
-    ) {
-      throw new TypeError("Classifier summary does not match payload");
-    }
-  }
-
-  return value as unknown as MempoolSnapshot;
 };
 
 const parseRuleVerdict = (value: unknown): RuleVerdict => {
@@ -1011,43 +546,6 @@ export const parseSourcesResponse = (value: unknown): SourcesResponse => {
   return value as unknown as SourcesResponse;
 };
 
-export const parseSourceSnapshotResponse = (
-  value: unknown,
-): SourceSnapshotResponse => {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["source", "snapshot"])) {
-    throw new TypeError("Invalid source snapshot response");
-  }
-  const source = parseSourceSummary(value.source);
-  if (value.snapshot === null) {
-    if (source.snapshot_observed_at_ms !== null) {
-      throw new TypeError("Source summary references a missing snapshot");
-    }
-    return value as unknown as SourceSnapshotResponse;
-  }
-
-  const snapshot = parseMempoolSnapshot(value.snapshot);
-  if (
-    snapshot.source_id !== source.source_id ||
-    snapshot.source_label !== source.source_label ||
-    snapshot.observed_at_ms !== source.snapshot_observed_at_ms ||
-    snapshot.transaction_count !== source.transaction_count ||
-    snapshot.total_vsize !== source.total_vsize ||
-    snapshot.chain_tip.height !== source.chain_tip?.height ||
-    snapshot.chain_tip.hash !== source.chain_tip.hash ||
-    source.classification === null ||
-    source.classification.revision !== snapshot.classification_revision ||
-    source.classification.classified_count !==
-      snapshot.bip110_summary.compatible_count +
-        snapshot.bip110_summary.violating_count +
-        snapshot.bip110_summary.indeterminate_count ||
-    source.classification.unclassified_count !==
-      snapshot.bip110_summary.unclassified_count
-  ) {
-    throw new TypeError("Source summary does not match its snapshot");
-  }
-  return value as unknown as SourceSnapshotResponse;
-};
-
 const fetchJson = async (
   path: string,
   signal?: AbortSignal,
@@ -1077,18 +575,206 @@ const fetchJson = async (
 export const fetchSources = async (
   signal?: AbortSignal,
 ): Promise<SourcesResponse> =>
-  parseSourcesResponse(await fetchJson("/api/v1/sources", signal));
+  parseSourcesResponse(await fetchJson("/api/v2/sources", signal));
 
-export const fetchSourceSnapshot = async (
+interface PendingPublication {
+  resolve: (response: LoadedSourcePublication) => void;
+  reject: (error: unknown) => void;
+  sourceId: string;
+  onPrimary:
+    | ((publication: LoadedSourcePublication) => void | Promise<void>)
+    | undefined;
+  primaryReady: Promise<void>;
+  primaryDelivered: boolean;
+  removeAbortListener: () => void;
+}
+
+let publicationWorker: Worker | null = null;
+let publicationSequence = 0;
+const pendingPublications = new Map<number, PendingPublication>();
+
+const errorValue = (error: unknown, fallback: string): Error =>
+  error instanceof Error ? error : new Error(fallback);
+
+const rejectPendingAfterPrimary = (
+  requestId: number,
+  pending: PendingPublication,
+  error: Error,
+): void => {
+  if (pendingPublications.get(requestId) !== pending) return;
+  pendingPublications.delete(requestId);
+  pending.removeAbortListener();
+  void pending.primaryReady.then(
+    () => pending.reject(error),
+    (primaryError) =>
+      pending.reject(errorValue(primaryError, "Primary publication failed")),
+  );
+};
+
+const failPublicationWorker = (failed: Worker, error: Error): void => {
+  if (publicationWorker !== failed) return;
+  publicationWorker = null;
+  failed.terminate();
+  for (const [requestId, pending] of pendingPublications) {
+    rejectPendingAfterPrimary(requestId, pending, error);
+  }
+};
+
+const cancelPendingPublication = (
+  requestId: number,
+  pending: PendingPublication,
+  error: unknown,
+): void => {
+  if (pendingPublications.get(requestId) !== pending) return;
+  pendingPublications.delete(requestId);
+  pending.removeAbortListener();
+  const activeWorker = publicationWorker;
+  if (activeWorker !== null) {
+    try {
+      activeWorker.postMessage({
+        type: "cancel",
+        requestId,
+      } satisfies AtlasWorkerRequest);
+    } catch (cancelError) {
+      failPublicationWorker(
+        activeWorker,
+        errorValue(cancelError, "Atlas v2 worker cancellation failed"),
+      );
+    }
+  }
+  pending.reject(error);
+};
+
+const worker = (): Worker => {
+  if (publicationWorker !== null) return publicationWorker;
+  const next = new Worker(new URL("./atlas-worker.ts", import.meta.url), {
+    type: "module",
+    name: "mempool-atlas-v2",
+  });
+  next.addEventListener(
+    "message",
+    (event: MessageEvent<AtlasWorkerResponse>): void => {
+      const response = event.data;
+      const pending = pendingPublications.get(response.requestId);
+      if (pending === undefined) return;
+      if (response.type === "primary") {
+        if (pending.primaryDelivered) return;
+        pending.primaryDelivered = true;
+        performance.mark(`atlas:${pending.sourceId}:primary-worker-timing`, {
+          detail: response.timing,
+        });
+        performance.mark(`atlas:${pending.sourceId}:primary-decoded`);
+        pending.primaryReady = Promise.resolve().then(() =>
+          pending.onPrimary?.(
+            createPrimarySourcePublication(response.publication),
+          ),
+        );
+        void pending.primaryReady.catch((error) => {
+          cancelPendingPublication(response.requestId, pending, error);
+        });
+        return;
+      }
+      if (response.type === "error") {
+        rejectPendingAfterPrimary(
+          response.requestId,
+          pending,
+          response.status === null
+            ? new TypeError(response.message)
+            : new AtlasRequestError(response.status, `: ${response.message}`),
+        );
+        return;
+      }
+      performance.mark(`atlas:${pending.sourceId}:complete-worker-timing`, {
+        detail: response.timing,
+      });
+      performance.mark(`atlas:${pending.sourceId}:complete-decoded`);
+      void pending.primaryReady.then(
+        () => {
+          if (pendingPublications.get(response.requestId) !== pending) return;
+          let complete: LoadedSourcePublication;
+          try {
+            complete = createLoadedSourcePublication(response.publication);
+          } catch (error) {
+            failPublicationWorker(
+              next,
+              errorValue(error, "Atlas v2 publication materialization failed"),
+            );
+            return;
+          }
+          pendingPublications.delete(response.requestId);
+          pending.removeAbortListener();
+          pending.resolve(complete);
+        },
+        () => undefined,
+      );
+    },
+  );
+  next.addEventListener("error", (event): void => {
+    event.preventDefault();
+    failPublicationWorker(
+      next,
+      new Error(event.message || "Atlas v2 worker failed"),
+    );
+  });
+  next.addEventListener("messageerror", (): void => {
+    failPublicationWorker(
+      next,
+      new Error("Atlas v2 worker returned an unreadable message"),
+    );
+  });
+  publicationWorker = next;
+  return next;
+};
+
+export const fetchSourcePublication = async (
   sourceId: string,
   signal?: AbortSignal,
-): Promise<SourceSnapshotResponse> =>
-  parseSourceSnapshotResponse(
-    await fetchJson(
-      `/api/v1/sources/${encodeURIComponent(sourceId)}/mempool`,
-      signal,
-    ),
-  );
+  selectedClassifierId = "transaction_properties",
+  onPrimary?: (publication: LoadedSourcePublication) => void | Promise<void>,
+): Promise<LoadedSourcePublication> => {
+  if (!isSourceId(sourceId)) throw new TypeError("Invalid source ID");
+  if (!isClassifierKey(selectedClassifierId)) {
+    throw new TypeError("Invalid selected classifier ID");
+  }
+  if (signal?.aborted === true) throw new DOMException("Aborted", "AbortError");
+  publicationSequence += 1;
+  const requestId = publicationSequence;
+  return new Promise<LoadedSourcePublication>((resolve, reject) => {
+    const abort = (): void => {
+      const pending = pendingPublications.get(requestId);
+      if (pending === undefined) return;
+      cancelPendingPublication(
+        requestId,
+        pending,
+        new DOMException("Aborted", "AbortError"),
+      );
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    pendingPublications.set(requestId, {
+      resolve,
+      reject,
+      sourceId,
+      onPrimary,
+      primaryReady: Promise.resolve(),
+      primaryDelivered: false,
+      removeAbortListener: () => signal?.removeEventListener("abort", abort),
+    });
+    const activeWorker = worker();
+    try {
+      activeWorker.postMessage({
+        type: "load",
+        requestId,
+        sourceId,
+        selectedClassifierId,
+      } satisfies AtlasWorkerRequest);
+    } catch (error) {
+      failPublicationWorker(
+        activeWorker,
+        errorValue(error, "Atlas v2 worker request failed"),
+      );
+    }
+  });
+};
 
 export const fetchTransactionDetail = async (
   sourceId: string,
@@ -1097,7 +783,7 @@ export const fetchTransactionDetail = async (
 ): Promise<TransactionDetailResponse> =>
   parseTransactionDetailResponse(
     await fetchJson(
-      `/api/v1/sources/${encodeURIComponent(sourceId)}/transactions/${encodeURIComponent(txid)}`,
+      `/api/v2/sources/${encodeURIComponent(sourceId)}/transactions/${encodeURIComponent(txid)}`,
       signal,
     ),
   );

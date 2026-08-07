@@ -3,7 +3,7 @@
 Mempool Atlas follows Semantic Versioning. The `version` field in
 [`Cargo.toml`](../Cargo.toml) is the product version source, and the matching
 annotated `vX.Y.Z` tag identifies a release. The running service publishes that
-compiled version through `/api/v1/sources`, and both browser products display
+compiled version through `/api/v2/sources`, and both browser products display
 it beside the Atlas name.
 
 Release Please owns future changelog generation, Cargo version bumps, release

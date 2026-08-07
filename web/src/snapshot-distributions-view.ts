@@ -1,34 +1,23 @@
 import { classifierDescriptor } from "./classification-view";
-import {
-  KNOTS_BIP110_CLASSIFIER_ID,
-  type ClassifierBucketKey,
-} from "./classifier-terrain";
-import {
-  DEFAULT_JOINT_COLOR,
-  feeRateAxisRow,
-  panelAxisRow,
-  renderCompositionBars,
-  renderJointChart,
-  renderMosaicChart,
-  renderSpectrumChart,
-} from "./detail-panels";
-import {
-  DATA_BYTES_TICKS,
-  FEE_RATE_TICKS,
-  IO_COUNT_TICKS,
-  OUTPUT_VALUE_TICKS,
-  type JointDensity,
-} from "./fee-distribution";
-import { countFormat, formatVsize } from "./format";
+import type { ClassifierBucketKey } from "./classifier-terrain";
+import type { JointDensity } from "./fee-distribution";
+import { createFrameSequenceRenderer } from "./frame-sequence-renderer";
 import { PANEL_GROUP_LIMIT } from "./panel-groups";
 import {
+  commitSnapshotDistributionPanels,
+  createSnapshotDistributionPanelElements,
+  EMPTY_SNAPSHOT_MESSAGE,
+  renderSnapshotDistributionJointPanels,
+  syncSnapshotDistributionSelection,
+} from "./snapshot-distribution-panels";
+import {
   SnapshotDistributionCache,
-  buildSnapshotDistributionModel,
+  buildSnapshotDistributionModelCooperatively,
+  type SnapshotDistributionModel,
 } from "./snapshot-distributions";
 import type { TerrainMode } from "./terrain";
-import type { MempoolSnapshot } from "./types";
+import type { ClassifierDescriptor, MempoolSnapshot } from "./types";
 
-const EMPTY_SNAPSHOT_MESSAGE = "This snapshot contains an empty mempool.";
 const DATA_GROUP_LIMIT = 5;
 
 export interface SnapshotDistributionSelection {
@@ -38,15 +27,48 @@ export interface SnapshotDistributionSelection {
 }
 
 export interface SnapshotDistributionsView {
+  prepare(
+    snapshot: MempoolSnapshot,
+    selection: SnapshotDistributionSelection,
+    signal?: AbortSignal,
+  ): Promise<PreparedSnapshotDistributions>;
+  canCommit(
+    prepared: PreparedSnapshotDistributions,
+    snapshot: MempoolSnapshot,
+    selection: SnapshotDistributionSelection,
+  ): boolean;
+  commit(
+    prepared: PreparedSnapshotDistributions,
+    snapshot: MempoolSnapshot,
+    selection: SnapshotDistributionSelection,
+  ): boolean;
   render(
     snapshot: MempoolSnapshot,
     selection: SnapshotDistributionSelection,
-  ): void;
+  ): Promise<void>;
   reset(message: string): void;
   setSelection(
     classifierId: string,
     bucketKey: ClassifierBucketKey | null,
   ): void;
+}
+
+interface SnapshotDistributionIdentity {
+  sourceId: string;
+  observedAtMs: number;
+  classificationRevision: number;
+}
+
+const PREPARED_SNAPSHOT_VIEW = Symbol("prepared-snapshot-view");
+
+export interface PreparedSnapshotDistributions {
+  readonly snapshot: MempoolSnapshot;
+  readonly selection: SnapshotDistributionSelection;
+  readonly model: SnapshotDistributionModel | null;
+  readonly [PREPARED_SNAPSHOT_VIEW]: object;
+  readonly identity: SnapshotDistributionIdentity;
+  readonly variant: string;
+  readonly descriptor: ClassifierDescriptor | null;
 }
 
 export interface SnapshotDistributionsViewOptions {
@@ -75,115 +97,76 @@ const requiredDescendant = <T extends HTMLElement>(
   return element as T;
 };
 
+const snapshotIdentity = (
+  snapshot: MempoolSnapshot,
+): SnapshotDistributionIdentity => ({
+  sourceId: snapshot.source_id,
+  observedAtMs: snapshot.observed_at_ms,
+  classificationRevision: snapshot.classification_revision,
+});
+
+const sameSnapshotIdentity = (
+  snapshot: MempoolSnapshot,
+  identity: SnapshotDistributionIdentity,
+): boolean =>
+  snapshot.source_id === identity.sourceId &&
+  snapshot.observed_at_ms === identity.observedAtMs &&
+  snapshot.classification_revision === identity.classificationRevision;
+
+const sameSelection = (
+  left: SnapshotDistributionSelection,
+  right: SnapshotDistributionSelection,
+): boolean =>
+  left.classifierId === right.classifierId &&
+  left.bucketKey === right.bucketKey &&
+  left.metric === right.metric;
+
+const snapshotVariant = (selection: SnapshotDistributionSelection): string =>
+  `classifier=${selection.classifierId};metric=${selection.metric};groups=${PANEL_GROUP_LIMIT};dataGroups=${DATA_GROUP_LIMIT}`;
+
 export const createSnapshotDistributionsView = ({
   onSelectBucket,
 }: SnapshotDistributionsViewOptions): SnapshotDistributionsView => {
   const root = requiredRoot();
   const empty = requiredDescendant<HTMLElement>(root, "distribution-empty");
   const grid = requiredDescendant<HTMLElement>(root, "distribution-grid");
-  const jointNote = requiredDescendant<HTMLElement>(root, "joint-note");
-  const jointChart = requiredDescendant<HTMLElement>(root, "joint-chart");
-  const jointCanvas = requiredDescendant<HTMLCanvasElement>(
-    root,
-    "joint-canvas",
-  );
-  const compositionNote = requiredDescendant<HTMLElement>(
-    root,
-    "composition-note",
-  );
-  const composition = requiredDescendant<HTMLElement>(root, "composition-bars");
-  const spectrumNote = requiredDescendant<HTMLElement>(root, "spectrum-note");
-  const spectrumChart = requiredDescendant<HTMLElement>(root, "spectrum-chart");
-  const packageNote = requiredDescendant<HTMLElement>(root, "package-note");
-  const packageChart = requiredDescendant<HTMLElement>(root, "package-chart");
-  const mosaicNote = requiredDescendant<HTMLElement>(root, "mosaic-note");
-  const mosaicChart = requiredDescendant<HTMLElement>(root, "mosaic-chart");
-  const dataNote = requiredDescendant<HTMLElement>(root, "data-note");
-  const dataChart = requiredDescendant<HTMLElement>(root, "data-chart");
-  const complexityNote = requiredDescendant<HTMLElement>(
-    root,
-    "complexity-note",
-  );
-  const complexityChart = requiredDescendant<HTMLElement>(
-    root,
-    "complexity-chart",
-  );
-  const complexityCanvas = requiredDescendant<HTMLCanvasElement>(
-    root,
-    "complexity-canvas",
-  );
-  const entanglementNote = requiredDescendant<HTMLElement>(
-    root,
-    "entanglement-note",
-  );
-  const entanglement = requiredDescendant<HTMLElement>(
-    root,
-    "entanglement-bars",
-  );
-  const valueNote = requiredDescendant<HTMLElement>(root, "value-note");
-  const valueChart = requiredDescendant<HTMLElement>(root, "value-chart");
-
   const cache = new SnapshotDistributionCache();
+  const viewToken = {};
   let currentSelection: SnapshotDistributionSelection | null = null;
   let jointDensity: JointDensity | null = null;
   let complexityDensity: JointDensity | null = null;
-  let pendingFrame: number | null = null;
+  let renderController: AbortController | null = null;
+  let renderEpoch = 0;
+  let panels: ReturnType<typeof createSnapshotDistributionPanelElements>;
 
-  const renderJointFrame = (): void => {
-    pendingFrame = null;
-    if (jointDensity !== null) {
-      renderJointChart(jointChart, jointCanvas, jointDensity, {
-        color: DEFAULT_JOINT_COLOR,
-        emptyMessage: EMPTY_SNAPSHOT_MESSAGE,
-      });
-    }
-    if (complexityDensity !== null) {
-      renderJointChart(complexityChart, complexityCanvas, complexityDensity, {
-        color: DEFAULT_JOINT_COLOR,
-        emptyMessage: "No structure facts are available yet.",
-      });
-    }
-  };
-
+  const densityRenderer = createFrameSequenceRenderer([
+    () => renderSnapshotDistributionJointPanels(panels, jointDensity, null),
+    () =>
+      renderSnapshotDistributionJointPanels(panels, null, complexityDensity),
+  ]);
   const scheduleJointRender = (): void => {
-    if (
-      pendingFrame !== null ||
-      (jointDensity === null && complexityDensity === null)
-    ) {
-      return;
+    if (jointDensity !== null || complexityDensity !== null) {
+      densityRenderer.schedule();
     }
-    pendingFrame = window.requestAnimationFrame(renderJointFrame);
   };
+  const cancelJointRender = densityRenderer.cancel;
 
-  const cancelJointRender = (): void => {
-    if (pendingFrame !== null) {
-      window.cancelAnimationFrame(pendingFrame);
-      pendingFrame = null;
-    }
-  };
+  panels = createSnapshotDistributionPanelElements(root, scheduleJointRender);
 
   const syncSelection = (): void => {
-    for (const button of composition.querySelectorAll<HTMLButtonElement>(
-      "button.composition-segment",
-    )) {
-      const selected =
-        currentSelection?.bucketKey !== null &&
-        button.dataset.classifier === currentSelection?.classifierId &&
-        button.dataset.segment === currentSelection?.bucketKey;
-      if (selected) {
-        button.setAttribute("aria-pressed", "true");
-      } else {
-        button.removeAttribute("aria-pressed");
-      }
-    }
+    syncSnapshotDistributionSelection(panels.composition, currentSelection);
   };
 
   const reset = (message: string): void => {
+    renderController?.abort();
+    renderController = null;
+    renderEpoch += 1;
     cache.reset();
     currentSelection = null;
     jointDensity = null;
     complexityDensity = null;
     cancelJointRender();
+    root.setAttribute("aria-busy", "false");
     grid.hidden = true;
     empty.hidden = false;
     empty.textContent = message;
@@ -203,34 +186,35 @@ export const createSnapshotDistributionsView = ({
     syncSelection();
   };
 
-  const render = (
+  const preparedSnapshot = (
     snapshot: MempoolSnapshot,
     selection: SnapshotDistributionSelection,
-  ): void => {
-    cache.replaceOwner(snapshot);
-    currentSelection = selection;
-    if (snapshot.transaction_count === 0) {
-      jointDensity = null;
-      complexityDensity = null;
-      cancelJointRender();
-      grid.hidden = true;
-      empty.hidden = false;
-      empty.textContent = EMPTY_SNAPSHOT_MESSAGE;
-      return;
-    }
+    descriptor: ClassifierDescriptor | null,
+    variant: string,
+    model: SnapshotDistributionModel | null,
+  ): PreparedSnapshotDistributions => ({
+    snapshot,
+    selection: { ...selection },
+    descriptor,
+    variant,
+    model,
+    identity: snapshotIdentity(snapshot),
+    [PREPARED_SNAPSHOT_VIEW]: viewToken,
+  });
 
-    grid.hidden = false;
-    empty.hidden = true;
-    const metricNoun =
-      selection.metric === "count" ? "transaction count" : "virtual size";
-    const metricFormat = (value: number): string =>
-      selection.metric === "count"
-        ? `${countFormat.format(value)} tx`
-        : formatVsize(value);
+  const prepare = async (
+    snapshot: MempoolSnapshot,
+    selection: SnapshotDistributionSelection,
+    signal?: AbortSignal,
+  ): Promise<PreparedSnapshotDistributions> => {
+    signal?.throwIfAborted();
     const descriptor = classifierDescriptor(snapshot, selection.classifierId);
-    const variant = `classifier=${selection.classifierId};metric=${selection.metric};groups=${PANEL_GROUP_LIMIT};dataGroups=${DATA_GROUP_LIMIT}`;
-    const model = cache.get(snapshot, variant, () =>
-      buildSnapshotDistributionModel({
+    const variant = snapshotVariant(selection);
+    if (snapshot.transaction_count === 0) {
+      return preparedSnapshot(snapshot, selection, descriptor, variant, null);
+    }
+    const model = await buildSnapshotDistributionModelCooperatively(
+      {
         transactions: snapshot.transactions,
         classifierCatalog: snapshot.classifier_catalog,
         selectedClassifier: descriptor,
@@ -238,99 +222,140 @@ export const createSnapshotDistributionsView = ({
         metric: selection.metric,
         groupLimit: PANEL_GROUP_LIMIT,
         dataGroupLimit: DATA_GROUP_LIMIT,
-      }),
-    );
-    const lensName = descriptor?.title ?? "the selected classifier";
-    const interactive = selection.classifierId !== KNOTS_BIP110_CLASSIFIER_ID;
-
-    renderSpectrumChart(
-      spectrumChart,
-      model.feeSpectrum,
-      FEE_RATE_TICKS,
-      metricFormat,
-      EMPTY_SNAPSHOT_MESSAGE,
-    );
-    spectrumNote.textContent = `Stacked ${metricNoun} per log fee-rate bin by ${lensName} bucket.`;
-
-    renderSpectrumChart(
-      packageChart,
-      model.ancestorFeeSpectrum,
-      FEE_RATE_TICKS,
-      metricFormat,
-      EMPTY_SNAPSHOT_MESSAGE,
-    );
-    packageNote.textContent = `Ancestor fee rate by ${lensName} bucket: delta-adjusted ancestor fees over ancestor virtual size. This is not the cluster mempool mining score.`;
-
-    jointDensity = model.jointDensity;
-    jointNote.textContent = `Density of ${metricNoun} across fee rate and size, with marginals.`;
-    scheduleJointRender();
-
-    renderMosaicChart(mosaicChart, model.ageMosaic, {
-      metricFormat,
-      emptyMessage: EMPTY_SNAPSHOT_MESSAGE,
-      isColumnInteractive: interactive,
-      onColumnSelect: (column) => {
-        if (column.key !== "all" && column.key !== "overflow") {
-          onSelectBucket({
-            classifierId: selection.classifierId,
-            bucketKey: column.key as ClassifierBucketKey,
-          });
-        }
       },
-    });
-    mosaicNote.textContent = `Column width is each ${lensName} bucket's ${metricNoun} share; cells split the bucket by age at observation.`;
-
-    const coverage = `structure facts cover ${countFormat.format(model.totals.structured.count)} of ${countFormat.format(snapshot.transaction_count)} transactions`;
-    renderSpectrumChart(
-      dataChart,
-      model.dataSpectrum,
-      DATA_BYTES_TICKS,
-      metricFormat,
-      "No observed transaction carries OP_RETURN data.",
+      signal === undefined ? {} : { signal },
     );
-    dataNote.textContent = `Stacked ${metricNoun} per log carried-byte bin by Data protocols bucket · ${countFormat.format(model.totals.carrier.count)} transactions carry OP_RETURN bytes.`;
-
-    complexityDensity = model.complexityDensity;
-    complexityNote.textContent = `Density of ${metricNoun} across input and output counts, with marginals · ${coverage}.`;
-    scheduleJointRender();
-
-    renderCompositionBars(entanglement, model.entanglement, {
-      metricLabel: metricNoun,
-      emptyMessage: EMPTY_SNAPSHOT_MESSAGE,
-    });
-    entanglementNote.textContent = `Unconfirmed mempool relatives reported by the source node · ${countFormat.format(model.totals.replaceable.count)} transactions are reported replaceable.`;
-
-    renderSpectrumChart(
-      valueChart,
-      model.valueSpectrum,
-      OUTPUT_VALUE_TICKS,
-      metricFormat,
-      "No structure facts are available yet.",
-    );
-    valueNote.textContent = `Total output value per transaction by ${lensName} bucket · ${coverage}.`;
-
-    compositionNote.textContent = `Share of ${metricNoun} per independent classifier lens. Lenses are not combined.`;
-    renderCompositionBars(composition, model.composition, {
-      metricLabel: metricNoun,
-      emptyMessage: EMPTY_SNAPSHOT_MESSAGE,
-      isSegmentInteractive: (bar) =>
-        bar.classifierId !== KNOTS_BIP110_CLASSIFIER_ID,
-      isSegmentSelected: (bar, segment) =>
-        bar.classifierId === selection.classifierId &&
-        segment.key === selection.bucketKey,
-      onSegmentSelect: (bar, segment) => {
-        onSelectBucket({
-          classifierId: bar.classifierId,
-          bucketKey: segment.key as ClassifierBucketKey,
-        });
-      },
-    });
+    signal?.throwIfAborted();
+    return preparedSnapshot(snapshot, selection, descriptor, variant, model);
   };
 
-  new ResizeObserver(scheduleJointRender).observe(jointChart);
-  new ResizeObserver(scheduleJointRender).observe(complexityChart);
-  jointChart.append(feeRateAxisRow());
-  complexityChart.append(panelAxisRow(IO_COUNT_TICKS));
+  const commitPrepared = (
+    prepared: PreparedSnapshotDistributions,
+    snapshot: MempoolSnapshot,
+    selection: SnapshotDistributionSelection,
+  ): boolean => {
+    if (!canCommit(prepared, snapshot, selection)) {
+      return false;
+    }
 
-  return { render, reset, setSelection };
+    currentSelection = { ...selection };
+    cancelJointRender();
+    jointDensity = null;
+    complexityDensity = null;
+    if (prepared.model === null) {
+      cache.replaceOwner(snapshot);
+      grid.hidden = true;
+      empty.hidden = false;
+      empty.textContent = EMPTY_SNAPSHOT_MESSAGE;
+    } else {
+      cache.adopt(snapshot, prepared.variant, prepared.model);
+      grid.hidden = false;
+      empty.hidden = true;
+      jointDensity = prepared.model.jointDensity;
+      complexityDensity = prepared.model.complexityDensity;
+      commitSnapshotDistributionPanels({
+        elements: panels,
+        model: prepared.model,
+        snapshot,
+        selection,
+        descriptor: prepared.descriptor,
+        onSelectBucket,
+      });
+      scheduleJointRender();
+    }
+    return true;
+  };
+
+  const canCommit = (
+    prepared: PreparedSnapshotDistributions,
+    snapshot: MempoolSnapshot,
+    selection: SnapshotDistributionSelection,
+  ): boolean =>
+    !(
+      prepared[PREPARED_SNAPSHOT_VIEW] !== viewToken ||
+      prepared.snapshot !== snapshot ||
+      !sameSnapshotIdentity(snapshot, prepared.identity) ||
+      !sameSelection(prepared.selection, selection)
+    );
+
+  const commit = (
+    prepared: PreparedSnapshotDistributions,
+    snapshot: MempoolSnapshot,
+    selection: SnapshotDistributionSelection,
+  ): boolean => {
+    if (!canCommit(prepared, snapshot, selection)) return false;
+    renderController?.abort();
+    renderController = null;
+    renderEpoch += 1;
+    const committed = commitPrepared(prepared, snapshot, selection);
+    if (committed) root.setAttribute("aria-busy", "false");
+    return committed;
+  };
+
+  const render = async (
+    snapshot: MempoolSnapshot,
+    selection: SnapshotDistributionSelection,
+  ): Promise<void> => {
+    renderController?.abort();
+    const controller = new AbortController();
+    renderController = controller;
+    const epoch = ++renderEpoch;
+    const identity = snapshotIdentity(snapshot);
+    const isCurrentRender = (): boolean =>
+      renderController === controller &&
+      renderEpoch === epoch &&
+      !controller.signal.aborted &&
+      sameSnapshotIdentity(snapshot, identity);
+
+    cache.replaceOwner(snapshot);
+    currentSelection = selection;
+    cancelJointRender();
+    jointDensity = null;
+    complexityDensity = null;
+    root.setAttribute("aria-busy", "true");
+
+    try {
+      const descriptor = classifierDescriptor(snapshot, selection.classifierId);
+      const variant = snapshotVariant(selection);
+      const model =
+        snapshot.transaction_count === 0
+          ? null
+          : await cache.getAsync(
+              snapshot,
+              variant,
+              (signal) =>
+                buildSnapshotDistributionModelCooperatively(
+                  {
+                    transactions: snapshot.transactions,
+                    classifierCatalog: snapshot.classifier_catalog,
+                    selectedClassifier: descriptor,
+                    observedAtMs: snapshot.observed_at_ms,
+                    metric: selection.metric,
+                    groupLimit: PANEL_GROUP_LIMIT,
+                    dataGroupLimit: DATA_GROUP_LIMIT,
+                  },
+                  { signal },
+                ),
+              controller.signal,
+            );
+      if (!isCurrentRender()) return;
+      commitPrepared(
+        preparedSnapshot(snapshot, selection, descriptor, variant, model),
+        snapshot,
+        selection,
+      );
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+      throw error;
+    } finally {
+      if (renderController === controller && renderEpoch === epoch) {
+        root.setAttribute("aria-busy", "false");
+        renderController = null;
+      }
+    }
+  };
+
+  return { prepare, canCommit, commit, render, reset, setSelection };
 };

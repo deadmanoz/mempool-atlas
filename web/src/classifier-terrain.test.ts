@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import type {
+  PackedPrimaryPublicationTransfer,
+  PackedUnsignedColumnTransfer,
+} from "./atlas-worker-protocol";
 import {
   bucketTerrainRegionCanShowLabel,
   createBucketTerrainLayout,
@@ -12,9 +16,13 @@ import {
   classifierBucketLabel,
   classifierBucketPopulation,
   classifierBuckets,
+  classifierLabelPopulation,
+  classifierLabelSamplePopulation,
+  precomputeClassifierBuckets,
   classifierTerrainGroups,
   classifierTerrainTotals,
 } from "./classifier-terrain";
+import { PackedPrimaryPublicationStore } from "./packed-store";
 import { mempoolTransaction, txid } from "./test-fixtures";
 import type {
   ClassificationResult,
@@ -63,6 +71,121 @@ const propertyDescriptor: ClassifierDescriptor = {
   ],
 };
 
+const secondDescriptor: ClassifierDescriptor = {
+  ...descriptor,
+  id: "second_classifier",
+  title: "Second classifier",
+};
+
+const packedColumn = (
+  rowCount: number,
+  width: number,
+  valueAt: (row: number) => number,
+): PackedUnsignedColumnTransfer => {
+  const values = new Uint8Array(rowCount * width);
+  for (let row = 0; row < rowCount; row += 1) {
+    let value = valueAt(row);
+    for (let byte = 0; byte < width; byte += 1) {
+      values[row * width + byte] = value & 0xff;
+      value = Math.floor(value / 256);
+    }
+  }
+  return { width, values: values.buffer };
+};
+
+const packedPrimaryPublication = (
+  rowCount: number,
+): PackedPrimaryPublicationTransfer => {
+  const txids = new Uint8Array(rowCount * 32);
+  const txidView = new DataView(txids.buffer);
+  for (let row = 0; row < rowCount; row += 1) {
+    txidView.setUint32(row * 32 + 28, row);
+  }
+  const resultDictionary = [
+    {
+      state: "complete" as const,
+      primary_label: "alpha",
+      labels: ["alpha"],
+      missing_facts: [],
+    },
+    {
+      state: "partial" as const,
+      primary_label: "beta",
+      labels: ["beta"],
+      missing_facts: ["input_script_pubkeys"],
+    },
+    {
+      state: "complete" as const,
+      primary_label: "alpha",
+      labels: ["gamma", "alpha"],
+      missing_facts: [],
+    },
+  ];
+  const source = {
+    source_id: "packed",
+    source_label: "Packed",
+    availability: "ready" as const,
+    poll_interval_seconds: 300,
+    last_poll_started_at_ms: 90,
+    snapshot_observed_at_ms: 100,
+    chain_tip: { height: 1, hash: "01".repeat(32) },
+    transaction_count: rowCount,
+    total_vsize: rowCount * 200,
+    classification: {
+      state: "complete" as const,
+      revision: 1,
+      classified_count: rowCount,
+      unclassified_count: 0,
+    },
+    last_error: null,
+  };
+  return {
+    manifest: {
+      schema_version: 2,
+      source,
+      source_id: source.source_id,
+      source_label: source.source_label,
+      collection_started_at_ms: 90,
+      collection_completed_at_ms: 100,
+      collection_duration_ms: 10,
+      observed_at_ms: 100,
+      classification_revision: 1,
+      chain_tip: source.chain_tip,
+      transaction_count: rowCount,
+      total_vsize: rowCount * 200,
+      classifier_catalog: [descriptor, secondDescriptor],
+      classification_summaries: [],
+      bip110_summary: {
+        evaluator_id: "rdts-rules",
+        evaluator_version: "1",
+        scope: "knots_mempool_policy",
+        compatible_count: 0,
+        violating_count: 0,
+        indeterminate_count: 0,
+        unclassified_count: rowCount,
+      },
+      row_count: rowCount,
+      population_id: "10".repeat(32),
+      classification_set_id: "11".repeat(32),
+      publication_id: "12".repeat(32),
+      stages: [],
+    },
+    population: {
+      contentId: "10".repeat(32),
+      txids: txids.buffer,
+      vsize: packedColumn(rowCount, 2, (row) => 100 + (row % 201)),
+    },
+    classifiers: [descriptor, secondDescriptor].map((currentDescriptor) => ({
+      contentId: currentDescriptor.id.padEnd(64, "0").slice(0, 64),
+      classifierId: currentDescriptor.id,
+      resultDictionary,
+      resultCodes: packedColumn(rowCount, 1, (row) => row % 4),
+      assessmentDictionary: null,
+      assessmentCodes: null,
+    })),
+  };
+};
+
 const result = (
   state: "complete" | "partial",
   labels: string[],
@@ -100,6 +223,135 @@ const transaction = (
   });
 
 describe("classifier terrain", () => {
+  it("precomputes multiple classifiers in bounded batches over 70k packed rows", async () => {
+    const store = new PackedPrimaryPublicationStore(
+      packedPrimaryPublication(70_000),
+    );
+    const transactions = store.snapshot.transactions;
+    const transactionAt = vi.spyOn(store, "transaction");
+    const batchAccesses: number[] = [];
+    let accessesAtLastYield = 0;
+
+    await precomputeClassifierBuckets(
+      transactions,
+      [descriptor, secondDescriptor],
+      {
+        batchSize: 750,
+        yieldBetweenBatches: async () => {
+          const accesses = transactionAt.mock.calls.length;
+          batchAccesses.push(accesses - accessesAtLastYield);
+          accessesAtLastYield = accesses;
+          await Promise.resolve();
+        },
+      },
+    );
+    batchAccesses.push(transactionAt.mock.calls.length - accessesAtLastYield);
+
+    const populationBatches = batchAccesses.filter((count) => count > 0);
+    expect(populationBatches).toHaveLength(Math.ceil(70_000 / 750));
+    expect(Math.max(...populationBatches)).toBe(750);
+    expect(populationBatches.reduce((total, count) => total + count, 0)).toBe(
+      70_000,
+    );
+    expect(transactionAt).toHaveBeenCalledTimes(70_000);
+
+    const accessesAfterPrecompute = transactionAt.mock.calls.length;
+    const firstBuckets = classifierBuckets(transactions, descriptor);
+    const secondBuckets = classifierBuckets(transactions, secondDescriptor);
+    const groups = classifierTerrainGroups(transactions, descriptor);
+    const alpha = classifierLabelPopulation(transactions, descriptor, "alpha");
+
+    expect(transactionAt).toHaveBeenCalledTimes(accessesAfterPrecompute);
+    expect(classifierBuckets(transactions, descriptor)).toBe(firstBuckets);
+    expect(classifierBuckets(transactions, secondDescriptor)).toBe(
+      secondBuckets,
+    );
+    expect(classifierTerrainGroups(transactions, descriptor)).toBe(groups);
+    expect(
+      firstBuckets.reduce((total, bucket) => total + bucket.count, 0),
+    ).toBe(70_000);
+    expect(
+      groups.reduce((total, group) => total + group.transactions.length, 0),
+    ).toBe(70_000);
+    expect(alpha?.count).toBe(35_000);
+    expect(classifierLabelPopulation(transactions, descriptor, "alpha")).toBe(
+      alpha,
+    );
+  });
+
+  it("matches synchronous bucket metadata, ordering, and populations", async () => {
+    const transactions = [
+      transaction(
+        1,
+        100,
+        propertyResult("complete", ["version_1", "signals_rbf", "p2pkh"]),
+      ),
+      transaction(
+        2,
+        250,
+        propertyResult("complete", ["version_2", "p2sh", "op_return"]),
+      ),
+      transaction(3, 150, propertyResult("complete", ["version_2", "p2wpkh"])),
+      transaction(4, 300, propertyResult("partial", ["version_2", "p2a"])),
+      transaction(5, 200, null),
+    ];
+    const expected = classifierBuckets([...transactions], propertyDescriptor);
+    const yields = vi.fn(async () => Promise.resolve());
+
+    await precomputeClassifierBuckets(transactions, [propertyDescriptor], {
+      batchSize: 2,
+      yieldBetweenBatches: yields,
+    });
+    const actual = classifierBuckets(transactions, propertyDescriptor);
+    const comparable = (buckets: typeof actual) =>
+      buckets.map(({ transactions: entries, ...bucket }) => ({
+        ...bucket,
+        txids: entries.map(({ txid: transactionId }) => transactionId),
+      }));
+
+    expect(yields.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(comparable(actual)).toEqual(comparable(expected));
+    expect(classifierBuckets(transactions, propertyDescriptor)).toBe(actual);
+  });
+
+  it("rejects invalid cooperative batch sizes before scanning", async () => {
+    const transactions = [transaction(1, 100, result("complete", ["alpha"]))];
+
+    await expect(
+      precomputeClassifierBuckets(transactions, [descriptor], { batchSize: 0 }),
+    ).rejects.toThrow("positive integer");
+  });
+
+  it("does not publish a partial cache when precomputation is aborted", async () => {
+    const transactions = [
+      transaction(1, 100, result("complete", ["alpha"])),
+      transaction(2, 200, result("complete", ["beta"])),
+      transaction(3, 300, result("complete", ["gamma"])),
+    ];
+    const controller = new AbortController();
+
+    await expect(
+      precomputeClassifierBuckets(transactions, [descriptor], {
+        batchSize: 10,
+        signal: controller.signal,
+        yieldBetweenBatches: () => controller.abort(),
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    const yields = vi.fn(async () => Promise.resolve());
+    await precomputeClassifierBuckets(transactions, [descriptor], {
+      batchSize: 1,
+      yieldBetweenBatches: yields,
+    });
+    expect(yields.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(
+      classifierBuckets(transactions, descriptor).reduce(
+        (total, bucket) => total + bucket.count,
+        0,
+      ),
+    ).toBe(3);
+  });
+
   it("uses descriptor order for canonical exact label-set keys", () => {
     const left = transaction(1, 100, result("complete", ["gamma", "alpha"]));
     const right = transaction(2, 100, result("complete", ["alpha", "gamma"]));
@@ -177,6 +429,118 @@ describe("classifier terrain", () => {
     expect(classifierBucketContainsLabel(bucket!, "signals_rbf")).toBe(true);
     expect(classifierBucketContainsLabel(bucket!, "op_return")).toBe(true);
     expect(classifierBucketContainsLabel(bucket!, "p2tr")).toBe(false);
+  });
+
+  it("caches marginal label populations across property summary groups", async () => {
+    const transactions = [
+      transaction(
+        1,
+        100,
+        propertyResult("complete", ["version_1", "signals_rbf", "p2pkh"]),
+      ),
+      transaction(
+        2,
+        250,
+        propertyResult("complete", ["version_2", "p2sh", "op_return"]),
+      ),
+      transaction(3, 150, propertyResult("complete", ["version_2", "p2wpkh"])),
+      transaction(4, 300, propertyResult("partial", ["version_2", "p2a"])),
+      transaction(5, 200, null),
+    ];
+
+    await precomputeClassifierBuckets(transactions, [propertyDescriptor], {
+      batchSize: 2,
+      yieldBetweenBatches: async () => Promise.resolve(),
+    });
+    const versionTwo = classifierLabelPopulation(
+      transactions,
+      propertyDescriptor,
+      "version_2",
+    );
+
+    expect(versionTwo).toMatchObject({ count: 3, vsize: 700, totalShare: 0.6 });
+    expect(versionTwo?.transactions.map(({ txid }) => txid)).toEqual([
+      transactions[3]?.txid,
+      transactions[1]?.txid,
+      transactions[2]?.txid,
+    ]);
+    expect(
+      classifierLabelPopulation(transactions, propertyDescriptor, "version_2"),
+    ).toBe(versionTwo);
+    expect(
+      classifierLabelSamplePopulation(
+        transactions,
+        propertyDescriptor,
+        "version_2",
+      ),
+    ).toMatchObject({
+      count: 3,
+      vsize: 700,
+      transactions: versionTwo?.transactions,
+    });
+    expect(
+      classifierLabelPopulation(
+        transactions,
+        propertyDescriptor,
+        "signals_rbf",
+      ),
+    ).toMatchObject({ count: 1, vsize: 100, totalShare: 0.2 });
+    expect(
+      classifierLabelPopulation(
+        transactions,
+        propertyDescriptor,
+        "unknown_script",
+      ),
+    ).toMatchObject({ count: 0, vsize: 0, totalShare: 0 });
+    expect(
+      classifierLabelPopulation(
+        transactions,
+        propertyDescriptor,
+        "unknown_label",
+      ),
+    ).toBeNull();
+  });
+
+  it("precomputes a bounded largest-first marginal-label sample", async () => {
+    const transactions = Array.from({ length: 20 }, (_, index) =>
+      transaction(index + 1, 100 + index, result("complete", ["alpha"])),
+    );
+
+    await precomputeClassifierBuckets(transactions, [descriptor], {
+      batchSize: 5,
+      yieldBetweenBatches: async () => Promise.resolve(),
+    });
+    const sample = classifierLabelSamplePopulation(
+      transactions,
+      descriptor,
+      "alpha",
+    );
+
+    expect(sample).toMatchObject({ count: 20, vsize: 2_190, totalShare: 1 });
+    expect(sample?.transactions).toHaveLength(8);
+    expect(sample?.transactions.map(({ vsize }) => vsize)).toEqual([
+      119, 118, 117, 116, 115, 114, 113, 112,
+    ]);
+  });
+
+  it("counts multi-label membership independently across result states", () => {
+    const transactions = [
+      transaction(1, 100, result("complete", ["alpha"])),
+      transaction(2, 200, result("complete", ["alpha", "gamma"])),
+      transaction(3, 300, result("partial", ["alpha"])),
+      transaction(4, 400, null),
+    ];
+
+    const alpha = classifierLabelPopulation(transactions, descriptor, "alpha");
+    const gamma = classifierLabelPopulation(transactions, descriptor, "gamma");
+
+    expect(alpha).toMatchObject({ count: 3, vsize: 600, totalShare: 0.75 });
+    expect(alpha?.transactions.map(({ txid }) => txid)).toEqual([
+      transactions[2]?.txid,
+      transactions[1]?.txid,
+      transactions[0]?.txid,
+    ]);
+    expect(gamma).toMatchObject({ count: 1, vsize: 200, totalShare: 0.25 });
   });
 
   it("separates complete, partial, and unavailable results", () => {

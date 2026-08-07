@@ -3,15 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   compareCurrentSnapshots,
   lookupComparisonTransaction,
-  requireLoadedSnapshot,
 } from "./comparison-model";
 import { loadedSource } from "./comparison-test-fixtures";
 import { mempoolTransaction, txid } from "./test-fixtures";
-import type {
-  Bip110Assessment,
-  MempoolTransaction,
-  SourceSnapshotResponse,
-} from "./types";
+import type { Bip110Assessment, MempoolTransaction } from "./types";
 
 const transaction = (
   value: number,
@@ -104,8 +99,28 @@ describe("compareCurrentSnapshots", () => {
       left: { wtxid: txid(10), vsize: 100 },
       right: { wtxid: txid(11), vsize: 120 },
     });
+    expect(comparison.common_differing_wtxids).toEqual(Uint8Array.of(1));
     expect(comparison.totals.common_left_vsize).toBe(100);
     expect(comparison.totals.common_right_vsize).toBe(120);
+  });
+
+  it("defers witness-variant comparison until membership is ready", () => {
+    const comparison = compareCurrentSnapshots(
+      loadedSource(
+        "core",
+        [transaction(1, 100, null, txid(10))],
+        1_700_000_001_000,
+      ),
+      loadedSource(
+        "knots",
+        [transaction(1, 120, null, txid(11))],
+        1_700_000_001_000,
+      ),
+      false,
+    );
+
+    expect(comparison.common[0]?.same_wtxid).toBeNull();
+    expect(comparison.common_differing_wtxids).toEqual(Uint8Array.of(0));
   });
 
   it("looks up source-local entries across every sorted membership region", () => {
@@ -159,27 +174,10 @@ describe("compareCurrentSnapshots", () => {
     expect(lookupComparisonTransaction(comparison, txid(10))).toBeNull();
   });
 
-  it("rejects comparing a source with itself or an unavailable snapshot", () => {
+  it("rejects comparing a source with itself", () => {
     const source = loadedSource("core", [], 1_700_000_001_000);
     expect(() => compareCurrentSnapshots(source, source)).toThrow(
       "two distinct sources",
-    );
-
-    const waiting: SourceSnapshotResponse = {
-      source: {
-        ...source.source,
-        availability: "waiting",
-        last_poll_started_at_ms: null,
-        snapshot_observed_at_ms: null,
-        chain_tip: null,
-        transaction_count: null,
-        total_vsize: null,
-        classification: null,
-      },
-      snapshot: null,
-    };
-    expect(() => requireLoadedSnapshot(waiting)).toThrow(
-      "has no complete mempool snapshot",
     );
   });
 });

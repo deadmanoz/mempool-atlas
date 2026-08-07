@@ -170,7 +170,47 @@ export interface SourcesResponse {
   sources: SourceSummary[];
 }
 
-export interface SourceSnapshotResponse {
+/**
+ * One internally coherent v2 publication reconstructed from its manifest and
+ * content-addressed stages. Pre-publication unavailability is an explicit v2
+ * error and never crosses the transport boundary as a nullable payload.
+ */
+export interface LoadedSourcePublication {
   source: SourceSummary;
-  snapshot: MempoolSnapshot | null;
+  publication: MempoolSnapshot;
+}
+
+export type StageKind =
+  "population" | "membership" | "structure" | "classifier";
+
+export interface StageDescriptor {
+  kind: StageKind;
+  classifier_id?: string;
+  content_id: string;
+  uncompressed_bytes: number;
+  row_count: number;
+  dependency_ids: string[];
+}
+
+export interface StagedSnapshotManifest {
+  schema_version: 2;
+  source: SourceSummary;
+  source_id: string;
+  source_label: string;
+  collection_started_at_ms: number;
+  collection_completed_at_ms: number;
+  collection_duration_ms: number;
+  observed_at_ms: number;
+  classification_revision: number;
+  chain_tip: ChainTip;
+  transaction_count: number;
+  total_vsize: number;
+  classifier_catalog: ClassifierDescriptor[];
+  classification_summaries: ClassifierSummary[];
+  bip110_summary: Bip110Summary;
+  row_count: number;
+  population_id: string;
+  classification_set_id: string;
+  publication_id: string;
+  stages: StageDescriptor[];
 }

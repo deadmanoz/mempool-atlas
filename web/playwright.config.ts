@@ -6,8 +6,9 @@ import { defineConfig, devices } from "@playwright/test";
 //
 // The preview deliberately avoids Vite's default 5173 so an e2e run never
 // attaches to, or fights with, a `just web-dev` server already in use. The
-// fixture API port is fixed by `vite.config.ts`'s `/api` proxy, so an existing
-// fixture server is reused instead.
+// fixture API port is fixed by `vite.config.ts`'s `/api` proxy. Every run owns
+// a fresh fixture process so it must load the manifest generated immediately
+// before Playwright starts.
 const FIXTURE_API_PORT = 3101;
 const PREVIEW_PORT = 5174;
 
@@ -47,8 +48,8 @@ export default defineConfig({
   webServer: [
     {
       command: "node dev/fixture-server.mjs",
-      url: `http://127.0.0.1:${FIXTURE_API_PORT}/api/v1/sources`,
-      reuseExistingServer: !process.env.CI,
+      url: `http://127.0.0.1:${FIXTURE_API_PORT}/api/v2/sources`,
+      reuseExistingServer: false,
       stdout: "ignore",
       stderr: "pipe",
     },

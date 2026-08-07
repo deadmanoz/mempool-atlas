@@ -42,9 +42,16 @@ The comparison page fetches two snapshots and derives three regions in the
 browser: present in both, observed only on the left, and observed only on the
 right. It shows the collection windows and their sampling skew.
 
+Both products render the lightweight current source metadata before their full
+snapshot bodies arrive. The comparison page keeps its primary membership
+workspace ahead of secondary distributions and the policy matrix, so those
+derived panels cannot displace the interactive view as they populate.
+
 Each side keeps its own witness variant and policy assessment. Presence or
 absence describes the sampled mempools only. It does not prove that a node
 accepted, rejected, filtered, or relayed a transaction.
+
+![Membership overlap with source-local policy controls](docs/assets/comparison-membership.png)
 
 ![Side-by-side classifier composition and fee structure](docs/assets/comparison-distributions.png)
 
@@ -55,8 +62,6 @@ accepted, rejected, filtered, or relayed a transaction.
 ![Side-by-side output value and source-local policy outcomes](docs/assets/comparison-distributions-value.png)
 
 ![The complete source-local policy matrix](docs/assets/policy-comparison.png)
-
-![Membership overlap with source-local policy controls](docs/assets/comparison-membership.png)
 
 ## Architecture
 
@@ -121,24 +126,37 @@ just clean
 ### Frontend development without a node
 
 Run `just web-fixtures` in one terminal and `just web-dev` in another. The
-fixture API serves three deterministic synthetic sources on
-<http://127.0.0.1:3101> using the live API contract.
+command first exports three deterministic synthetic sources from the Rust
+domain model, then serves their pre-encoded API bodies on
+<http://127.0.0.1:3101>. `just test-web-e2e` regenerates the same small profile
+automatically.
+
+`just perf-web` builds the production website and measures it against a
+separate 70,000-transaction, two-source profile under recorded desktop and
+mobile conditions. Results are written to `web/.perf-results/latest.json`.
+See [client performance](docs/client-performance.md) for the measurement
+contract, reconciled baseline, and current checkpoints.
 
 ## API
 
 - `GET /healthz` reports process health.
 - `GET /readyz` becomes ready after the first valid snapshot.
-- `GET /api/v1/sources` reports the running Atlas version and lists configured
+- `GET /api/v2/sources` reports the running Atlas version and lists configured
   sources with their current status.
-- `GET /api/v1/sources/{source_id}/mempool` returns one current snapshot.
-- `GET /api/v1/sources/{source_id}/transactions/{txid}` returns classifier and
+- `GET /api/v2/sources/{source_id}/mempool` returns the current publication
+  manifest.
+- `GET /api/v2/sources/{source_id}/mempool/stages/{kind}/{content_id}` returns a
+  content-addressed population, membership, or structure stage.
+- `GET /api/v2/sources/{source_id}/mempool/stages/classifier/{classifier_id}/{content_id}`
+  returns one content-addressed classifier stage.
+- `GET /api/v2/sources/{source_id}/transactions/{txid}` returns classifier and
   policy detail for one current transaction.
 
 Source discovery, transaction detail, operational responses, and errors disable
-caching. A published full snapshot has an `ETag` and requires revalidation, so
-an unchanged conditional request returns `304` without transferring the full
-JSON body. The browser refresh action reads Atlas' latest in-memory copy; it
-does not trigger a Bitcoin RPC poll.
+caching. Published manifests and stages have `ETag` validators and require
+revalidation, so an unchanged conditional request returns `304` without
+transferring the JSON body. The browser refresh action reads Atlas' latest
+in-memory publication; it does not trigger a Bitcoin RPC poll.
 
 ## Public deployment
 

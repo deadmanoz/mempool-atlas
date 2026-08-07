@@ -14,6 +14,12 @@ import {
 import { prepareCanvasBacking } from "./canvas-backing";
 import type { Bip110Assessment, MempoolTransaction, RuleId } from "./types";
 import { RULE_IDS } from "./types";
+import {
+  concatenateTransactionViews,
+  filterTransactionView,
+  sortTransactionViewByVsize,
+  transactionIndexView,
+} from "./transaction-view";
 
 export type TerrainMode = BucketTerrainMode;
 export type RuleMask = number;
@@ -207,11 +213,7 @@ const populationShare = (
 
 const sortTransactions = (
   transactions: readonly MempoolTransaction[],
-): MempoolTransaction[] =>
-  [...transactions].sort(
-    (left, right) =>
-      right.vsize - left.vsize || left.txid.localeCompare(right.txid),
-  );
+): MempoolTransaction[] => sortTransactionViewByVsize(transactions);
 
 const sumVsize = (transactions: readonly MempoolTransaction[]): number =>
   transactions.reduce((total, transaction) => total + transaction.vsize, 0);
@@ -358,8 +360,10 @@ export const rulePopulation = (
   rule: RuleId,
 ): RulePopulation => {
   const selected = sortTransactions(
-    transactions.filter((transaction) =>
-      transaction.bip110?.violated_rules.includes(rule),
+    filterTransactionView(
+      transactions,
+      (transaction) =>
+        transaction.bip110?.violated_rules.includes(rule) ?? false,
     ),
   );
   return {
@@ -376,9 +380,11 @@ export const signaturePopulations = (
 ): SignaturePopulation[] => {
   const groups = new Map<
     ViolationSignatureKey,
-    { signature: ViolationSignature; transactions: MempoolTransaction[] }
+    { signature: ViolationSignature; rows: number[] }
   >();
-  for (const transaction of transactions) {
+  for (let row = 0; row < transactions.length; row += 1) {
+    const transaction = transactions[row];
+    if (transaction === undefined) continue;
     const assessment = transaction.bip110;
     if (assessment === null) {
       continue;
@@ -389,17 +395,17 @@ export const signaturePopulations = (
     }
     const existing = groups.get(signature.key);
     if (existing === undefined) {
-      groups.set(signature.key, { signature, transactions: [transaction] });
+      groups.set(signature.key, { signature, rows: [row] });
     } else {
-      existing.transactions.push(transaction);
+      existing.rows.push(row);
     }
   }
   return [...groups.values()]
     .sort((left, right) =>
       compareViolationSignatures(left.signature, right.signature),
     )
-    .map(({ signature, transactions: selected }) => {
-      const sorted = sortTransactions(selected);
+    .map(({ signature, rows }) => {
+      const sorted = sortTransactions(transactionIndexView(transactions, rows));
       return {
         signature,
         transactions: sorted,
@@ -423,7 +429,7 @@ export const statusPopulation = (
   key: StatusRegionKey,
 ): StatusPopulation => {
   const selected = sortTransactions(
-    transactions.filter((transaction) =>
+    filterTransactionView(transactions, (transaction) =>
       key === "unclassified"
         ? transaction.bip110 === null
         : transaction.bip110?.status === key,
@@ -441,7 +447,8 @@ export const incompleteViolationPopulation = (
   transactions: readonly MempoolTransaction[],
 ): StatusPopulation => {
   const selected = sortTransactions(
-    transactions.filter(
+    filterTransactionView(
+      transactions,
       (transaction) =>
         transaction.bip110?.status === "violating" &&
         transaction.bip110.unknown_rules.length > 0,
@@ -462,31 +469,33 @@ const terrainGroups = (
   TerrainRegionKey,
   ViolationSignature | null
 >[] => {
-  const compatible: MempoolTransaction[] = [];
-  const indeterminate: MempoolTransaction[] = [];
-  const unclassified: MempoolTransaction[] = [];
+  const compatibleRows: number[] = [];
+  const indeterminateRows: number[] = [];
+  const unclassifiedRows: number[] = [];
   const signatures = new Map<
     ViolationSignatureKey,
     {
       key: ViolationSignatureKey;
       sectionKey: TerrainSectionKey;
       signature: ViolationSignature;
-      transactions: MempoolTransaction[];
+      rows: number[];
     }
   >();
 
-  for (const transaction of transactions) {
+  for (let row = 0; row < transactions.length; row += 1) {
+    const transaction = transactions[row];
+    if (transaction === undefined) continue;
     const assessment = transaction.bip110;
     if (assessment === null) {
-      unclassified.push(transaction);
+      unclassifiedRows.push(row);
       continue;
     }
     if (assessment.status === "compatible") {
-      compatible.push(transaction);
+      compatibleRows.push(row);
       continue;
     }
     if (assessment.status === "indeterminate") {
-      indeterminate.push(transaction);
+      indeterminateRows.push(row);
       continue;
     }
     const signature = violationSignature(assessment);
@@ -503,19 +512,21 @@ const terrainGroups = (
         key: signature.key,
         sectionKey,
         signature,
-        transactions: [transaction],
+        rows: [row],
       });
     } else {
-      existing.transactions.push(transaction);
+      existing.rows.push(row);
     }
   }
 
-  const signatureGroups = [...signatures.values()].sort((left, right) =>
-    compareViolationSignatures(
-      left.signature as ViolationSignature,
-      right.signature as ViolationSignature,
-    ),
-  );
+  const signatureGroups = [...signatures.values()]
+    .sort((left, right) =>
+      compareViolationSignatures(left.signature, right.signature),
+    )
+    .map(({ rows, ...group }) => ({
+      ...group,
+      transactions: transactionIndexView(transactions, rows),
+    }));
   const exact = signatureGroups.filter(
     ({ sectionKey }) => sectionKey === "violating_exact",
   );
@@ -549,12 +560,18 @@ const terrainGroups = (
     });
   };
 
-  pushStatus("compatible", compatible);
-  pushStatus("indeterminate", indeterminate);
+  pushStatus("compatible", transactionIndexView(transactions, compatibleRows));
+  pushStatus(
+    "indeterminate",
+    transactionIndexView(transactions, indeterminateRows),
+  );
   if (exact.length > 0) {
     groups.push({
       key: "violating_exact",
-      transactions: exact.flatMap(({ transactions: entries }) => entries),
+      transactions: concatenateTransactionViews(
+        transactions,
+        exact.map(({ transactions: entries }) => entries),
+      ),
       regions: exact,
       nested: true,
     });
@@ -562,12 +579,18 @@ const terrainGroups = (
   if (incomplete.length > 0) {
     groups.push({
       key: "violating_incomplete",
-      transactions: incomplete.flatMap(({ transactions: entries }) => entries),
+      transactions: concatenateTransactionViews(
+        transactions,
+        incomplete.map(({ transactions: entries }) => entries),
+      ),
       regions: incomplete,
       nested: true,
     });
   }
-  pushStatus("unclassified", unclassified);
+  pushStatus(
+    "unclassified",
+    transactionIndexView(transactions, unclassifiedRows),
+  );
   return groups;
 };
 

@@ -3,6 +3,12 @@ export interface RequestTicket {
   signal: AbortSignal;
 }
 
+export const isAbortError = (error: unknown): boolean =>
+  typeof error === "object" &&
+  error !== null &&
+  "name" in error &&
+  error.name === "AbortError";
+
 /** Owns one abortable request generation and rejects every older ticket. */
 export class RequestLifecycle {
   private generation = 0;

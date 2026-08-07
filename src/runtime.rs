@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
 use thiserror::Error;
 use tokio::sync::{Notify, Semaphore};
 use tracing::{info, warn};
@@ -10,19 +9,22 @@ use tracing::{info, warn};
 mod publisher;
 
 use publisher::CurrentStatePublisher;
-pub(crate) use publisher::SnapshotResponsePayload;
+pub(crate) use publisher::{PublicationLookup, PublicationPayload, StageLookup};
 
 use crate::classification::{
     ClassificationDisposition, ClassificationError, ClassificationGenerationStart,
     ClassificationPipeline, ClassificationRevisionDelta, ClassificationSliceReport,
 };
 use crate::model::{
-    ClassificationState, ModelError, SourceSnapshotResponse, SourceSummary, SourcesResponse,
-    TransactionDetailResponse, validate_source_id, validate_source_label,
+    ClassificationState, ModelError, SourceSummary, SourcesResponse, TransactionDetailResponse,
+    validate_source_id, validate_source_label,
 };
 #[cfg(test)]
 use crate::model::{MempoolObservation, MempoolSnapshot, SourceAvailability};
 use crate::rpc::{RpcClient, RpcError};
+#[cfg(test)]
+use crate::staged_snapshot::StagedSnapshotLimits;
+use crate::staged_snapshot::{StageKind, StagedSnapshotError};
 
 pub const MAX_CONFIGURED_SOURCES: usize = 4;
 
@@ -146,7 +148,10 @@ impl AtlasRuntime {
                     continue;
                 }
             };
-            source.runtime.record_poll_started(started_at_ms).await;
+            if let Err(error) = source.runtime.record_poll_started(started_at_ms).await {
+                outcomes.push((source_order, Err(error)));
+                continue;
+            }
             let outcome = match source
                 .rpc
                 .get_mempool_snapshot(source.runtime.source_id(), source.runtime.source_label())
@@ -198,13 +203,30 @@ impl AtlasRuntime {
                             self.schedule_classification(source_index);
                         }
                         Ok(false) => {}
-                        Err(error) => warn!(
-                            round_id,
-                            source_order = source_index,
-                            source_id = %source.runtime.source_id(),
-                            error = %error,
-                            "mempool snapshot publication failed; retaining the last good snapshot"
-                        ),
+                        Err(error) => {
+                            if let Err(state_error) = source
+                                .runtime
+                                .record_failure(
+                                    "current v2 publication could not be prepared".to_owned(),
+                                )
+                                .await
+                            {
+                                warn!(
+                                    round_id,
+                                    source_order = source_index,
+                                    source_id = %source.runtime.source_id(),
+                                    error = %state_error,
+                                    "failed to publish v2 preparation failure metadata"
+                                );
+                            }
+                            warn!(
+                                round_id,
+                                source_order = source_index,
+                                source_id = %source.runtime.source_id(),
+                                error = %error,
+                                "mempool snapshot publication failed; retaining the last good v2 bundle"
+                            );
+                        }
                     }
                 }
                 Err(RuntimeError::Rpc(error)) => {
@@ -445,6 +467,15 @@ impl SourceRuntime {
         match self.record_classification_outcome(report).await {
             Ok(continue_classification) => continue_classification,
             Err(error) => {
+                if let Err(state_error) =
+                    self.record_classification_error(expected_generation).await
+                {
+                    warn!(
+                        source_id = %self.source_id(),
+                        error = %state_error,
+                        "failed to publish paused BIP-110 classification state after publication failure"
+                    );
+                }
                 warn!(
                     source_id = %self.source_id(),
                     error = %error,
@@ -459,22 +490,41 @@ impl SourceRuntime {
         self.publisher.summary().await
     }
 
-    pub async fn snapshot_response(&self) -> SourceSnapshotResponse {
-        self.publisher.snapshot_response().await
+    #[cfg(test)]
+    async fn published_state(&self) -> publisher::PublishedState {
+        self.publisher.published_state().await
     }
 
-    pub async fn snapshot_response_bytes(&self) -> Result<Bytes, RuntimeError> {
-        Ok(self.snapshot_response_payload().await?.body)
+    #[cfg(test)]
+    async fn current_manifest_payload(&self) -> Result<PublicationPayload, RuntimeError> {
+        match self.manifest_payload().await {
+            PublicationLookup::Ready(payload) => Ok(payload),
+            PublicationLookup::Unavailable => Err(RuntimeError::PublicationStateWithoutBundle),
+        }
     }
 
-    pub(crate) async fn snapshot_response_payload(
+    #[cfg(test)]
+    async fn manifest_bytes(&self) -> Result<bytes::Bytes, RuntimeError> {
+        Ok(self.current_manifest_payload().await?.body)
+    }
+
+    pub(crate) async fn manifest_payload(&self) -> PublicationLookup<PublicationPayload> {
+        self.publisher.manifest_payload().await
+    }
+
+    pub(crate) async fn stage_payload(
         &self,
-    ) -> Result<SnapshotResponsePayload, RuntimeError> {
-        self.publisher.snapshot_response_payload().await
+        kind: Option<StageKind>,
+        classifier_id: Option<&str>,
+        content_id: &str,
+    ) -> StageLookup {
+        self.publisher
+            .stage_payload(kind, classifier_id, content_id)
+            .await
     }
 
-    pub(crate) async fn record_poll_started(&self, started_at_ms: u64) {
-        self.publisher.record_poll_started(started_at_ms).await;
+    pub(crate) async fn record_poll_started(&self, started_at_ms: u64) -> Result<(), RuntimeError> {
+        self.publisher.record_poll_started(started_at_ms).await
     }
 
     #[cfg(test)]
@@ -591,12 +641,17 @@ impl SourceRuntime {
     fn block_next_classification_preparation(&self) -> Arc<publisher::PreparationBlock> {
         self.publisher.block_next_classification_preparation()
     }
+
+    #[cfg(test)]
+    fn limit_next_publication(&self, limits: StagedSnapshotLimits) {
+        self.publisher.limit_next_publication(limits);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TransactionLookup {
     Ready(TransactionDetailResponse),
-    WaitingForSnapshot,
+    WaitingForPublication,
     NotPresent,
     Unclassified,
 }
@@ -669,6 +724,8 @@ pub enum RuntimeError {
     Rpc(#[from] RpcError),
     #[error(transparent)]
     Classification(#[from] ClassificationError),
+    #[error(transparent)]
+    StagedSnapshot(#[from] StagedSnapshotError),
     #[error("poll interval must be greater than zero")]
     ZeroPollInterval,
     #[error("at least one source is required")]
@@ -710,10 +767,10 @@ pub enum RuntimeError {
     },
     #[error("classification lifecycle exists without a current snapshot")]
     ClassificationStateWithoutSnapshot,
-    #[error("snapshot response worker failed: {0}")]
-    SnapshotResponseTask(#[from] tokio::task::JoinError),
-    #[error("snapshot response could not be encoded: {0}")]
-    SnapshotResponseEncoding(#[from] serde_json::Error),
+    #[error("published domain state exists without its v2 bundle")]
+    PublicationStateWithoutBundle,
+    #[error("v2 publication worker failed: {0}")]
+    PublicationTask(#[from] tokio::task::JoinError),
     #[error("system clock is before the Unix epoch")]
     InvalidSystemClock,
     #[error("system time cannot be represented in milliseconds")]

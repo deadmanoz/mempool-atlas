@@ -70,6 +70,7 @@ export const panelAxisRow = (ticks: readonly AxisTick[]): HTMLElement =>
 
 const JOINT_MARGIN = 26;
 const JOINT_GAP = 3;
+const JOINT_OPACITY_LEVELS = 32;
 
 export interface JointChartOptions {
   color: { r: number; g: number; b: number };
@@ -106,8 +107,10 @@ export const renderJointChart = (
   const gridHeight = cellSpanY * density.rows;
   const height = Math.round(gridHeight + JOINT_MARGIN + JOINT_GAP);
   const ratio = window.devicePixelRatio || 1;
-  canvas.width = Math.round(width * ratio);
-  canvas.height = Math.round(height * ratio);
+  const backingWidth = Math.round(width * ratio);
+  const backingHeight = Math.round(height * ratio);
+  if (canvas.width !== backingWidth) canvas.width = backingWidth;
+  if (canvas.height !== backingHeight) canvas.height = backingHeight;
   canvas.style.height = `${height}px`;
   const context = canvas.getContext("2d");
   if (context === null) {
@@ -117,9 +120,15 @@ export const renderJointChart = (
   context.clearRect(0, 0, width, height);
 
   const { r, g, b } = options.color;
+  const densityColor = `rgb(${r}, ${g}, ${b})`;
   const gridTop = JOINT_MARGIN + JOINT_GAP;
   context.fillStyle = "#0b121a";
   context.fillRect(0, gridTop, gridWidth, gridHeight);
+  context.fillStyle = densityColor;
+  const opacityPaths = Array.from(
+    { length: JOINT_OPACITY_LEVELS },
+    () => [] as Array<{ x: number; y: number }>,
+  );
   for (let row = 0; row < density.rows; row += 1) {
     for (let column = 0; column < density.columns; column += 1) {
       const weight = density.cells[row * density.columns + column] ?? 0;
@@ -127,15 +136,29 @@ export const renderJointChart = (
         continue;
       }
       const intensity = Math.sqrt(weight / density.maxCell);
-      context.fillStyle = `rgba(${r}, ${g}, ${b}, ${(0.08 + intensity * 0.92).toFixed(3)})`;
-      const x = column * cellSpanX;
-      const y = gridTop + gridHeight - (row + 1) * cellSpanY;
-      context.fillRect(x + 0.5, y + 0.5, cellSpanX - 1, cellSpanY - 1);
+      const opacityIndex = Math.min(
+        JOINT_OPACITY_LEVELS - 1,
+        Math.round(intensity * (JOINT_OPACITY_LEVELS - 1)),
+      );
+      opacityPaths[opacityIndex]?.push({
+        x: column * cellSpanX + 0.5,
+        y: gridTop + gridHeight - (row + 1) * cellSpanY + 0.5,
+      });
     }
+  }
+  for (let index = 0; index < opacityPaths.length; index += 1) {
+    const cells = opacityPaths[index];
+    if (cells === undefined || cells.length === 0) continue;
+    context.globalAlpha = 0.08 + (index / (JOINT_OPACITY_LEVELS - 1)) * 0.92;
+    context.beginPath();
+    for (const { x, y } of cells) {
+      context.rect(x, y, cellSpanX - 1, cellSpanY - 1);
+    }
+    context.fill();
   }
 
   const maxColumn = Math.max(...density.columnTotals, 1);
-  context.fillStyle = `rgba(${r}, ${g}, ${b}, 0.55)`;
+  context.globalAlpha = 0.55;
   for (let column = 0; column < density.columns; column += 1) {
     const share = (density.columnTotals[column] ?? 0) / maxColumn;
     if (share <= 0) {
@@ -163,6 +186,7 @@ export const renderJointChart = (
       cellSpanY - 1,
     );
   }
+  context.globalAlpha = 1;
 };
 
 export interface CompositionRenderOptions {

@@ -4,7 +4,9 @@ import {
   FEE_RATE_DOMAIN,
   VSIZE_DOMAIN,
   buildFeeSpectrum,
+  buildFeeSpectrumCooperatively,
   buildJointDensity,
+  buildJointDensityCooperatively,
   logDomainPosition,
   transactionFeeRate,
 } from "./fee-distribution";
@@ -95,6 +97,20 @@ describe("buildJointDensity", () => {
     expect(density.maxCell).toBe(0);
     expect(density.totalWeight).toBe(0);
   });
+
+  it("matches the cooperative density builder exactly", async () => {
+    const transactions = [
+      transaction(1, 64, 64),
+      transaction(2, 1_024, 10_240),
+      transaction(3, 131_072, 131_072 * 512),
+    ];
+    await expect(
+      buildJointDensityCooperatively(transactions, "vsize", {
+        batchSize: 1,
+        yieldBetweenBatches: () => Promise.resolve(),
+      }),
+    ).resolves.toEqual(buildJointDensity(transactions, "vsize"));
+  });
 });
 
 describe("buildFeeSpectrum", () => {
@@ -132,5 +148,20 @@ describe("buildFeeSpectrum", () => {
     );
     expect(spectrum.bins[0]?.segments).toHaveLength(1);
     expect(spectrum.totalWeight).toBe(100);
+  });
+
+  it("matches the cooperative spectrum builder exactly", async () => {
+    const groups = [
+      group("a", [transaction(1, 100, 100), transaction(2, 100, 51_200)]),
+      group("b", [transaction(3, 250, 500)]),
+    ];
+    await expect(
+      buildFeeSpectrumCooperatively(
+        groups,
+        "vsize",
+        { batchSize: 1, yieldBetweenBatches: () => Promise.resolve() },
+        2,
+      ),
+    ).resolves.toEqual(buildFeeSpectrum(groups, "vsize", 2));
   });
 });

@@ -28,6 +28,11 @@ describe("filterTransactions", () => {
 
     expect(
       filterTransactions(transactions, DEFAULT_FILTERS, OBSERVED_AT_MS),
+    ).toBe(transactions);
+    expect(
+      Array.from(
+        filterTransactions(transactions, DEFAULT_FILTERS, OBSERVED_AT_MS),
+      ),
     ).toEqual(transactions);
   });
 
@@ -58,10 +63,12 @@ describe("filterTransactions", () => {
     });
 
     expect(
-      filterTransactions(
-        [future],
-        { ...DEFAULT_FILTERS, maximumAgeMs: 0 },
-        OBSERVED_AT_MS,
+      Array.from(
+        filterTransactions(
+          [future],
+          { ...DEFAULT_FILTERS, maximumAgeMs: 0 },
+          OBSERVED_AT_MS,
+        ),
       ),
     ).toEqual([future]);
   });

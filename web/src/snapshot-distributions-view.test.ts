@@ -3,7 +3,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ClassifierBucketKey } from "./classifier-terrain";
-import { loadedSource } from "./comparison-test-fixtures";
 import {
   installDistributionViewTestHarness,
   type DistributionViewTestHarness,
@@ -69,8 +68,28 @@ const snapshot = (
   transactions: MempoolTransaction[],
   observedAtMs: number = 1_700_000_010_000,
 ): MempoolSnapshot => ({
-  ...loadedSource("core", transactions, observedAtMs).snapshot,
+  source_id: "core",
+  source_label: "CORE",
+  collection_started_at_ms: observedAtMs - 1_000,
+  collection_completed_at_ms: observedAtMs,
+  collection_duration_ms: 1_000,
+  observed_at_ms: observedAtMs,
+  classification_revision: 1,
+  chain_tip: { height: 900_000, hash: "00".repeat(32) },
+  transaction_count: transactions.length,
+  total_vsize: transactions.reduce((total, entry) => total + entry.vsize, 0),
   classifier_catalog: [descriptor],
+  classification_summaries: [],
+  bip110_summary: {
+    evaluator_id: "rdts-rules",
+    evaluator_version: "0.1.0",
+    scope: "knots_mempool_policy",
+    compatible_count: 0,
+    violating_count: 0,
+    indeterminate_count: 0,
+    unclassified_count: transactions.length,
+  },
+  transactions,
 });
 
 const selection = (
@@ -119,10 +138,11 @@ describe("createSnapshotDistributionsView", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     harness.cleanup();
   });
 
-  it("owns root-scoped rendering, axes, scheduling, and bucket events", () => {
+  it("owns root-scoped async rendering, axes, scheduling, and bucket events", async () => {
     const onSelectBucket = vi.fn();
     const view = createSnapshotDistributionsView({ onSelectBucket });
     const root = document.querySelector<HTMLElement>(
@@ -137,10 +157,13 @@ describe("createSnapshotDistributionsView", () => {
       1,
     );
 
-    view.render(
+    const rendered = view.render(
       snapshot([transaction(1, "alpha"), transaction(2, "beta")]),
       selection(),
     );
+    expect(root.getAttribute("aria-busy")).toBe("true");
+    await rendered;
+    expect(root.getAttribute("aria-busy")).toBe("false");
 
     expect(root.querySelector<HTMLElement>("#distribution-grid")?.hidden).toBe(
       false,
@@ -162,17 +185,18 @@ describe("createSnapshotDistributionsView", () => {
     harness.resizeObservers[0]?.trigger();
     expect(harness.pendingAnimationFrames()).toBe(1);
     harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
     expect(harness.canvasContext.setTransform).toHaveBeenCalled();
   });
 
-  it("updates selection aria state without rebuilding aggregate panels", () => {
+  it("updates selection aria state without rebuilding aggregate panels", async () => {
     const view = createSnapshotDistributionsView({
       onSelectBucket: vi.fn(),
     });
     const root = document.querySelector<HTMLElement>(
       "section#snapshot-distributions",
     )!;
-    view.render(
+    await view.render(
       snapshot([transaction(1, "alpha"), transaction(2, "beta")]),
       selection(),
     );
@@ -194,17 +218,56 @@ describe("createSnapshotDistributionsView", () => {
     expect(second.getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("replaces empty and nonempty owners and cancels reset lifecycle work", () => {
+  it("prepares a replacement without touching the active view and commits only its exact candidate", async () => {
     const view = createSnapshotDistributionsView({
       onSelectBucket: vi.fn(),
     });
     const root = document.querySelector<HTMLElement>(
       "section#snapshot-distributions",
     )!;
-    view.render(snapshot([transaction(1, "alpha")]), selection());
+    const active = snapshot([transaction(1, "alpha"), transaction(2, "beta")]);
+    const candidate = snapshot(
+      [transaction(10_000, "beta")],
+      active.observed_at_ms + 1_000,
+    );
+    await view.render(active, selection());
+    const activeSpectrum = root.querySelector("#spectrum-chart svg");
+
+    const prepared = await view.prepare(candidate, selection("complete:1"));
+
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector("#spectrum-chart svg")).toBe(activeSpectrum);
+    expect(root.querySelector("#value-note")?.textContent).toContain("2 of 2");
+    expect(view.canCommit(prepared, candidate, selection("complete:1"))).toBe(
+      true,
+    );
+    expect(view.canCommit(prepared, { ...candidate }, selection())).toBe(false);
+    expect(
+      view.commit(prepared, { ...candidate }, selection("complete:1")),
+    ).toBe(false);
+    expect(view.commit(prepared, candidate, selection())).toBe(false);
+    expect(root.querySelector("#spectrum-chart svg")).toBe(activeSpectrum);
+
+    expect(view.commit(prepared, candidate, selection("complete:1"))).toBe(
+      true,
+    );
+    expect(root.querySelector("#value-note")?.textContent).toContain("1 of 1");
+    expect(
+      root.querySelector('#composition-bars button[data-segment="complete:1"]'),
+    ).not.toBeNull();
+  });
+
+  it("replaces empty and nonempty owners and cancels reset lifecycle work", async () => {
+    const view = createSnapshotDistributionsView({
+      onSelectBucket: vi.fn(),
+    });
+    const root = document.querySelector<HTMLElement>(
+      "section#snapshot-distributions",
+    )!;
+    await view.render(snapshot([transaction(1, "alpha")]), selection());
     expect(harness.pendingAnimationFrames()).toBe(1);
 
-    view.render(snapshot([]), selection());
+    await view.render(snapshot([]), selection());
 
     expect(root.querySelector<HTMLElement>("#distribution-grid")?.hidden).toBe(
       true,
@@ -217,7 +280,10 @@ describe("createSnapshotDistributionsView", () => {
     );
     expect(harness.pendingAnimationFrames()).toBe(0);
 
-    view.render(snapshot([transaction(2, "beta")]), selection("complete:1"));
+    await view.render(
+      snapshot([transaction(2, "beta")]),
+      selection("complete:1"),
+    );
     expect(root.querySelector<HTMLElement>("#distribution-grid")?.hidden).toBe(
       false,
     );
@@ -236,5 +302,132 @@ describe("createSnapshotDistributionsView", () => {
     );
     expect(harness.pendingAnimationFrames()).toBe(0);
     expect(harness.cancelledAnimationFrames).toHaveLength(2);
+    expect(root.getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("lets a replacement owner supersede pending work without stale commits", async () => {
+    const view = createSnapshotDistributionsView({
+      onSelectBucket: vi.fn(),
+    });
+    const root = document.querySelector<HTMLElement>(
+      "section#snapshot-distributions",
+    )!;
+    const first = snapshot(
+      Array.from({ length: 751 }, (_, index) =>
+        transaction(index + 1, "alpha"),
+      ),
+    );
+    const second = snapshot(
+      [transaction(10_000, "beta")],
+      first.observed_at_ms + 1_000,
+    );
+
+    const obsoleteRender = view.render(first, selection());
+    expect(root.getAttribute("aria-busy")).toBe("true");
+    const currentRender = view.render(second, selection("complete:1"));
+    await currentRender;
+
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector("#value-note")?.textContent).toContain("1 of 1");
+    expect(
+      root.querySelector('#composition-bars button[data-segment="complete:1"]'),
+    ).not.toBeNull();
+    expect(harness.pendingAnimationFrames()).toBe(1);
+
+    await obsoleteRender;
+
+    expect(root.querySelector("#value-note")?.textContent).toContain("1 of 1");
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(harness.pendingAnimationFrames()).toBe(1);
+  });
+
+  it("keeps only the latest same-owner metric render", async () => {
+    const view = createSnapshotDistributionsView({
+      onSelectBucket: vi.fn(),
+    });
+    const root = document.querySelector<HTMLElement>(
+      "section#snapshot-distributions",
+    )!;
+    const owner = snapshot(
+      Array.from({ length: 751 }, (_, index) =>
+        transaction(index + 1, index % 2 === 0 ? "alpha" : "beta"),
+      ),
+    );
+
+    const obsoleteRender = view.render(owner, selection());
+    const currentRender = view.render(owner, {
+      ...selection("complete:1"),
+      metric: "vsize",
+    });
+    expect(root.getAttribute("aria-busy")).toBe("true");
+
+    await Promise.all([obsoleteRender, currentRender]);
+
+    expect(root.querySelector("#spectrum-note")?.textContent).toContain(
+      "virtual size",
+    );
+    expect(
+      root
+        .querySelector<HTMLButtonElement>(
+          '#composition-bars button[data-segment="complete:1"]',
+        )
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(harness.pendingAnimationFrames()).toBe(1);
+  });
+
+  it("reset aborts pending derivation without a stale DOM or canvas commit", async () => {
+    const view = createSnapshotDistributionsView({
+      onSelectBucket: vi.fn(),
+    });
+    const root = document.querySelector<HTMLElement>(
+      "section#snapshot-distributions",
+    )!;
+    const pendingRender = view.render(
+      snapshot(
+        Array.from({ length: 751 }, (_, index) =>
+          transaction(index + 1, "alpha"),
+        ),
+      ),
+      selection(),
+    );
+
+    view.reset("Loading a newer snapshot.");
+    await pendingRender;
+
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector<HTMLElement>("#distribution-grid")?.hidden).toBe(
+      true,
+    );
+    expect(root.querySelector("#distribution-empty")?.textContent).toBe(
+      "Loading a newer snapshot.",
+    );
+    expect(root.querySelector("#spectrum-chart svg")).toBeNull();
+    expect(harness.pendingAnimationFrames()).toBe(0);
+    expect(harness.canvasContext.setTransform).not.toHaveBeenCalled();
+  });
+
+  it("rejects genuine derivation failures and clears aria-busy", async () => {
+    const view = createSnapshotDistributionsView({
+      onSelectBucket: vi.fn(),
+    });
+    const root = document.querySelector<HTMLElement>(
+      "section#snapshot-distributions",
+    )!;
+    const failingSnapshot = snapshot([transaction(1, "alpha")]);
+    Object.defineProperty(failingSnapshot, "transactions", {
+      configurable: true,
+      get: () => {
+        throw new Error("fixture derivation failed");
+      },
+    });
+
+    await expect(view.render(failingSnapshot, selection())).rejects.toThrow(
+      "fixture derivation failed",
+    );
+
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(harness.pendingAnimationFrames()).toBe(0);
   });
 });

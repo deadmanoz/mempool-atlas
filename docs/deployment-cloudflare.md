@@ -71,11 +71,11 @@ Verify the installed unit:
 sudo systemd-analyze verify /etc/systemd/system/mempool-atlas.service
 sudo systemctl enable --now mempool-atlas.service
 curl --fail --silent http://127.0.0.1:3101/healthz
-curl --fail --silent http://127.0.0.1:3101/api/v1/sources
+curl --fail --silent http://127.0.0.1:3101/api/v2/sources
 ```
 
 `/readyz` becomes ready after any configured source has published a valid
-snapshot. Monitor `/api/v1/sources` locally when every source must be checked.
+snapshot. Monitor `/api/v2/sources` locally when every source must be checked.
 The response's `atlas_version` must match the release being installed, and the
 same value appears beside the Mempool Atlas name on both browser pages.
 
@@ -118,9 +118,10 @@ last matching rule wins.
 | --- | --- | --- | --- |
 | `/assets/*` | Eligible | Long-lived and immutable | Long-lived |
 | `/` and `/compare/` | Bypass | Revalidate | Bypass |
-| `/api/v1/sources/*/mempool` | Eligible for `GET` and `HEAD` | Revalidate | Respect origin validators |
-| `/api/v1/sources` | Bypass | `no-store` | Bypass |
-| `/api/v1/sources/*/transactions/*` | Bypass | `no-store` | Bypass |
+| `/api/v2/sources/*/mempool` | Eligible for `GET` and `HEAD` | Revalidate | Respect origin validators |
+| `/api/v2/sources/*/mempool/stages/*` | Eligible for `GET` and `HEAD` | Revalidate | Respect origin validators |
+| `/api/v2/sources` | Bypass | `no-store` | Bypass |
+| `/api/v2/sources/*/transactions/*` | Bypass | `no-store` | Bypass |
 | errors and operational paths | Bypass | `no-store` | Bypass |
 
 Atlas does not send `Cache-Control` for static documents or assets; the
@@ -128,21 +129,26 @@ browser and edge behavior for those two rows comes entirely from these Cache
 Rules. Every API, operational, and error response carries an explicit origin
 `Cache-Control` header.
 
-For the snapshot rule:
+For the manifest and stage rules:
 
 1. Match only the Atlas hostname, `GET` or `HEAD`, and the exact source snapshot
-   path shape.
+   manifest or content-addressed stage path shapes.
 2. Mark JSON eligible for cache.
 3. Respect the origin `Cache-Control` and `ETag` headers.
-4. Exclude the query string from the cache key, or reject non-empty query
-   strings on snapshot requests.
+4. Match only an empty query string. Requests with a non-empty query string
+   must bypass the edge cache and reach Atlas, which rejects them as
+   non-cacheable `400` responses.
 5. Do not enable stale serving for the API. Atlas already publishes explicit
    source failure and staleness state.
 
 Atlas returns `Cache-Control: public, no-cache, must-revalidate` and a weak
-`ETag` after a source has published its first snapshot. An unchanged
-`If-None-Match` request returns `304` without the full JSON body. Before the
-first snapshot, the response remains `no-store` and has no validator.
+`ETag` for current manifests and content-addressed stages. An unchanged
+`If-None-Match` request returns `304` without the JSON body. A superseded stage
+identifier returns non-cacheable `409`, an unknown stage identifier returns
+non-cacheable `404`, and a malformed identifier or stage kind returns
+non-cacheable `400`, all before validator handling. Before the first
+publication, the manifest returns
+non-cacheable `503 application/problem+json` and no validator.
 
 Review Cloudflare's current
 [default cache behavior](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/),
@@ -157,17 +163,17 @@ hit.
 Enable the Cloudflare managed WAF rules available to the zone. Add a method rule
 that permits only `GET` and `HEAD` for the public Atlas hostname.
 
-Create separate rate-limit rules for:
+Use the rate-limit rule capacity available to the zone plan. When the account
+has only one shared rule, add an Atlas hostname arm to that rule rather than
+prescribing unavailable per-route rules. The production arm matches
+`atlas.deadmanoz.xyz` with paths beginning `/api/v2/`, allows 50 requests per
+IP per 10 seconds, and blocks for 10 seconds when exceeded.
 
-- full snapshot responses;
-- transaction-detail lookups;
-- source discovery; and
-- general HTML and static traffic.
-
-A normal node view requests one snapshot. A normal comparison requests two
-snapshots concurrently. Choose thresholds from observed traffic and allow
-those flows without a challenge. Apply the strongest limit to full snapshot
-responses because they carry the largest bandwidth and slow-reader cost.
+A normal node view requests one manifest and progressively requests its stages.
+A normal comparison does the same for two sources concurrently. Choose
+thresholds from observed traffic and allow those flows without a challenge.
+Apply the strongest limit to population and membership stages because they
+carry the largest bandwidth and slow-reader cost.
 Validate the rule in staging before enabling a blocking action. Cloudflare's
 [rate-limiting documentation](https://developers.cloudflare.com/waf/rate-limiting-rules/)
 describes the fields and actions available to each plan.
@@ -175,7 +181,7 @@ describes the fields and actions available to each plan.
 Add these response headers at the edge:
 
 ```text
-Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self' https://analytics.example.com; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' https://analytics.example.com; style-src 'self'
+Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self' https://analytics.example.com; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' https://analytics.example.com; style-src 'self'; worker-src 'self'
 Cross-Origin-Opener-Policy: same-origin
 Permissions-Policy: camera=(), geolocation=(), microphone=()
 Referrer-Policy: no-referrer
@@ -194,19 +200,19 @@ content types in the
 ## Capacity and monitoring
 
 The configured classification cache is a service-wide budget divided among
-sources. Full snapshots, classification detail maps, encoded responses, RPC
+sources. Domain snapshots, classification detail maps, encoded v2 bundles, RPC
 buffers, allocator overhead, and response buffers retained by slow readers are
 outside that budget.
 
-Atlas logs `encoded_response_bytes` and `response_revision` whenever it
-publishes a cached source response. Combine those fields with the existing
+Atlas logs `publication_id`, `encoded_bytes`, and `classification_revision`
+whenever it promotes a publication. Combine those fields with the existing
 poll-round and classification logs. Monitor:
 
 - resident and peak memory;
 - full poll-round and per-source collection duration;
 - observation skew between configured sources;
 - classification state, remaining work, and pauses;
-- encoded snapshot size by source and revision;
+- encoded publication size by source and revision;
 - Cloudflare cache status and origin request rate;
 - response bandwidth and compression ratio;
 - rate-limit and WAF actions; and
@@ -227,22 +233,51 @@ just smoke-public https://atlas.example.com node-a
 
 It verifies the source discovery status, cache policy, and required semantic
 Atlas version, plus hidden public health paths, Cloudflare routing,
-compression, cache eligibility, the snapshot cache policy, and conditional
-`304` behavior. Rate-limit actions and direct-origin isolation require separate
-staging and firewall checks.
+compression, every declared stage, manifest and stage validators, transaction
+detail, and conditional `304` behavior. Rate-limit actions and direct-origin
+isolation require separate staging and firewall checks.
+
+## Release switch
+
+The application package exposes `/api/v2` as its single public API contract.
+
+1. Add a temporary fail-closed edge rule for the Atlas hostname while the
+   release is switched.
+2. Preflight the manifest/stage cache rules, no-stale behavior, CSP worker
+   allowance, method rule, WAF policy, and rate limits. Keep the temporary block
+   active.
+3. Switch the single pinned Nix package containing the matching server and
+   browser.
+4. Verify loopback discovery, manifest, every declared stage, detail, and
+   validators. Then remove the temporary edge block.
+5. Run `just smoke-public`, ten cold sequential node loads, five cold concurrent
+   node loads, and the worst-case comparison load through the public hostname.
+
+The edge and Nix control planes cannot change atomically. The temporary block
+makes the gap fail closed instead of serving mixed generations.
+
+Rollback is limited to another reviewed v2 revision with the same edge
+contract. First restore the temporary edge block. Switch the fleet lock,
+restore the matching Cloudflare cache and security rules, purge the
+`atlas.example.com/api/v2` prefix, and only then remove the block and run the
+smoke test. A Nix rollback does not revert Cloudflare state by itself.
 
 ## Failure and rollback checks
 
 Before launch, exercise these cases:
 
-1. Restart Atlas and confirm the public API does not cache the waiting response.
-2. Stop one Bitcoin RPC source and confirm the last good snapshot is explicitly
-   stale while other sources continue.
+1. Restart Atlas and confirm the public API does not cache the exact
+   `v2_unavailable` response before first publication.
+2. Stop one Bitcoin RPC source and confirm the retained publication gets a new
+   stale manifest while its declared content-addressed stages remain unchanged
+   and other sources continue.
 3. Restart `cloudflared` and confirm it reconnects without exposing the origin.
-4. Send an old snapshot ETag after a classification update and confirm the
-   response is `200` with the new representation.
-5. Send the current ETag and confirm the response is `304` with no body.
-6. Run controlled concurrent snapshot reads and confirm polling and
+4. Request a superseded stage identifier and confirm non-cacheable `409` even
+   when the request includes an old matching validator.
+5. Send an old manifest ETag after a classification update and confirm the
+   response is `200` with the new manifest.
+6. Send current manifest and stage ETags and confirm `304` with no body.
+7. Run controlled concurrent stage reads and confirm polling and
    classification remain within the recorded budgets.
 
 To remove public access, disable the tunnel hostname or its DNS route first.

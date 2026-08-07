@@ -10,8 +10,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "vitest run --exclude 'e2e/**'",
+    "test": "vitest run --exclude 'e2e/**' --exclude 'perf/**'",
     "test:e2e": "playwright test",
+    "test:perf": "playwright test --config perf/playwright.config.ts",
     "check": "prettier --check . && tsc --noEmit",
     "format": "prettier --write .",
     "clean": "rm -rf dist coverage node_modules/.vite",

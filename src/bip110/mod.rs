@@ -90,19 +90,5 @@ pub fn evaluate_mempool_policy(tx: &bitcoin::Transaction, prevouts: &PrevoutSet)
     rules::evaluate_mempool_policy(tx, prevouts)
 }
 
-/// Evaluate the BIP-110 consensus rules for a transaction.
-///
-/// This compatibility alias preserves the original consensus-only API. New
-/// callers should prefer [`evaluate_consensus`] so the selected mode is clear
-/// at the call site.
-#[cfg(test)]
-pub fn evaluate(
-    tx: &bitcoin::Transaction,
-    ctx: &EvaluationContext,
-    prevouts: &PrevoutSet,
-) -> TxEvidence {
-    evaluate_consensus(tx, ctx, prevouts)
-}
-
 #[cfg(test)]
 mod tests;

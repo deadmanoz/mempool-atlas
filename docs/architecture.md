@@ -156,35 +156,63 @@ the RPC gate has been released. Membership RPC can therefore proceed while a
 classification revision is prepared. Generation and revision guards reject
 superseded work at the atomic commit point.
 
-One publication atomically replaces:
+One publication is prepared as a complete v2 bundle before the commit point.
+The publisher encodes and validates the manifest, population, membership,
+structure, catalog-ordered classifier stages, and matching detail map without
+holding the reader lock. One atomic promotion then replaces:
 
-- the source-scoped snapshot;
+- the source summary and source-scoped domain snapshot;
 - its classification lifecycle and revision;
 - its classifier catalog, coverage summaries, and compact transaction results;
 - matching transaction-detail records; and
-- one shared encoded JSON response and its HTTP validator.
+- the content-addressed stage map and manifest validator.
 
-Readers therefore see a coherent revision. Transaction detail is accepted by
-the browser only when source, observation, transaction identity, witness
-identity, and assessment agree with the visible snapshot.
+Readers therefore see one coherent publication. Failed preparation cannot
+advance the domain snapshot or detail. A poll failure after a successful
+publication produces a new manifest containing the stale source metadata while
+retaining the exact prior stage buffers and content identifiers. Failure before
+the first publication returns an exact non-cacheable `v2_unavailable` problem
+response. Transaction detail is accepted by the browser only when source,
+observation, transaction identity, witness identity, and assessment agree with
+the visible publication.
 
 Source discovery also publishes `atlas_version` from Rust's compiled
 `CARGO_PKG_VERSION`. Both browser products render this server-authoritative
 value in the shared header, so the visible version describes the running Atlas
 process rather than an independently versioned static package.
 
-Each published source representation receives a weak `ETag`. The validator
-changes when membership, classification, lifecycle, or failure state replaces
-the encoded response. Conditional reads of an unchanged representation return
-`304` without sending the full JSON body. Responses before the first successful
-snapshot remain non-cacheable. Clients that advertise gzip support receive a
-compressed representation, which keeps large snapshots practical over slower
-development and ingress links.
+Each manifest and stage receives a weak `ETag`. A manifest validator changes
+when membership, classification, lifecycle, or failure metadata changes. Stage
+validators are their SHA-256 content identifiers and change only with their
+exact bodies. Conditional reads of current representations return `304`
+without sending a body. A superseded stage identifier returns non-cacheable
+`409`, an unknown stage identifier returns non-cacheable `404`, and malformed
+identifiers or stage kinds return non-cacheable `400`, all before conditional
+validation. Source discovery,
+transaction detail, failures, and responses before the first publication remain
+non-cacheable. Clients that advertise gzip support receive compressed JSON.
 
 The process retains no application data on disk. Restarting discards current
 state and readiness returns only after a new valid observation is available.
 
 ## Browser products
+
+Both browser products first render the selected entries from the lightweight
+`/api/v2/sources` response. Source label, availability, retained observation,
+chain tip, membership totals, classification progress, and poll failure are
+therefore visible before stage loading begins. The shared source
+view keeps discovery, metadata, snapshot loading, derivation, and interactive
+phases separate from ready, stale, waiting, and error availability.
+
+A dedicated worker fetches and validates the current manifest, population, and
+selected classifier lane for the primary view. Membership, structure, and the
+remaining catalog lanes progress behind that primary quorum. Stage digests,
+dependency identifiers, row counts, and publication identity are checked before
+the worker commits one internally coherent packed store. Superseded-stage `409`
+responses trigger a bounded whole-publication retry; the browser never combines
+stages from different manifests. Packed columns, bitsets, and first-seen result
+dictionaries remain worker-owned, with presentation adapters exposing rows only
+on demand rather than retaining the former full-row object graph.
 
 The node viewer renders one source snapshot. Its default Classifications view
 lets the user select one declared lens, inspect marginal label populations, and
@@ -250,6 +278,11 @@ snapshot, the transactions present in both snapshots, or the transactions
 observed in only one source, using the same merge-join regions as the
 membership canvas; a side with no members in the selected population says so
 rather than showing an empty chart as data.
+
+The membership regions and primary comparison workspace precede the secondary
+distribution and policy panels in document order. Stable source-card,
+sampling, workspace, and panel geometry prevents later derivation from
+displacing the interactive comparison as those sections populate.
 
 Both products keep source, classifier or policy selection, and optional
 transaction state in the URL. Snapshot and detail requests use generation

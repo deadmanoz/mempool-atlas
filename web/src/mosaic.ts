@@ -1,3 +1,7 @@
+import {
+  forEachCooperatively,
+  type CooperativeWorkOptions,
+} from "./cooperative-work";
 import type { DistributionMetric, TransactionGroup } from "./fee-distribution";
 
 export interface AgeBand {
@@ -56,6 +60,71 @@ const bandIndex = (ageMs: number): number => {
   return AGE_BANDS.length - 1;
 };
 
+interface MosaicColumnAccumulator {
+  bandWeights: { count: number; weight: number }[];
+  groupWeight: number;
+}
+
+const createMosaicColumnAccumulator = (): MosaicColumnAccumulator => ({
+  bandWeights: AGE_BANDS.map(() => ({ count: 0, weight: 0 })),
+  groupWeight: 0,
+});
+
+const addMosaicTransaction = (
+  accumulator: MosaicColumnAccumulator,
+  transaction: TransactionGroup["transactions"][number],
+  observedAtMs: number,
+  metric: DistributionMetric,
+): void => {
+  const weight = metric === "count" ? 1 : transaction.vsize;
+  if (weight <= 0) return;
+  const ageMs = Math.max(0, observedAtMs - transaction.entered_at_ms);
+  const entry = accumulator.bandWeights[bandIndex(ageMs)];
+  if (entry === undefined) return;
+  entry.count += 1;
+  entry.weight += weight;
+  accumulator.groupWeight += weight;
+};
+
+const finishMosaicColumn = (
+  group: TransactionGroup,
+  accumulator: MosaicColumnAccumulator,
+): MosaicColumn | null => {
+  if (accumulator.groupWeight === 0) return null;
+  return {
+    key: group.key,
+    label: group.label,
+    color: group.color,
+    count: group.transactions.length,
+    weight: accumulator.groupWeight,
+    share: 0,
+    cells: AGE_BANDS.flatMap((band, index) => {
+      const entry = accumulator.bandWeights[index];
+      if (entry === undefined || entry.weight === 0) return [];
+      return [
+        {
+          bandKey: band.key,
+          bandLabel: band.label,
+          bandColor: band.color,
+          count: entry.count,
+          weight: entry.weight,
+          share: entry.weight / accumulator.groupWeight,
+        },
+      ];
+    }),
+  };
+};
+
+const finishMosaic = (
+  columns: MosaicColumn[],
+  totalWeight: number,
+): AgeMosaic => {
+  for (const column of columns) {
+    column.share = totalWeight === 0 ? 0 : column.weight / totalWeight;
+  }
+  return { columns, totalWeight };
+};
+
 /**
  * Two-way composition of one classifier's buckets against observation-relative
  * age bands: column width is the bucket's population share, cell height is the
@@ -69,53 +138,41 @@ export const buildAgeMosaic = (
   const columns: MosaicColumn[] = [];
   let totalWeight = 0;
   for (const group of groups) {
-    const bandWeights = AGE_BANDS.map(() => ({ count: 0, weight: 0 }));
-    let groupWeight = 0;
+    const accumulator = createMosaicColumnAccumulator();
     for (const transaction of group.transactions) {
-      const weight = metric === "count" ? 1 : transaction.vsize;
-      if (weight <= 0) {
-        continue;
-      }
-      const ageMs = Math.max(0, observedAtMs - transaction.entered_at_ms);
-      const entry = bandWeights[bandIndex(ageMs)];
-      if (entry === undefined) {
-        continue;
-      }
-      entry.count += 1;
-      entry.weight += weight;
-      groupWeight += weight;
+      addMosaicTransaction(accumulator, transaction, observedAtMs, metric);
     }
-    if (groupWeight === 0) {
-      continue;
+    const column = finishMosaicColumn(group, accumulator);
+    if (column !== null) {
+      totalWeight += column.weight;
+      columns.push(column);
     }
-    totalWeight += groupWeight;
-    columns.push({
-      key: group.key,
-      label: group.label,
-      color: group.color,
-      count: group.transactions.length,
-      weight: groupWeight,
-      share: 0,
-      cells: AGE_BANDS.flatMap((band, index) => {
-        const entry = bandWeights[index];
-        if (entry === undefined || entry.weight === 0) {
-          return [];
-        }
-        return [
-          {
-            bandKey: band.key,
-            bandLabel: band.label,
-            bandColor: band.color,
-            count: entry.count,
-            weight: entry.weight,
-            share: entry.weight / groupWeight,
-          },
-        ];
-      }),
-    });
   }
-  for (const column of columns) {
-    column.share = totalWeight === 0 ? 0 : column.weight / totalWeight;
+  return finishMosaic(columns, totalWeight);
+};
+
+export const buildAgeMosaicCooperatively = async (
+  groups: readonly TransactionGroup[],
+  observedAtMs: number,
+  metric: DistributionMetric,
+  options: CooperativeWorkOptions = {},
+): Promise<AgeMosaic> => {
+  const columns: MosaicColumn[] = [];
+  let totalWeight = 0;
+  for (const group of groups) {
+    const accumulator = createMosaicColumnAccumulator();
+    await forEachCooperatively(
+      group.transactions,
+      (transaction) =>
+        addMosaicTransaction(accumulator, transaction, observedAtMs, metric),
+      options,
+    );
+    const column = finishMosaicColumn(group, accumulator);
+    if (column !== null) {
+      totalWeight += column.weight;
+      columns.push(column);
+    }
   }
-  return { columns, totalWeight };
+  options.signal?.throwIfAborted();
+  return finishMosaic(columns, totalWeight);
 };

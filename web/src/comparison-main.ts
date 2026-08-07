@@ -1,26 +1,32 @@
 import {
   fetchSources,
-  fetchSourceSnapshot,
+  fetchSourcePublication,
   fetchTransactionDetail,
   transactionDetailMatchesSnapshot,
 } from "./api";
 import { installAnalytics } from "./analytics";
+import { recordAtlasCandidateCommitted } from "./candidate-ready";
 import {
   classificationPresentation,
   unclassifiedLabel,
 } from "./classification-progress";
+import { KNOTS_BIP110_CLASSIFIER_ID } from "./classifier-terrain";
 import {
   ComparisonLifecycle,
   RequestLifecycle,
+  isAbortError,
   type ComparisonRequestTicket,
 } from "./comparison-lifecycle";
-import { createComparisonDistributionsView } from "./comparison-distributions-view";
 import {
-  hitTestComparison,
-  renderComparisonCanvas,
-  type ComparisonGeometry,
-  type ComparisonLayout,
-} from "./comparison-layout";
+  createComparisonDistributionsView,
+  type PreparedComparisonDistributions,
+} from "./comparison-distributions-view";
+import { ComparisonCanvasView } from "./comparison-canvas-view";
+import {
+  compactComparisonEvidence,
+  comparisonAssessmentText,
+} from "./comparison-detail-format";
+import { hitTestComparison } from "./comparison-layout";
 import {
   cursorMoveForKey,
   moveComparisonCursor,
@@ -32,7 +38,6 @@ import {
   type ResolvedComparisonViewTransition,
 } from "./comparison-view-transition";
 import {
-  buildComparisonPolicyView,
   comparisonPolicyMatrixTarget,
   comparisonPolicyMatrixRowPresentation,
   type ComparisonPolicyMatrixRow,
@@ -41,11 +46,10 @@ import {
   type ComparisonPolicyPopulation,
   type ComparisonPolicyView,
 } from "./comparison-policy-view";
+import { prepareComparisonCommitCandidate } from "./comparison-publication-candidate";
 import {
-  compareCurrentSnapshots,
   comparisonRegionEntries,
   policySideForRegion,
-  requireLoadedSnapshot,
   sourceEntry,
   type ComparedTransaction,
   type ComparisonPolicyFilter,
@@ -54,20 +58,24 @@ import {
   type CurrentComparison,
   type LoadedSourceSnapshot,
 } from "./comparison-model";
-import { formatMembershipAge } from "./membership-table";
+import { snapshotIsComplete } from "./packed-store";
+import { markAtlasReadiness, markAtlasReadinessAfterPaint } from "./readiness";
 import {
   countFormat,
-  decimalFormat,
+  compactTxid,
+  formatDuration,
+  formatTime,
+  formatTxidCount,
   formatVsize,
   percentageFormat,
 } from "./format";
+import { createSourceCardView, setAtlasLoadPhase } from "./source-summary-view";
 import { transactionFactSummary } from "./transaction-facts";
 import {
   TERRAIN_RULES,
   signatureLabel,
   terrainRule,
   unknownRulesLabel,
-  violationSignature,
 } from "./terrain";
 import {
   parseComparisonViewState,
@@ -77,8 +85,8 @@ import {
 import "./styles.css";
 import "./comparison-styles.css";
 import type {
-  Bip110Assessment,
   ClassificationState,
+  LoadedSourcePublication,
   MempoolTransaction,
   RuleAssessment,
   SourceSummary,
@@ -105,6 +113,8 @@ const rightSelect = requiredElement<HTMLSelectElement>("right-source");
 const swapButton = requiredElement<HTMLButtonElement>("swap-sources");
 const leftSourceCard = requiredElement<HTMLElement>("left-source-card");
 const rightSourceCard = requiredElement<HTMLElement>("right-source-card");
+const leftSourceCardView = createSourceCardView(leftSourceCard, "Source A");
+const rightSourceCardView = createSourceCardView(rightSourceCard, "Source B");
 const transactionSearch = requiredElement<HTMLFormElement>(
   "comparison-transaction-search",
 );
@@ -186,9 +196,6 @@ let comparisonPolicyView: ComparisonPolicyView | null = null;
 let selectedRegion: ComparisonRegionKey = "common";
 let preferredPolicySide: ComparisonSide = "left";
 let policyFilter: ComparisonPolicyFilter = { kind: "all" };
-let comparisonLayout: ComparisonLayout | null = null;
-let comparisonGeometry: ComparisonGeometry | null = null;
-let pendingCanvasFrame: number | null = null;
 let detailSequence = 0;
 let detailController: AbortController | null = null;
 let selectedTransactionId: string | null = null;
@@ -196,36 +203,6 @@ let keyboardTransactionIndex = 0;
 let activeLoads = 0;
 
 const TXID_PATTERN = /^[0-9a-f]{64}$/i;
-
-const formatDuration = (milliseconds: number): string => {
-  if (milliseconds < 1_000) {
-    return `${countFormat.format(milliseconds)} ms`;
-  }
-  if (milliseconds < 60_000) {
-    return `${decimalFormat.format(milliseconds / 1_000)} s`;
-  }
-  return formatMembershipAge(milliseconds);
-};
-
-const formatFreshness = (observedAtMs: number): string => {
-  const age = Math.max(0, Date.now() - observedAtMs);
-  return age < 60_000 ? "just now" : `${formatMembershipAge(age)} ago`;
-};
-
-const formatTime = (milliseconds: number): string =>
-  new Date(milliseconds).toLocaleTimeString();
-
-const compactTxid = (txid: string): string =>
-  `${txid.slice(0, 10)}…${txid.slice(-8)}`;
-
-const formatTxidCount = (count: number): string =>
-  `${countFormat.format(count)} transaction ${count === 1 ? "ID" : "IDs"}`;
-
-const isAbortError = (error: unknown): boolean =>
-  typeof error === "object" &&
-  error !== null &&
-  "name" in error &&
-  error.name === "AbortError";
 
 const setStatus = (
   state: "waiting" | "ready" | "stale" | "error",
@@ -369,17 +346,6 @@ const updateQuery = (): void => {
   window.history.replaceState(null, "", url);
 };
 
-const sourceFact = (label: string, value: string): HTMLElement => {
-  const wrapper = document.createElement("div");
-  const term = document.createElement("dt");
-  term.textContent = label;
-  const detail = document.createElement("dd");
-  detail.textContent = value;
-  detail.title = value;
-  wrapper.append(term, detail);
-  return wrapper;
-};
-
 const sourceClassificationPresentation = (
   loaded: LoadedSourceSnapshot,
 ): ReturnType<typeof classificationPresentation> & {
@@ -407,94 +373,6 @@ const sourceUnclassifiedLabel = (loaded: LoadedSourceSnapshot): string => {
   return unclassifiedLabel(progress);
 };
 
-const renderSourceCard = (
-  card: HTMLElement,
-  sideLabel: string,
-  loaded: LoadedSourceSnapshot,
-): void => {
-  const { source, snapshot } = loaded;
-  const classification = sourceClassificationPresentation(loaded);
-  card.dataset.state = source.availability;
-  const eyebrow = document.createElement("p");
-  eyebrow.textContent = sideLabel;
-  const heading = document.createElement("h3");
-  heading.textContent = source.source_label;
-  const identifier = document.createElement("code");
-  identifier.textContent = source.source_id;
-  const nodeLink = document.createElement("a");
-  nodeLink.className = "source-card-link";
-  nodeLink.href = `../?source=${encodeURIComponent(source.source_id)}`;
-  nodeLink.textContent = "Explore this node";
-  const facts = document.createElement("dl");
-  facts.append(
-    sourceFact(
-      "Observed",
-      `${formatFreshness(snapshot.observed_at_ms)} · ${formatTime(snapshot.observed_at_ms)}`,
-    ),
-    sourceFact(
-      "Collection",
-      `${formatTime(snapshot.collection_started_at_ms)}–${formatTime(snapshot.collection_completed_at_ms)} · ${formatDuration(snapshot.collection_duration_ms)}`,
-    ),
-    sourceFact(
-      "Chain tip",
-      `${countFormat.format(snapshot.chain_tip.height)} · ${snapshot.chain_tip.hash.slice(0, 10)}…`,
-    ),
-    sourceFact(
-      "Membership",
-      `${countFormat.format(snapshot.transaction_count)} tx · ${formatVsize(snapshot.total_vsize)}`,
-    ),
-    sourceFact(
-      "Policy",
-      `${classification.compact} · ${snapshot.bip110_summary.evaluator_id} ${snapshot.bip110_summary.evaluator_version} · revision ${countFormat.format(snapshot.classification_revision)}`,
-    ),
-  );
-  const classificationNote = document.createElement("p");
-  classificationNote.className = "source-card-classification";
-  classificationNote.dataset.state = classification.state;
-  classificationNote.textContent = classification.summary;
-  card.replaceChildren(
-    eyebrow,
-    heading,
-    identifier,
-    nodeLink,
-    facts,
-    classificationNote,
-  );
-  if (source.availability === "stale") {
-    const warning = document.createElement("p");
-    warning.className = "source-card-warning";
-    warning.textContent = `Last complete snapshot retained. Latest poll: ${source.last_error ?? "unavailable"}`;
-    card.append(warning);
-  }
-};
-
-const resetSourceCard = (
-  card: HTMLElement,
-  sideLabel: string,
-  sourceId: string,
-  message: string,
-): void => {
-  const source = configuredSources.find(
-    ({ source_id: configuredId }) => configuredId === sourceId,
-  );
-  card.dataset.state = "waiting";
-  const eyebrow = document.createElement("p");
-  eyebrow.textContent = sideLabel;
-  const heading = document.createElement("h3");
-  heading.textContent = source?.source_label ?? "No source selected";
-  const identifier = document.createElement("code");
-  identifier.textContent = sourceId;
-  const note = document.createElement("p");
-  note.className = "source-card-placeholder";
-  note.textContent = message;
-  card.replaceChildren(
-    eyebrow,
-    heading,
-    ...(sourceId.length === 0 ? [] : [identifier]),
-    note,
-  );
-};
-
 const timelineRow = (
   label: string,
   side: ComparisonSide,
@@ -512,8 +390,9 @@ const timelineRow = (
   bar.dataset.side = side;
   const start = source.snapshot.collection_started_at_ms;
   const duration = Math.max(1, source.snapshot.collection_duration_ms);
-  bar.style.left = `${((start - minimum) / span) * 100}%`;
-  bar.style.width = `${Math.max(1.2, (duration / span) * 100)}%`;
+  const startPercent = ((start - minimum) / span) * 100;
+  const widthScale = Math.max(0.012, duration / span);
+  bar.style.transform = `translateX(${startPercent}%) scaleX(${widthScale})`;
   bar.title = `${formatTime(start)}–${formatTime(source.snapshot.collection_completed_at_ms)}`;
   track.append(bar);
   const time = document.createElement("time");
@@ -659,8 +538,7 @@ const resetRegionControls = (): void => {
 };
 
 const invalidateComparisonGeometry = (): void => {
-  comparisonGeometry = null;
-  comparisonLayout = null;
+  comparisonCanvasView.invalidate();
 };
 
 const activeNavigatorEntry = (): ComparedTransaction | null => {
@@ -716,27 +594,16 @@ const renderTransactionNavigator = (): void => {
   );
 };
 
-const scheduleCanvasRender = (): void => {
-  if (pendingCanvasFrame !== null) {
-    return;
-  }
-  pendingCanvasFrame = window.requestAnimationFrame(() => {
-    pendingCanvasFrame = null;
-    if (comparison === null || comparisonStage.hidden) {
-      invalidateComparisonGeometry();
-      return;
-    }
-    const result = renderComparisonCanvas(
-      comparisonCanvas,
-      comparison,
-      selectedRegion,
-      selectedTransactionId,
-      comparisonGeometry,
-    );
-    comparisonGeometry = result.geometry;
-    comparisonLayout = result.geometry.layout;
-  });
-};
+const comparisonCanvasView = new ComparisonCanvasView(comparisonCanvas);
+
+const scheduleCanvasRender = () =>
+  comparison === null || comparisonStage.hidden
+    ? (invalidateComparisonGeometry(), Promise.resolve("rendered" as const))
+    : comparisonCanvasView.render(
+        comparison,
+        selectedRegion,
+        selectedTransactionId,
+      );
 
 const ruleChip = (
   label: string,
@@ -1172,6 +1039,8 @@ const renderSampleTable = (
       variantCell.append(badge);
     } else if (entry.same_wtxid === true) {
       variantCell.textContent = "Same wtxid";
+    } else if (entry.left !== null && entry.right !== null) {
+      variantCell.textContent = "Witness data loading";
     } else {
       const other = entry.left === null ? current.left : current.right;
       variantCell.textContent = `Not present in ${other.snapshot.source_label}`;
@@ -1247,32 +1116,6 @@ const renderInspector = (): void => {
   renderSampleTable(current, population);
 };
 
-const detailAssessmentText = (assessment: Bip110Assessment): string => {
-  if (assessment.status === "compatible") {
-    return "Compatible with the deployed Knots mempool policy";
-  }
-  if (assessment.status === "indeterminate") {
-    return "Indeterminate because one or more rule checks remain unresolved";
-  }
-  const signature = violationSignature(assessment);
-  if (signature === null) {
-    return "Policy assessment unavailable";
-  }
-  return signature.completeness === "exact"
-    ? `Would violate exactly ${signatureLabel(signature)}`
-    : `${signatureLabel(signature)}; unresolved ${unknownRulesLabel(signature)}`;
-};
-
-const compactEvidence = (values: unknown[]): string => {
-  if (values.length === 0) {
-    return "";
-  }
-  const encoded = JSON.stringify(values[0]) ?? "unavailable exemplar";
-  return values.length === 1
-    ? encoded
-    : `${encoded} · exemplar of ${values.length}`;
-};
-
 const detailRuleElement = (rule: RuleAssessment): HTMLLIElement => {
   const item = document.createElement("li");
   item.className = `detail-rule ${rule.verdict}`;
@@ -1285,12 +1128,12 @@ const detailRuleElement = (rule: RuleAssessment): HTMLLIElement => {
   item.append(heading);
   if (rule.evidence_count > 0) {
     const evidence = document.createElement("p");
-    evidence.textContent = `Evidence ${countFormat.format(rule.evidence_count)} · ${compactEvidence(rule.evidence)}`;
+    evidence.textContent = `Evidence ${countFormat.format(rule.evidence_count)} · ${compactComparisonEvidence(rule.evidence)}`;
     item.append(evidence);
   }
   if (rule.missing_count > 0) {
     const missing = document.createElement("p");
-    missing.textContent = `Unresolved ${countFormat.format(rule.missing_count)} · ${compactEvidence(rule.missing)}`;
+    missing.textContent = `Unresolved ${countFormat.format(rule.missing_count)} · ${compactComparisonEvidence(rule.missing)}`;
     item.append(missing);
   }
   return item;
@@ -1353,7 +1196,7 @@ const renderDetailOutcome = (
   } else {
     const summary = document.createElement("p");
     summary.className = "comparison-detail-assessment";
-    summary.textContent = detailAssessmentText(outcome.detail.assessment);
+    summary.textContent = comparisonAssessmentText(outcome.detail.assessment);
     const rules = document.createElement("ol");
     rules.className = "detail-rules";
     rules.append(...outcome.detail.rules.map(detailRuleElement));
@@ -1411,6 +1254,17 @@ const loadSelectedTransactionDetail = async (
   if (current === null || selectedTransactionId !== entry.txid) {
     return;
   }
+  if (
+    !snapshotIsComplete(current.left.snapshot) ||
+    !snapshotIsComplete(current.right.snapshot)
+  ) {
+    clearDetailPanel("Membership details are still loading.");
+    const txid = document.createElement("code");
+    txid.textContent = entry.txid;
+    txid.title = entry.txid;
+    detailContainer.replaceChildren(txid);
+    return;
+  }
   detailController?.abort();
   const controller = new AbortController();
   detailController = controller;
@@ -1459,48 +1313,96 @@ const loadSelectedTransactionDetail = async (
   );
 };
 
-const renderComparison = (
+const renderComparison = async (
   current: CurrentComparison,
   view: ComparisonPolicyView,
-): void => {
-  invalidateComparisonGeometry();
-  renderSourceCard(leftSourceCard, "Source A", current.left);
-  renderSourceCard(rightSourceCard, "Source B", current.right);
+  complete = true,
+  preparedDistributions: PreparedComparisonDistributions | null = null,
+): Promise<void> => {
+  leftSourceCardView.renderSnapshot(current.left.source, current.left.snapshot);
+  rightSourceCardView.renderSnapshot(
+    current.right.source,
+    current.right.snapshot,
+  );
   renderSampling(current);
-  comparisonDistributions.render(current);
+  if (complete) {
+    if (
+      preparedDistributions === null ||
+      !comparisonDistributions.commit(preparedDistributions, current)
+    ) {
+      throw new DOMException(
+        "Comparison distribution candidate was superseded",
+        "AbortError",
+      );
+    }
+  } else comparisonDistributions.reset();
+  if (comparison !== current) return;
   renderPolicyMatrix(current, view);
   renderRegionControls(current);
   unionCount.textContent = `${countFormat.format(current.totals.union_count)} txids`;
   comparisonStage.hidden = current.totals.union_count === 0;
   comparisonEmpty.hidden = current.totals.union_count !== 0;
   comparisonEmpty.textContent = "Both sampled mempools are empty.";
-  const differingVariants = current.common.filter(
-    ({ same_wtxid: sameVariant }) => sameVariant === false,
-  ).length;
+  const differingVariants = complete
+    ? current.common_differing_wtxids.reduce(
+        (count, differing) => count + differing,
+        0,
+      )
+    : 0;
   comparisonCanvas.setAttribute(
     "aria-label",
-    `Current membership comparison with ${formatTxidCount(current.totals.common_count)} present in both snapshots, ${formatTxidCount(current.totals.left_only_count)} observed only in ${current.left.snapshot.source_label} snapshot, and ${formatTxidCount(current.totals.right_only_count)} observed only in ${current.right.snapshot.source_label} snapshot. Use the transaction navigator or arrow keys to reach every transaction.`,
+    `Current membership comparison with ${formatTxidCount(current.totals.common_count)} present in both snapshots, ${formatTxidCount(current.totals.left_only_count)} observed only in ${current.left.snapshot.source_label} snapshot, and ${formatTxidCount(current.totals.right_only_count)} observed only in ${current.right.snapshot.source_label} snapshot. ${complete ? "Use the transaction navigator or arrow keys to reach every transaction." : "Witness variants and membership details are still loading."}`,
   );
   const unionSentence =
     current.totals.union_count === 1
       ? "The one transaction ID appears once."
       : `Each of the ${formatTxidCount(current.totals.union_count)} appears once.`;
-  const variantVerb = differingVariants === 1 ? "carries" : "carry";
-  visualSummary.textContent = `${unionSentence} The snapshots were observed ${formatDuration(current.observed_skew_ms)} apart. ${formatTxidCount(differingVariants)} present in both ${variantVerb} different witness variants.`;
+  visualSummary.textContent = complete
+    ? `${unionSentence} The snapshots were observed ${formatDuration(current.observed_skew_ms)} apart. ${formatTxidCount(differingVariants)} present in both ${differingVariants === 1 ? "carries" : "carry"} different witness variants.`
+    : `${formatTxidCount(current.totals.union_count)} transaction IDs are ready for membership-region and policy exploration. Witness variants, fee distributions, and transaction details are still loading.`;
   renderTransactionNavigator();
   renderInspector();
-  scheduleCanvasRender();
+  while (comparison === current) {
+    const renderedRegion = selectedRegion;
+    const canvasStatus = await scheduleCanvasRender();
+    if (
+      canvasStatus === "rendered" &&
+      comparison === current &&
+      selectedRegion === renderedRegion
+    ) {
+      break;
+    }
+  }
+  if (comparison !== current) return;
 
-  const stale =
-    current.left.source.availability === "stale" ||
-    current.right.source.availability === "stale";
-  const sameTip =
-    current.left.snapshot.chain_tip.hash ===
-    current.right.snapshot.chain_tip.hash;
-  setStatus(
-    stale ? "stale" : "ready",
-    stale ? "Comparing a retained snapshot" : "Comparison ready",
-    `${formatDuration(current.observed_skew_ms)} observation skew. ${sameTip ? "Both snapshots report the same chain tip." : "The snapshots report different chain tips."}`,
+  if (complete) {
+    const stale =
+      current.left.source.availability === "stale" ||
+      current.right.source.availability === "stale";
+    const sameTip =
+      current.left.snapshot.chain_tip.hash ===
+      current.right.snapshot.chain_tip.hash;
+    setStatus(
+      stale ? "stale" : "ready",
+      stale ? "Comparing a retained snapshot" : "Comparison ready",
+      `${formatDuration(current.observed_skew_ms)} observation skew. ${sameTip ? "Both snapshots report the same chain tip." : "The snapshots report different chain tips."}`,
+    );
+  } else {
+    const stale =
+      current.left.source.availability === "stale" ||
+      current.right.source.availability === "stale";
+    setStatus(
+      stale ? "stale" : "ready",
+      "Policy comparison ready",
+      "Membership regions and BIP-110 policy are interactive while remaining transaction facts load.",
+    );
+  }
+  setAtlasLoadPhase(pageStatus, "interactive");
+  await markAtlasReadinessAfterPaint(
+    pageStatus,
+    "comparison",
+    complete ? "complete-feature-ready" : "primary-interactive",
+    () => comparison === current,
   );
 };
 
@@ -1532,6 +1434,25 @@ const transitionComparisonView = (requested: ComparisonViewState): void => {
   });
 };
 
+const renderSelectedSourceMetadata = (message: string): void => {
+  const leftSource = configuredSources.find(
+    ({ source_id: sourceId }) => sourceId === leftSourceId,
+  );
+  const rightSource = configuredSources.find(
+    ({ source_id: sourceId }) => sourceId === rightSourceId,
+  );
+  if (leftSource === undefined) {
+    leftSourceCardView.renderPlaceholder(message);
+  } else {
+    leftSourceCardView.renderMetadata(leftSource, message);
+  }
+  if (rightSource === undefined) {
+    rightSourceCardView.renderPlaceholder(message);
+  } else {
+    rightSourceCardView.renderMetadata(rightSource, message);
+  }
+};
+
 const resetComparisonView = (message: string): void => {
   comparison = null;
   comparisonPolicyView = null;
@@ -1548,8 +1469,7 @@ const resetComparisonView = (message: string): void => {
   comparisonDistributions.reset();
   policyMatrix.hidden = true;
   policyMatrixBody.replaceChildren();
-  resetSourceCard(leftSourceCard, "Source A", leftSourceId, message);
-  resetSourceCard(rightSourceCard, "Source B", rightSourceId, message);
+  renderSelectedSourceMetadata(message);
   resetRegionControls();
   unionCount.textContent = "0 txids";
   comparisonCanvas.setAttribute(
@@ -1566,6 +1486,47 @@ const resetComparisonView = (message: string): void => {
 const currentSelectionMatches = (ticket: ComparisonRequestTicket): boolean =>
   lifecycle.isCurrent(ticket, leftSelect.value, rightSelect.value);
 
+const commitComparisonPublications = async (
+  left: LoadedSourcePublication,
+  right: LoadedSourcePublication,
+  complete: boolean,
+  signal: AbortSignal,
+  isCurrent: () => boolean,
+  replacement: boolean,
+): Promise<ResolvedComparisonViewTransition> => {
+  setAtlasLoadPhase(pageStatus, "deriving-view");
+  const prepared = await prepareComparisonCommitCandidate(
+    left,
+    right,
+    complete,
+    replacement,
+    signal,
+    isCurrent,
+    comparisonDistributions,
+    comparisonCanvasView,
+  );
+  replaceSourceSummary(left.source);
+  replaceSourceSummary(right.source);
+  const { comparison: next, policyView } = prepared.publication;
+  comparison = next;
+  comparisonPolicyView = policyView;
+  const previous = currentViewState();
+  const applied = resolveComparisonViewTransition(next, previous, previous);
+  applyResolvedLoadedView(next, applied);
+  populateSourceSelectors();
+  comparisonCanvasView.commitCandidate(prepared.canvas);
+  const rendered = renderComparison(
+    next,
+    policyView,
+    complete,
+    prepared.distributions,
+  );
+  if (replacement && complete) recordAtlasCandidateCommitted(prepared.detail);
+  await rendered;
+  if (comparison === next) updateQuery();
+  return applied;
+};
+
 const loadComparison = async (
   selectionChanged: boolean,
   requestedState: ComparisonViewState,
@@ -1581,43 +1542,78 @@ const loadComparison = async (
   refreshButton.disabled = true;
   refreshButton.textContent = "Loading…";
   const ticket = lifecycle.begin(leftSourceId, rightSourceId);
+  const retainActiveComparison = !selectionChanged && comparison !== null;
   if (selectionChanged) {
     resetComparisonView("Loading the selected source snapshots.");
     preparePendingView(requestedState);
     updateQuery();
+  } else {
+    leftSourceCardView.setBusy(true);
+    rightSourceCardView.setBusy(true);
   }
+  setAtlasLoadPhase(pageStatus, "metadata-ready");
   setStatus(
     "waiting",
     "Loading current snapshots",
     "Reading each source independently from Atlas memory.",
   );
+  setAtlasLoadPhase(pageStatus, "loading-snapshot");
+  let leftPrimary: LoadedSourcePublication | null = null;
+  let rightPrimary: LoadedSourcePublication | null = null;
+  let primaryCommitted = false;
+  const maybeRenderPrimary = async (): Promise<void> => {
+    if (
+      primaryCommitted ||
+      leftPrimary === null ||
+      rightPrimary === null ||
+      !currentSelectionMatches(ticket)
+    ) {
+      return;
+    }
+    primaryCommitted = true;
+    if (!retainActiveComparison) {
+      await commitComparisonPublications(
+        leftPrimary,
+        rightPrimary,
+        false,
+        ticket.signal,
+        () => currentSelectionMatches(ticket),
+        false,
+      );
+    }
+  };
   try {
     const [leftResponse, rightResponse] = await Promise.all([
-      fetchSourceSnapshot(leftSourceId, ticket.signal),
-      fetchSourceSnapshot(rightSourceId, ticket.signal),
+      fetchSourcePublication(
+        leftSourceId,
+        ticket.signal,
+        KNOTS_BIP110_CLASSIFIER_ID,
+        (publication) => {
+          leftPrimary = publication;
+          return maybeRenderPrimary();
+        },
+      ),
+      fetchSourcePublication(
+        rightSourceId,
+        ticket.signal,
+        KNOTS_BIP110_CLASSIFIER_ID,
+        (publication) => {
+          rightPrimary = publication;
+          return maybeRenderPrimary();
+        },
+      ),
     ]);
     if (!currentSelectionMatches(ticket)) {
       return;
     }
-    replaceSourceSummary(leftResponse.source);
-    replaceSourceSummary(rightResponse.source);
-    const nextComparison = compareCurrentSnapshots(
-      requireLoadedSnapshot(leftResponse),
-      requireLoadedSnapshot(rightResponse),
+    const applied = await commitComparisonPublications(
+      leftResponse,
+      rightResponse,
+      true,
+      ticket.signal,
+      () => currentSelectionMatches(ticket),
+      retainActiveComparison,
     );
-    const nextPolicyView = buildComparisonPolicyView(nextComparison);
-    comparison = nextComparison;
-    comparisonPolicyView = nextPolicyView;
-    const previous = currentViewState();
-    const applied = resolveComparisonViewTransition(
-      nextComparison,
-      previous,
-      previous,
-    );
-    applyResolvedLoadedView(nextComparison, applied);
-    populateSourceSelectors();
-    renderComparison(nextComparison, nextPolicyView);
-    updateQuery();
     if (applied.selectedEntry !== null) {
       void loadSelectedTransactionDetail(applied.selectedEntry);
     }
@@ -1629,13 +1625,27 @@ const loadComparison = async (
     ) {
       return;
     }
+    lifecycle.invalidate();
     const message =
       error instanceof Error ? error.message : "Unable to load comparison";
     if (comparison === null) {
       const pendingState = currentViewState();
       resetComparisonView(message);
+      leftSourceCardView.setBusy(false);
+      rightSourceCardView.setBusy(false);
       preparePendingView(pendingState);
       updateQuery();
+      setAtlasLoadPhase(pageStatus, "metadata-ready");
+    } else {
+      leftSourceCardView.renderSnapshot(
+        comparison.left.source,
+        comparison.left.snapshot,
+      );
+      rightSourceCardView.renderSnapshot(
+        comparison.right.source,
+        comparison.right.snapshot,
+      );
+      setAtlasLoadPhase(pageStatus, "interactive");
     }
     setStatus(
       "error",
@@ -1658,6 +1668,14 @@ const discoverSources = async (): Promise<void> => {
   refreshButton.disabled = true;
   refreshButton.textContent = "Loading…";
   lifecycle.invalidate();
+  setAtlasLoadPhase(pageStatus, "discovering-sources");
+  if (comparison === null) {
+    leftSourceCardView.renderPlaceholder("Discovering configured sources.");
+    rightSourceCardView.renderPlaceholder("Discovering configured sources.");
+  } else {
+    leftSourceCardView.setBusy(true);
+    rightSourceCardView.setBusy(true);
+  }
   const ticket = discoveryLifecycle.begin();
   try {
     const response = await fetchSources(ticket.signal);
@@ -1676,6 +1694,9 @@ const discoverSources = async (): Promise<void> => {
       (previousLeftSourceId !== leftSourceId ||
         previousRightSourceId !== rightSourceId);
     populateSourceSelectors();
+    renderSelectedSourceMetadata("Loading the complete snapshots…");
+    markAtlasReadiness(pageStatus, "comparison", "metadata-usable");
+    setAtlasLoadPhase(pageStatus, "metadata-ready");
     if (leftSourceId.length === 0 || rightSourceId.length === 0) {
       initialViewState = null;
       lifecycle.invalidate();
@@ -1688,6 +1709,8 @@ const discoverSources = async (): Promise<void> => {
         "Waiting for two snapshots",
         "At least two configured sources must have a complete current snapshot.",
       );
+      leftSourceCardView.setBusy(false);
+      rightSourceCardView.setBusy(false);
       return;
     }
     const selectionChanged =
@@ -1713,6 +1736,13 @@ const discoverSources = async (): Promise<void> => {
     if (comparison === null) {
       comparisonEmpty.hidden = false;
       comparisonEmpty.textContent = message;
+      leftSourceCardView.setBusy(false);
+      rightSourceCardView.setBusy(false);
+      setAtlasLoadPhase(pageStatus, "discovering-sources");
+    } else {
+      leftSourceCardView.setBusy(false);
+      rightSourceCardView.setBusy(false);
+      setAtlasLoadPhase(pageStatus, "interactive");
     }
     setStatus("error", "Atlas website unavailable", message);
   } finally {
@@ -1826,12 +1856,13 @@ clearPolicyFilter.addEventListener("click", () => {
 
 comparisonCanvas.addEventListener("click", (event) => {
   const current = comparison;
-  if (current === null || comparisonLayout === null) {
+  const layout = comparisonCanvasView.layout;
+  if (current === null || layout === null) {
     return;
   }
   const bounds = comparisonCanvas.getBoundingClientRect();
   const hit = hitTestComparison(
-    comparisonLayout,
+    layout,
     event.clientX - bounds.left,
     event.clientY - bounds.top,
   );
@@ -1870,7 +1901,6 @@ const handleTransactionNavigation = (event: KeyboardEvent): void => {
     if (nextIndex !== null) {
       keyboardTransactionIndex = nextIndex;
       renderTransactionNavigator();
-      scheduleCanvasRender();
     }
     return;
   }
@@ -1900,7 +1930,7 @@ transactionListbox.addEventListener("dblclick", () => {
 
 new ResizeObserver(() => {
   invalidateComparisonGeometry();
-  scheduleCanvasRender();
+  void scheduleCanvasRender();
 }).observe(comparisonCanvas);
 
 const startupViewState = initialViewState;
