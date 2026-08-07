@@ -1064,6 +1064,40 @@ mod tests {
                 .is_empty()
         );
 
+        let (_, manifest_body) =
+            get_json(application.clone(), "/api/v2/sources/core/mempool").await;
+        let stage_descriptor = manifest_body["stages"]
+            .as_array()
+            .expect("stages")
+            .first()
+            .expect("population stage");
+        let stage_content_id = stage_descriptor["content_id"].as_str().expect("content ID");
+        let stage = application
+            .clone()
+            .oneshot(
+                Request::head(format!(
+                    "/api/v2/sources/core/mempool/stages/population/{stage_content_id}"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(stage.status(), StatusCode::OK);
+        assert_eq!(
+            stage.headers()[header::CACHE_CONTROL],
+            SNAPSHOT_CACHE_CONTROL
+        );
+        assert!(stage.headers().contains_key(header::ETAG));
+        assert_eq!(stage.headers()["x-atlas-content-id"], stage_content_id);
+        assert!(stage.headers().contains_key("x-atlas-uncompressed-length"));
+        assert!(
+            to_bytes(stage.into_body(), usize::MAX)
+                .await
+                .expect("body")
+                .is_empty()
+        );
+
         let sources = application
             .oneshot(
                 Request::head("/api/v2/sources")
@@ -1096,6 +1130,16 @@ mod tests {
             .as_str()
             .expect("population ID")
             .to_owned();
+        let classifier = manifest["stages"]
+            .as_array()
+            .expect("stages")
+            .iter()
+            .find(|descriptor| descriptor["kind"] == "classifier")
+            .expect("classifier stage");
+        let classifier_id = classifier["classifier_id"].as_str().expect("classifier ID");
+        let classifier_content_id = classifier["content_id"]
+            .as_str()
+            .expect("classifier content ID");
 
         let (status, policy) = cache_control(
             application.clone(),
@@ -1113,6 +1157,16 @@ mod tests {
             &format!(
                 "/api/v2/sources/core/mempool/stages/population/{}?variant=old",
                 "00".repeat(32)
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(policy.as_deref(), Some(NO_STORE));
+
+        let (status, policy) = cache_control(
+            application.clone(),
+            &format!(
+                "/api/v2/sources/core/mempool/stages/classifier/{classifier_id}/{classifier_content_id}?variant=old"
             ),
         )
         .await;

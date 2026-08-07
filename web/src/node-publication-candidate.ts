@@ -6,6 +6,7 @@ import {
   awaitAtlasCandidateRelease,
   type AtlasCandidateReadyDetail,
 } from "./candidate-ready";
+import { bip110RulePopulationSummary } from "./bip110-rule-index";
 import {
   KNOTS_BIP110_CLASSIFIER_ID,
   classifierBucketForTransaction,
@@ -20,7 +21,6 @@ import type {
 } from "./snapshot-distributions-view";
 import {
   TERRAIN_RULES,
-  rulePopulation,
   terrainRegionKey,
   type TerrainMode,
   type TerrainSelection,
@@ -37,10 +37,12 @@ import type { NodeViewState } from "./view-state";
 
 export interface NodePublicationCandidate {
   source: SourceSummary;
+  publicationId: string;
   snapshot: MempoolSnapshot;
   classification: ClassificationProgress;
   complete: boolean;
   selectedClassifierId: string;
+  selectedClassifierLabel: string | null;
   selectedClassifierBucketKey: ClassifierBucketKey | null;
   selectedInspector: TerrainSelection;
   viewState: NodeViewState;
@@ -50,6 +52,10 @@ export interface NodePublicationCandidate {
 export interface NodePublicationInput {
   viewState: NodeViewState;
   terrainMode: TerrainMode;
+  currentPublicationId: string | null;
+  selectedClassifierLabel: string | null;
+  selectedClassifierBucketKey: ClassifierBucketKey | null;
+  selectedInspector: TerrainSelection;
 }
 
 export interface PreparedNodePublicationCommit {
@@ -63,7 +69,10 @@ export const chooseInitialNodeRule = (snapshot: MempoolSnapshot): RuleId => {
   let chosen: RuleId = "element_size";
   let maximum = -1;
   for (const rule of TERRAIN_RULES) {
-    const count = rulePopulation(snapshot.transactions, rule.id).count;
+    const count = bip110RulePopulationSummary(
+      snapshot.transactions,
+      rule.id,
+    ).count;
     if (count > maximum) {
       chosen = rule.id;
       maximum = count;
@@ -148,10 +157,12 @@ export const prepareNodePublicationCandidate = async (
 
   return {
     source,
+    publicationId: response.publication_id,
     snapshot,
     classification,
     complete,
     selectedClassifierId,
+    selectedClassifierLabel: null,
     selectedClassifierBucketKey,
     selectedInspector,
     viewState: {
@@ -167,6 +178,35 @@ export const prepareNodePublicationCandidate = async (
   };
 };
 
+export const retainNodePublicationSelection = (
+  candidate: NodePublicationCandidate,
+  input: NodePublicationInput,
+): NodePublicationCandidate => {
+  if (
+    input.currentPublicationId !== candidate.publicationId ||
+    input.viewState.classifier !== candidate.selectedClassifierId
+  ) {
+    return candidate;
+  }
+
+  const isBip110 =
+    candidate.selectedClassifierId === KNOTS_BIP110_CLASSIFIER_ID;
+  return {
+    ...candidate,
+    selectedClassifierLabel: isBip110 ? null : input.selectedClassifierLabel,
+    selectedClassifierBucketKey: isBip110
+      ? null
+      : input.selectedClassifierBucketKey,
+    selectedInspector: isBip110
+      ? input.selectedInspector
+      : candidate.selectedInspector,
+    viewState: {
+      ...candidate.viewState,
+      selection: isBip110 ? input.selectedInspector : null,
+    },
+  };
+};
+
 export const prepareNodePublicationCommit = async (
   response: LoadedSourcePublication,
   complete: boolean,
@@ -178,11 +218,14 @@ export const prepareNodePublicationCommit = async (
 ): Promise<PreparedNodePublicationCommit> => {
   while (true) {
     const input = currentInput();
-    const candidate = await prepareNodePublicationCandidate(
-      response,
-      input.viewState,
-      complete,
-      signal,
+    const candidate = retainNodePublicationSelection(
+      await prepareNodePublicationCandidate(
+        response,
+        input.viewState,
+        complete,
+        signal,
+      ),
+      input,
     );
     const distributionSelection: SnapshotDistributionSelection = {
       classifierId: candidate.selectedClassifierId,
@@ -199,6 +242,12 @@ export const prepareNodePublicationCommit = async (
     const canCommit = (): boolean =>
       currentInput().viewState === input.viewState &&
       currentInput().terrainMode === input.terrainMode &&
+      currentInput().currentPublicationId === input.currentPublicationId &&
+      currentInput().selectedClassifierLabel ===
+        input.selectedClassifierLabel &&
+      currentInput().selectedClassifierBucketKey ===
+        input.selectedClassifierBucketKey &&
+      currentInput().selectedInspector === input.selectedInspector &&
       (distributions === null ||
         distributionsView.canCommit(
           distributions,

@@ -315,10 +315,26 @@ const parseManifest = (value: unknown): StagedSnapshotManifest => {
   ) {
     throw new TypeError("Manifest source summary does not match its snapshot");
   }
-  integer(value.collection_started_at_ms, "collection start");
-  integer(value.collection_completed_at_ms, "collection completion");
-  integer(value.collection_duration_ms, "collection duration");
-  integer(value.observed_at_ms, "observation time");
+  const collectionStartedAtMs = integer(
+    value.collection_started_at_ms,
+    "collection start",
+  );
+  const collectionCompletedAtMs = integer(
+    value.collection_completed_at_ms,
+    "collection completion",
+  );
+  const collectionDurationMs = integer(
+    value.collection_duration_ms,
+    "collection duration",
+  );
+  const observedAtMs = integer(value.observed_at_ms, "observation time");
+  if (
+    collectionCompletedAtMs < collectionStartedAtMs ||
+    collectionDurationMs !== collectionCompletedAtMs - collectionStartedAtMs ||
+    observedAtMs !== collectionCompletedAtMs
+  ) {
+    throw new TypeError("Manifest collection timing is inconsistent");
+  }
   integer(value.classification_revision, "classification revision");
   integer(value.chain_tip.height, "chain height");
   digest(value.chain_tip.hash, "chain hash");

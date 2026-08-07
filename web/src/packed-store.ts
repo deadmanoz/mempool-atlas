@@ -523,14 +523,22 @@ export const createLoadedSourcePublication = (
   publication: PackedPublicationTransfer,
 ): LoadedSourcePublication => {
   const store = new PackedPublicationStore(publication);
-  return { source: publication.manifest.source, publication: store.snapshot };
+  return {
+    source: publication.manifest.source,
+    publication_id: publication.manifest.publication_id,
+    publication: store.snapshot,
+  };
 };
 
 export const createPrimarySourcePublication = (
   publication: PackedPrimaryPublicationTransfer,
 ): LoadedSourcePublication => {
   const store = new PackedPrimaryPublicationStore(publication);
-  return { source: publication.manifest.source, publication: store.snapshot };
+  return {
+    source: publication.manifest.source,
+    publication_id: publication.manifest.publication_id,
+    publication: store.snapshot,
+  };
 };
 
 export const snapshotIsComplete = (snapshot: MempoolSnapshot): boolean =>

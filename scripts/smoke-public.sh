@@ -283,14 +283,34 @@ if jq -e '.transaction_count > 0' "$temp_dir/manifest.json" >/dev/null; then
         exit 1
     }
     detail_url="$base_url/api/v2/sources/$source_id/transactions/$first_txid"
-    curl --silent --show-error --fail-with-body --max-time 30 \
+    detail_status=$(curl --silent --show-error --max-time 30 \
         --dump-header "$temp_dir/detail.headers" \
         --output "$temp_dir/detail.json" \
-        "$detail_url"
-    [[ $(status_code "$temp_dir/detail.headers") == 200 ]] || {
-        printf 'transaction detail did not return 200\n' >&2
-        exit 1
-    }
+        --write-out '%{http_code}' "$detail_url")
+    case "$detail_status" in
+        200) ;;
+        404)
+            jq -e --arg txid "$first_txid" '
+                .error == ("transaction \"" + $txid + "\" is not in the current snapshot")
+            ' "$temp_dir/detail.json" >/dev/null || {
+                printf 'transaction detail returned an unexpected 404 response\n' >&2
+                exit 1
+            }
+            ;;
+        503)
+            jq -e --arg txid "$first_txid" '
+                .error == ("transaction \"" + $txid + "\" is present but has no policy assessment in the current snapshot")
+            ' "$temp_dir/detail.json" >/dev/null || {
+                printf 'transaction detail returned an unexpected 503 response\n' >&2
+                exit 1
+            }
+            ;;
+        *)
+            printf 'transaction detail returned unexpected status %s\n' \
+                "$detail_status" >&2
+            exit 1
+            ;;
+    esac
     [[ $(require_header cache-control "$temp_dir/detail.headers") == no-store ]] || {
         printf 'transaction detail must remain non-cacheable\n' >&2
         exit 1

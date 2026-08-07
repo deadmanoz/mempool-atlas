@@ -9,6 +9,7 @@ const PINNED_THROUGHPUT_BYTES_PER_SECOND = 159_461.45607954692;
 const RELEASE_GATES = Object.freeze({
   metadata_usable_ms: 5_000,
   maximum_responsiveness_long_task_ms: 200,
+  bip110_rule_navigation_handler_ms: 200,
   maximum_animation_frame_callback_ms: Object.freeze({
     desktop: 8,
     "mobile-slow-4g": 16,
@@ -24,6 +25,8 @@ const RELEASE_GATES = Object.freeze({
     page_heap_bytes: 40_000_000,
     cross_context_bytes: 60 * 1024 * 1024,
     replacement_retained_bytes: 90 * 1024 * 1024,
+    bip110_page_heap_bytes: 90_000_000,
+    bip110_cross_context_bytes: 120 * 1024 * 1024,
   }),
   comparison: Object.freeze({
     primary_interaction_ms: 50_000,
@@ -99,6 +102,16 @@ const nonEmptyArray = (value, label) => {
   }
   return value;
 };
+
+const BIP110_RULE_IDS = Object.freeze([
+  "output_size",
+  "element_size",
+  "undefined_version",
+  "taproot_annex",
+  "control_block_size",
+  "op_success",
+  "tapscript_op_if",
+]);
 
 const validateWorkerTiming = (timing, label) => {
   if (typeof timing.source_id !== "string" || timing.source_id === "") {
@@ -324,11 +337,19 @@ const stableLoadSummaries = stableLoads.map((result) => {
     result.responsiveness_intervals,
     `${label}.responsiveness_intervals`,
   );
-  const expectedIntervalLabels = [
-    "post-metadata-pre-instrumentation",
-    "replacement-prepare",
-    "replacement-commit",
-  ];
+  const expectedIntervalLabels =
+    result.scenario === "node"
+      ? [
+          "post-metadata-pre-instrumentation",
+          "replacement-prepare",
+          "replacement-commit",
+          "bip110-rule-navigation",
+        ]
+      : [
+          "post-metadata-pre-instrumentation",
+          "replacement-prepare",
+          "replacement-commit",
+        ];
   if (
     responsivenessIntervals.length !== expectedIntervalLabels.length ||
     responsivenessIntervals.some(
@@ -358,6 +379,102 @@ const stableLoadSummaries = stableLoads.map((result) => {
       throw new Error(`${label}.responsiveness_intervals overlap`);
     }
   });
+  if (result.scenario === "node") {
+    const measurement = result.bip110_rule_navigation;
+    if (typeof measurement !== "object" || measurement === null) {
+      throw new Error(`${label}.bip110_rule_navigation is missing`);
+    }
+    const ruleIds = nonEmptyArray(
+      measurement.ruleIds,
+      `${label}.bip110_rule_navigation.ruleIds`,
+    );
+    if (
+      ruleIds.length !== BIP110_RULE_IDS.length ||
+      ruleIds.some(
+        (ruleId, index) =>
+          typeof ruleId !== "string" || ruleId !== BIP110_RULE_IDS[index],
+      ) ||
+      new Set(ruleIds).size !== BIP110_RULE_IDS.length
+    ) {
+      throw new Error(
+        `${label}.bip110_rule_navigation.ruleIds are incomplete or duplicated`,
+      );
+    }
+    if (measurement.selectedRule !== ruleIds.at(-1)) {
+      throw new Error(
+        `${label}.bip110_rule_navigation did not select the final rule`,
+      );
+    }
+    const handlerDurationMs = finite(
+      measurement.handlerDurationMs,
+      `${label}.bip110_rule_navigation.handlerDurationMs`,
+    );
+    const handlerDurationsMs = nonEmptyArray(
+      measurement.handlerDurationsMs,
+      `${label}.bip110_rule_navigation.handlerDurationsMs`,
+    );
+    if (
+      handlerDurationsMs.length !== BIP110_RULE_IDS.length ||
+      handlerDurationsMs.some(
+        (duration, index) =>
+          finite(
+            duration,
+            `${label}.bip110_rule_navigation.handlerDurationsMs[${index}]`,
+          ) > RELEASE_GATES.bip110_rule_navigation_handler_ms,
+      ) ||
+      Math.max(...handlerDurationsMs) !== handlerDurationMs
+    ) {
+      throw new Error(
+        `${label}.bip110_rule_navigation handler durations are invalid`,
+      );
+    }
+    if (handlerDurationMs > RELEASE_GATES.bip110_rule_navigation_handler_ms) {
+      throw new Error(
+        `${label}.bip110_rule_navigation.handlerDurationMs exceeds its release gate`,
+      );
+    }
+    const measuredInterval = measurement.responsivenessInterval;
+    const recordedInterval = responsivenessIntervals[3];
+    if (
+      typeof measuredInterval !== "object" ||
+      measuredInterval === null ||
+      measuredInterval.label !== recordedInterval?.label ||
+      measuredInterval.start_time_ms !== recordedInterval.start_time_ms ||
+      measuredInterval.end_time_ms !== recordedInterval.end_time_ms
+    ) {
+      throw new Error(
+        `${label}.bip110_rule_navigation interval does not match its responsiveness interval`,
+      );
+    }
+    const memory = result.bip110_memory_sample;
+    if (typeof memory !== "object" || memory === null) {
+      throw new Error(`${label}.bip110_memory_sample is missing`);
+    }
+    if (
+      finite(
+        memory.page_heap?.used_size_bytes,
+        `${label}.bip110_memory_sample.page_heap.used_size_bytes`,
+        { positive: true },
+      ) > RELEASE_GATES.node.bip110_page_heap_bytes ||
+      finite(
+        memory.worker_inclusive_memory?.bytes,
+        `${label}.bip110_memory_sample.worker_inclusive_memory.bytes`,
+        { positive: true },
+      ) > RELEASE_GATES.node.bip110_cross_context_bytes ||
+      memory.worker_inclusive_memory?.supported !== true ||
+      memory.worker_inclusive_memory?.error !== null
+    ) {
+      throw new Error(`${label}.bip110_memory_sample exceeds its release gate`);
+    }
+  } else if (result.bip110_rule_navigation !== null) {
+    throw new Error(
+      `${label}.bip110_rule_navigation must be null for comparison`,
+    );
+  } else if (result.bip110_memory_sample !== null) {
+    throw new Error(
+      `${label}.bip110_memory_sample must be null for comparison`,
+    );
+  }
   const responsivenessLongTasks = result.responsiveness_long_tasks;
   const responsivenessFrames = result.responsiveness_animation_frame_callbacks;
   if (
@@ -570,6 +687,8 @@ const stableLoadSummaries = stableLoads.map((result) => {
       cls: result.cls,
     },
     readiness_contract: result.readiness_contract,
+    bip110_rule_navigation: result.bip110_rule_navigation,
+    bip110_memory_sample: result.bip110_memory_sample,
     memory: {
       primary_sample: result.primary_memory_sample,
       page_heap: result.page_heap,

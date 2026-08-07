@@ -428,8 +428,16 @@ pub fn reencode_manifest_for_source(
     retained: &StagedSnapshotManifest,
     source: &SourceSummary,
 ) -> Result<EncodedManifest, StagedSnapshotError> {
+    reencode_manifest_for_source_with_limits(retained, source, StagedSnapshotLimits::default())
+}
+
+pub(crate) fn reencode_manifest_for_source_with_limits(
+    retained: &StagedSnapshotManifest,
+    source: &SourceSummary,
+    limits: StagedSnapshotLimits,
+) -> Result<EncodedManifest, StagedSnapshotError> {
     validate_retained_source(source, retained)?;
-    let mut budget = PublicationBudget::new(StagedSnapshotLimits::default())?;
+    let mut budget = PublicationBudget::new(limits)?;
     for descriptor in &retained.stages {
         let bytes = usize::try_from(descriptor.uncompressed_bytes)
             .map_err(|_| StagedSnapshotError::CountOverflow("retained stage byte length"))?;

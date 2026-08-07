@@ -30,6 +30,10 @@ import {
   renderBucketTerrain,
 } from "./bucket-terrain";
 import {
+  bip110RulePopulation,
+  bip110RulePopulationSummary,
+} from "./bip110-rule-index";
+import {
   KNOTS_BIP110_CLASSIFIER_ID,
   classifierBucketColor,
   classifierBucketContainsLabel,
@@ -66,7 +70,6 @@ import { createTerrainSummaryView } from "./terrain-summary-view";
 import {
   TERRAIN_RULES,
   hitTestTerrain,
-  rulePopulation,
   renderTerrain,
   signatureLabel,
   signaturePopulation,
@@ -221,6 +224,7 @@ const snapshotLifecycle = new RequestLifecycle();
 let configuredSources: SourceSummary[] = [];
 let selectedSourceId: string | null = null;
 let currentSnapshot: MempoolSnapshot | null = null;
+let currentPublicationId: string | null = null;
 let currentClassification: ClassificationProgress | null = null;
 let filteredTransactions: MempoolTransaction[] = [];
 let selectedLens: Lens = "overview";
@@ -979,7 +983,7 @@ const populationForSelection = (
   selection: InspectorSelection,
 ) => {
   if (selection.kind === "rule") {
-    return rulePopulation(snapshot.transactions, selection.rule);
+    return bip110RulePopulation(snapshot.transactions, selection.rule);
   }
   return isViolationSignatureKey(selection.regionKey)
     ? signaturePopulation(snapshot.transactions, selection.regionKey)
@@ -1150,13 +1154,14 @@ const renderRuleNavigation = (): void => {
     ruleList.replaceChildren();
     return;
   }
+  const snapshot = currentSnapshot;
   if (!selectedClassifierIsBip110()) {
     const descriptor = currentClassifierDescriptor();
     if (descriptor === null) {
       ruleList.replaceChildren();
       return;
     }
-    const summary = classifierSummary(currentSnapshot, descriptor.id);
+    const summary = classifierSummary(snapshot, descriptor.id);
     ruleList.setAttribute("aria-label", `${descriptor.title} label filters`);
     const buttons = descriptor.labels.map((label, index) => {
       const populationCount = summary?.label_counts[label.key] ?? 0;
@@ -1195,17 +1200,14 @@ const renderRuleNavigation = (): void => {
     return;
   }
   ruleList.setAttribute("aria-label", "BIP-110 rule filters");
-  const selectedSignature = signatureForSelection(
-    currentSnapshot,
-    selectedInspector,
-  );
+  const selectedSignature = signatureForSelection(snapshot, selectedInspector);
   const navigationTabRule =
     selectedInspector.kind === "rule"
       ? selectedInspector.rule
       : (selectedSignature?.foundationRule ?? TERRAIN_RULES[0]?.id);
   const buttons = TERRAIN_RULES.map((rule) => {
-    const population = rulePopulation(
-      currentSnapshot?.transactions ?? [],
+    const population = bip110RulePopulationSummary(
+      snapshot.transactions,
       rule.id,
     );
     const button = document.createElement("button");
@@ -1976,7 +1978,14 @@ const renderResponse = async (
     replacesCompletePublication,
     signal,
     isCurrent,
-    () => ({ viewState: nodeViewState, terrainMode }),
+    () => ({
+      viewState: nodeViewState,
+      terrainMode,
+      currentPublicationId,
+      selectedClassifierLabel,
+      selectedClassifierBucketKey,
+      selectedInspector,
+    }),
     snapshotDistributionsView,
   );
   const { candidate, distributionSelection, distributions } = prepared;
@@ -1992,9 +2001,10 @@ const renderResponse = async (
   minimumVsize.disabled = !complete;
   resetFilters.disabled = !complete;
   currentSnapshot = snapshot;
+  currentPublicationId = candidate.publicationId;
   currentClassification = candidate.classification;
   selectedClassifierId = candidate.selectedClassifierId;
-  selectedClassifierLabel = null;
+  selectedClassifierLabel = candidate.selectedClassifierLabel;
   selectedClassifierBucketKey = candidate.selectedClassifierBucketKey;
   resetTerrainLayouts();
   terrainStage.hidden = snapshot.transaction_count === 0;
@@ -2262,6 +2272,7 @@ const prepareForSourceLoad = (source: SourceSummary): void => {
     txid: null,
   };
   currentSnapshot = null;
+  currentPublicationId = null;
   currentClassification = null;
   filteredTransactions = [];
   selectedClassifierLabel = null;

@@ -648,6 +648,36 @@ describe("v2 manifest validation", () => {
     );
   });
 
+  it("requires internally coherent collection timing", async () => {
+    const current = await fixture();
+    const manifest = (): Record<string, unknown> =>
+      JSON.parse(new TextDecoder().decode(current.manifestBytes)) as Record<
+        string,
+        unknown
+      >;
+
+    const completionBeforeStart = manifest();
+    completionBeforeStart.collection_completed_at_ms = 89;
+    expect(() => parseManifest(completionBeforeStart)).toThrow(
+      "Manifest collection timing is inconsistent",
+    );
+
+    const wrongDuration = manifest();
+    wrongDuration.collection_duration_ms = 9;
+    expect(() => parseManifest(wrongDuration)).toThrow(
+      "Manifest collection timing is inconsistent",
+    );
+
+    const wrongObservation = manifest();
+    wrongObservation.observed_at_ms = 99;
+    (
+      wrongObservation.source as Record<string, unknown>
+    ).snapshot_observed_at_ms = 99;
+    expect(() => parseManifest(wrongObservation)).toThrow(
+      "Manifest collection timing is inconsistent",
+    );
+  });
+
   it("rejects duplicate result labels and missing complete labels", () => {
     expect(() =>
       resultTuple({

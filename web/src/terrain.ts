@@ -150,14 +150,6 @@ export interface ClassificationTotals {
   incompleteCoverage: { count: number; vsize: number };
 }
 
-export interface RulePopulation {
-  rule: RuleId;
-  transactions: MempoolTransaction[];
-  count: number;
-  vsize: number;
-  totalShare: number;
-}
-
 export interface SignaturePopulation {
   signature: ViolationSignature;
   transactions: MempoolTransaction[];
@@ -353,26 +345,6 @@ export const compareViolationSignatures = (
   const unknownOrder =
     inverseGrayRank(left.unknownMask) - inverseGrayRank(right.unknownMask);
   return unknownOrder !== 0 ? unknownOrder : left.key.localeCompare(right.key);
-};
-
-export const rulePopulation = (
-  transactions: readonly MempoolTransaction[],
-  rule: RuleId,
-): RulePopulation => {
-  const selected = sortTransactions(
-    filterTransactionView(
-      transactions,
-      (transaction) =>
-        transaction.bip110?.violated_rules.includes(rule) ?? false,
-    ),
-  );
-  return {
-    rule,
-    transactions: selected,
-    count: selected.length,
-    vsize: sumVsize(selected),
-    totalShare: populationShare(transactions, selected.length),
-  };
 };
 
 export const signaturePopulations = (
@@ -646,7 +618,15 @@ export const paintTerrain = (
   layout: TerrainLayout,
   selection: TerrainSelection,
   selectedTxid: string | null = null,
-): void =>
+): void => {
+  const glyphOpacity = (region: TerrainRegion, selected: boolean): number =>
+    region.signature === null
+      ? 0.82
+      : selected
+        ? 1
+        : selection.kind === "rule"
+          ? 0.46
+          : 0.7;
   paintBucketTerrain(
     context,
     layout,
@@ -654,17 +634,13 @@ export const paintTerrain = (
       color: regionColor,
       selected: (region) => regionMatchesSelection(region, selection),
       partial: (region) => region.signature?.completeness === "partial",
-      glyphOpacity: (region, selected) =>
-        region.signature === null
-          ? 0.82
-          : selected
-            ? 1
-            : selection.kind === "rule"
-              ? 0.46
-              : 0.7,
+      glyphOpacity,
+      glyphOpacityByRegion: glyphOpacity,
+      rasterStyleKey: `bip110-${selection.kind}`,
     },
     selectedTxid,
   );
+};
 
 export const renderTerrain = (
   canvas: HTMLCanvasElement,

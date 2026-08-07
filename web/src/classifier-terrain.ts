@@ -2,6 +2,12 @@ import type {
   BucketTerrainLayout,
   BucketTerrainSectionGroup,
 } from "./bucket-terrain";
+import {
+  addTransactionToBip110RuleIndex,
+  cacheBip110RuleIndex,
+  createBip110RuleIndexBuilder,
+  type Bip110RuleIndexBuilder,
+} from "./bip110-rule-index";
 import { classificationResult } from "./classification-view";
 import {
   forEachCooperatively,
@@ -274,6 +280,7 @@ interface ClassifierBucketAccumulator {
 
 interface ClassifierBucketBuilder {
   descriptor: ClassifierDescriptor;
+  bip110Rules: Bip110RuleIndexBuilder | null;
   knownLabelKeys: Set<string>;
   buckets: Map<ClassifierBucketKey, ClassifierBucketAccumulator>;
   labels: Map<
@@ -317,6 +324,10 @@ const createClassifierBucketBuilder = (
   descriptor: ClassifierDescriptor,
 ): ClassifierBucketBuilder => ({
   descriptor,
+  bip110Rules:
+    descriptor.id === KNOTS_BIP110_CLASSIFIER_ID
+      ? createBip110RuleIndexBuilder()
+      : null,
   knownLabelKeys: new Set(descriptor.labels.map(({ key }) => key)),
   buckets: new Map(),
   labels: new Map(
@@ -360,6 +371,9 @@ const addTransactionToClassifierBuckets = (
   row: number,
 ): void => {
   const { descriptor, knownLabelKeys, buckets, labels } = builder;
+  if (builder.bip110Rules !== null) {
+    addTransactionToBip110RuleIndex(builder.bip110Rules, transaction, row);
+  }
   const signature = classifierBucketForTransaction(transaction, descriptor);
   let accumulator = buckets.get(signature.key);
   if (accumulator === undefined) {
@@ -454,6 +468,9 @@ const cacheClassifierBuilder = (
     builder.descriptor,
     finalizeClassifierLabelPopulations(transactions, builder),
   );
+  if (builder.bip110Rules !== null) {
+    cacheBip110RuleIndex(transactions, builder.bip110Rules);
+  }
   return buckets;
 };
 
@@ -515,6 +532,9 @@ const cacheClassifierBuilderCooperatively = async (
   options.signal?.throwIfAborted();
   classifierBucketCache(transactions).set(builder.descriptor, buckets);
   classifierLabelPopulationCache(transactions).set(builder.descriptor, labels);
+  if (builder.bip110Rules !== null) {
+    cacheBip110RuleIndex(transactions, builder.bip110Rules);
+  }
 };
 
 /**

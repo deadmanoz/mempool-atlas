@@ -1,5 +1,28 @@
 use super::*;
 
+async fn publication_stages(runtime: &SourceRuntime, manifest: &Value) -> Vec<PublicationPayload> {
+    let mut payloads = Vec::new();
+    for descriptor in manifest["stages"].as_array().expect("stages") {
+        let kind = match descriptor["kind"].as_str().expect("stage kind") {
+            "population" => StageKind::Population,
+            "membership" => StageKind::Membership,
+            "structure" => StageKind::Structure,
+            "classifier" => StageKind::Classifier,
+            kind => panic!("unexpected stage kind {kind}"),
+        };
+        let classifier_id = descriptor["classifier_id"].as_str();
+        let content_id = descriptor["content_id"].as_str().expect("content ID");
+        match runtime
+            .stage_payload(Some(kind), classifier_id, content_id)
+            .await
+        {
+            StageLookup::Ready(payload) => payloads.push(payload),
+            lookup => panic!("unexpected stage lookup: {lookup:?}"),
+        }
+    }
+    payloads
+}
+
 #[tokio::test]
 async fn classification_publication_reuses_membership_buffers() {
     let runtime = runtime();
@@ -64,6 +87,54 @@ async fn classification_publication_reuses_membership_buffers() {
         membership_before.body.as_ptr(),
         membership_after.body.as_ptr()
     );
+}
+
+#[tokio::test]
+async fn poll_start_reencodes_only_the_manifest() {
+    let runtime = runtime();
+    runtime
+        .record_membership(membership_publication(1, true, observation(20)))
+        .await
+        .expect("publish membership");
+    let before = runtime
+        .current_manifest_payload()
+        .await
+        .expect("membership manifest");
+    let before_manifest = serde_json::from_slice::<Value>(&before.body).expect("manifest JSON");
+    let before_stages = publication_stages(&runtime, &before_manifest).await;
+
+    runtime
+        .record_poll_started(30)
+        .await
+        .expect("record poll start");
+
+    let after = runtime
+        .current_manifest_payload()
+        .await
+        .expect("poll-start manifest");
+    let after_manifest = serde_json::from_slice::<Value>(&after.body).expect("manifest JSON");
+    let after_stages = publication_stages(&runtime, &after_manifest).await;
+    assert_eq!(after_manifest["source"]["last_poll_started_at_ms"], 30);
+    assert_eq!(before_manifest["stages"], after_manifest["stages"]);
+    assert_eq!(
+        before_manifest["population_id"],
+        after_manifest["population_id"]
+    );
+    assert_eq!(
+        before_manifest["classification_set_id"],
+        after_manifest["classification_set_id"]
+    );
+    assert_ne!(
+        before_manifest["publication_id"],
+        after_manifest["publication_id"]
+    );
+    assert_ne!(before.etag, after.etag);
+    assert_eq!(before_stages.len(), after_stages.len());
+    for (before_stage, after_stage) in before_stages.iter().zip(&after_stages) {
+        assert_eq!(before_stage.content_id, after_stage.content_id);
+        assert_eq!(before_stage.etag, after_stage.etag);
+        assert_eq!(before_stage.body.as_ptr(), after_stage.body.as_ptr());
+    }
 }
 
 #[tokio::test]

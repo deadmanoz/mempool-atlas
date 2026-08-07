@@ -1,13 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  bip110RulePopulation,
+  bip110RulePopulationSummary,
+} from "./bip110-rule-index";
+import {
+  TERRAIN_RULES,
   classificationTotals,
   createTerrainLayout,
   hitTestTerrain,
   incompleteViolationPopulation,
   paintTerrain,
   ruleMask,
-  rulePopulation,
   rulesForMask,
   signatureLabel,
   signaturePopulations,
@@ -178,7 +182,7 @@ describe("terrainRegionKey", () => {
   });
 });
 
-describe("rulePopulation", () => {
+describe("bip110RulePopulation", () => {
   it("counts every proven rule occurrence and sorts samples by vsize", () => {
     const transactions = [
       transaction(1, {
@@ -194,8 +198,8 @@ describe("rulePopulation", () => {
       transaction(3, { bip110: violating("tapscript_op_if") }),
     ];
 
-    const r2 = rulePopulation(transactions, "element_size");
-    const r7 = rulePopulation(transactions, "tapscript_op_if");
+    const r2 = bip110RulePopulation(transactions, "element_size");
+    const r7 = bip110RulePopulation(transactions, "tapscript_op_if");
 
     expect(r2).toMatchObject({ count: 2, vsize: 740 });
     expect(r2.totalShare).toBeCloseTo(2 / 3);
@@ -204,6 +208,37 @@ describe("rulePopulation", () => {
       transaction(1).txid,
     ]);
     expect(r7).toMatchObject({ count: 2, vsize: 720 });
+  });
+
+  it("indexes every rule in one pass and reuses the selected population", () => {
+    let assessmentReads = 0;
+    const transactions = [
+      transaction(1, { bip110: violating("element_size") }),
+      transaction(2, {
+        bip110: violating(["element_size", "tapscript_op_if"]),
+      }),
+      transaction(3),
+    ].map((entry) => {
+      const assessment = entry.bip110;
+      Object.defineProperty(entry, "bip110", {
+        configurable: true,
+        get: () => {
+          assessmentReads += 1;
+          return assessment;
+        },
+      });
+      return entry;
+    });
+
+    const summaries = TERRAIN_RULES.map(({ id }) =>
+      bip110RulePopulationSummary(transactions, id),
+    );
+    const selected = bip110RulePopulation(transactions, "element_size");
+
+    expect(assessmentReads).toBe(transactions.length);
+    expect(summaries.map(({ count }) => count)).toEqual([0, 2, 0, 0, 0, 0, 1]);
+    expect(bip110RulePopulation(transactions, "element_size")).toBe(selected);
+    expect(assessmentReads).toBe(transactions.length);
   });
 });
 
@@ -521,6 +556,180 @@ describe("createTerrainLayout", () => {
 
     expect(layout.glyphs).toHaveLength(transactions.length);
     expect(fillCount).toBeGreaterThan(transactions.length);
+  });
+
+  it("batches large glyph populations without changing their rectangles", () => {
+    class TestPath2D {
+      readonly rectangles: Array<[number, number, number, number]> = [];
+
+      rect(x: number, y: number, width: number, height: number): void {
+        this.rectangles.push([x, y, width, height]);
+      }
+    }
+    vi.stubGlobal("Path2D", TestPath2D);
+    try {
+      const transactions = Array.from({ length: 1_000 }, (_, index) =>
+        transaction(index + 1),
+      );
+      const layout = createTerrainLayout(transactions, 900, 600, "count");
+      const paths: TestPath2D[] = [];
+      const context = {
+        fillStyle: "",
+        strokeStyle: "",
+        lineWidth: 1,
+        globalAlpha: 1,
+        clearRect: () => undefined,
+        fillRect: () => undefined,
+        fill: (path: TestPath2D) => paths.push(path),
+        strokeRect: () => undefined,
+      } as unknown as CanvasRenderingContext2D;
+
+      paintTerrain(context, layout, {
+        kind: "region",
+        regionKey: "compatible",
+      });
+
+      expect(paths.flatMap(({ rectangles }) => rectangles)).toHaveLength(
+        layout.glyphs.length,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reuses bounded policy rasters across rule selections", () => {
+    class TestPath2D {
+      rect(): void {}
+    }
+    const layerContexts: Array<{
+      setTransform: ReturnType<typeof vi.fn>;
+      strokeRect: ReturnType<typeof vi.fn>;
+    }> = [];
+    const createElement = vi.fn(() => {
+      const layerContext = {
+        fillStyle: "",
+        strokeStyle: "",
+        lineWidth: 1,
+        globalAlpha: 1,
+        setTransform: vi.fn(),
+        clearRect: vi.fn(),
+        fillRect: vi.fn(),
+        strokeRect: vi.fn(),
+        fill: vi.fn(),
+      } as unknown as CanvasRenderingContext2D;
+      layerContexts.push(
+        layerContext as unknown as {
+          setTransform: ReturnType<typeof vi.fn>;
+          strokeRect: ReturnType<typeof vi.fn>;
+        },
+      );
+      return {
+        width: 0,
+        height: 0,
+        getContext: () => layerContext,
+      } as unknown as HTMLCanvasElement;
+    });
+    vi.stubGlobal("Path2D", TestPath2D);
+    vi.stubGlobal("document", { createElement });
+    try {
+      const transactions = Array.from({ length: 1_000 }, (_, index) =>
+        transaction(index + 1, {
+          bip110: violating(index < 500 ? "element_size" : "op_success"),
+        }),
+      );
+      const layout = createTerrainLayout(transactions, 900, 600, "count");
+      const elementRegion = layout.regions.find((region) =>
+        region.signature?.violatedRules.includes("element_size"),
+      );
+      const opSuccessRegion = layout.regions.find((region) =>
+        region.signature?.violatedRules.includes("op_success"),
+      );
+      expect(elementRegion).toBeDefined();
+      expect(opSuccessRegion).toBeDefined();
+      const drawImage = vi.fn();
+      const rect = vi.fn();
+      const strokeRect = vi.fn();
+      const canvas = { width: 900, height: 600 };
+      const context = {
+        canvas,
+        fillStyle: "",
+        strokeStyle: "",
+        lineWidth: 1,
+        globalAlpha: 1,
+        drawImage,
+        save: vi.fn(),
+        restore: vi.fn(),
+        beginPath: vi.fn(),
+        rect,
+        clip: vi.fn(),
+        strokeRect,
+      } as unknown as CanvasRenderingContext2D;
+
+      paintTerrain(context, layout, {
+        kind: "rule",
+        rule: "element_size",
+      });
+      paintTerrain(context, layout, {
+        kind: "rule",
+        rule: "op_success",
+      });
+
+      expect(createElement).toHaveBeenCalledTimes(2);
+      expect(drawImage).toHaveBeenCalledTimes(4);
+      expect(rect).toHaveBeenNthCalledWith(
+        1,
+        ...Object.values(elementRegion!.rect),
+      );
+      expect(rect).toHaveBeenNthCalledWith(
+        2,
+        ...Object.values(opSuccessRegion!.rect),
+      );
+      expect(strokeRect).toHaveBeenNthCalledWith(
+        1,
+        ...Object.values(elementRegion!.rect),
+      );
+      expect(strokeRect).toHaveBeenNthCalledWith(
+        2,
+        ...Object.values(opSuccessRegion!.rect),
+      );
+      expect(layerContexts[0]?.strokeRect).toHaveBeenCalledTimes(
+        layout.sections.length + layout.regions.length,
+      );
+      expect(layerContexts[1]?.strokeRect).toHaveBeenCalledTimes(
+        layout.sections.length,
+      );
+      expect(layerContexts[0]?.setTransform).toHaveBeenCalledWith(
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+      );
+
+      paintTerrain(context, layout, {
+        kind: "region",
+        regionKey: elementRegion!.key,
+      });
+      expect(createElement).toHaveBeenCalledTimes(4);
+
+      canvas.width = 1_800;
+      paintTerrain(context, layout, {
+        kind: "region",
+        regionKey: elementRegion!.key,
+      });
+      expect(createElement).toHaveBeenCalledTimes(6);
+      expect(layerContexts[4]?.setTransform).toHaveBeenCalledWith(
+        2,
+        0,
+        0,
+        1,
+        0,
+        0,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("keeps one Canvas glyph per entry without theoretical bucket allocation", () => {

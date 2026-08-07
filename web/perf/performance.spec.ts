@@ -68,6 +68,14 @@ type ReplacementMeasurement = {
   responsivenessIntervals: readonly ResponsivenessInterval[];
 };
 
+type Bip110RuleNavigationMeasurement = {
+  ruleIds: string[];
+  selectedRule: string | null;
+  handlerDurationsMs: number[];
+  handlerDurationMs: number;
+  responsivenessInterval: ResponsivenessInterval;
+};
+
 declare global {
   interface Window {
     __atlasPerfMetrics: BrowserMetrics;
@@ -270,6 +278,8 @@ type ScenarioGate = {
   page_heap_bytes: number;
   cross_context_bytes: number;
   replacement_retained_bytes: number;
+  bip110_page_heap_bytes: number | null;
+  bip110_cross_context_bytes: number | null;
 };
 
 const RESULT_DIRECTORY = fileURLToPath(
@@ -299,6 +309,8 @@ const GATES: Readonly<Record<Scenario, ScenarioGate>> = Object.freeze({
     page_heap_bytes: 40_000_000,
     cross_context_bytes: 60 * 1024 * 1024,
     replacement_retained_bytes: 90 * 1024 * 1024,
+    bip110_page_heap_bytes: 90_000_000,
+    bip110_cross_context_bytes: 120 * 1024 * 1024,
   },
   comparison: {
     primary_ms: 50_000,
@@ -308,6 +320,8 @@ const GATES: Readonly<Record<Scenario, ScenarioGate>> = Object.freeze({
     page_heap_bytes: 60_000_000,
     cross_context_bytes: 100 * 1024 * 1024,
     replacement_retained_bytes: 150 * 1024 * 1024,
+    bip110_page_heap_bytes: null,
+    bip110_cross_context_bytes: null,
   },
 });
 
@@ -1249,6 +1263,77 @@ const measureReplacementRetained = async (
   };
 };
 
+const measureBip110RuleNavigation = async (
+  page: Page,
+): Promise<Bip110RuleNavigationMeasurement> => {
+  await page.locator("#terrain-tab").click();
+  await settleFrames(page);
+  await page.evaluate(() => {
+    const classifier = document.querySelector<HTMLSelectElement>(
+      "#classification-lens-select",
+    );
+    if (classifier === null) {
+      throw new Error("classifier selector is unavailable");
+    }
+    classifier.value = "knots_bip110";
+    classifier.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await settleFrames(page);
+  const start = await markNow(page, "atlas:node:bip110-rule-navigation-start");
+  const ruleIds = await page.evaluate(() => {
+    const classifier = document.querySelector<HTMLSelectElement>(
+      "#classification-lens-select",
+    );
+    if (classifier?.value !== "knots_bip110") {
+      throw new Error("BIP-110 classifier did not become active");
+    }
+    return [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        "#rule-list button[data-rule]",
+      ),
+    ].flatMap(({ dataset }) =>
+      dataset.rule === undefined ? [] : [dataset.rule],
+    );
+  });
+  const handlerDurationsMs: number[] = [];
+  for (const ruleId of ruleIds) {
+    handlerDurationsMs.push(
+      await page.evaluate((selectedRuleId) => {
+        const button = [
+          ...document.querySelectorAll<HTMLButtonElement>(
+            "#rule-list button[data-rule]",
+          ),
+        ].find(({ dataset }) => dataset.rule === selectedRuleId);
+        if (button === undefined) {
+          throw new Error(`BIP-110 rule ${selectedRuleId} is unavailable`);
+        }
+        const handlerStart = performance.now();
+        button.click();
+        return performance.now() - handlerStart;
+      }, ruleId),
+    );
+    await settleFrames(page);
+  }
+  const selectedRule = await page.evaluate(
+    () =>
+      document.querySelector<HTMLButtonElement>(
+        '#rule-list button[data-rule][aria-pressed="true"]',
+      )?.dataset.rule ?? null,
+  );
+  const end = await markNow(page, "atlas:node:bip110-rule-navigation-end");
+  return {
+    ruleIds,
+    selectedRule,
+    handlerDurationsMs,
+    handlerDurationMs: Math.max(0, ...handlerDurationsMs),
+    responsivenessInterval: {
+      label: "bip110-rule-navigation",
+      start_time_ms: start,
+      end_time_ms: end,
+    },
+  };
+};
+
 const runScenario = async (
   page: Page,
   profile: string,
@@ -1390,12 +1475,29 @@ const runScenario = async (
     page,
     `atlas:${scenario}:responsiveness-pre-instrumentation-end`,
   );
+  const replacement = await measureReplacementRetained(page, scenario);
   await settleFrames(page);
   await client.send("HeapProfiler.collectGarbage");
   const completeHeap = await client.send("Runtime.getHeapUsage");
   const completeMemory = await measureMemory(page);
-  const replacement = await measureReplacementRetained(page, scenario);
+  const bip110RuleNavigation =
+    scenario === "node" ? await measureBip110RuleNavigation(page) : null;
   await settleFrames(page);
+  const bip110MemorySample =
+    bip110RuleNavigation === null
+      ? null
+      : await (async () => {
+          await client.send("HeapProfiler.collectGarbage");
+          const pageHeap = await client.send("Runtime.getHeapUsage");
+          return {
+            page_heap: {
+              used_size_bytes: pageHeap.usedSize,
+              total_size_bytes: pageHeap.totalSize,
+              forced_collection: true,
+            },
+            worker_inclusive_memory: await measureMemory(page),
+          };
+        })();
   const browserMetrics = await page.evaluate(() => window.__atlasPerfMetrics);
   const domCount = await page.locator("*").count();
   const metadataReady = readinessMetrics.metadata_ready_ms;
@@ -1409,6 +1511,9 @@ const runScenario = async (
       end_time_ms: preInstrumentationEnd,
     },
     ...replacement.responsivenessIntervals,
+    ...(bip110RuleNavigation === null
+      ? []
+      : [bip110RuleNavigation.responsivenessInterval]),
   ];
   const insideResponsivenessInterval = (startTimeMs: number): boolean =>
     responsivenessIntervals.some(
@@ -1494,6 +1599,8 @@ const runScenario = async (
       complete_models_committed: true,
       deferred_density_raster_excluded: true,
     },
+    bip110_rule_navigation: bip110RuleNavigation,
+    bip110_memory_sample: bip110MemorySample,
     dom_count: domCount,
     primary_memory_sample: {
       isolated_context: true,
@@ -1602,6 +1709,36 @@ const runScenario = async (
     manifests.reduce((total, manifest) => total + manifest.stages.length, 0),
   );
   expect(result.maximum_responsiveness_long_task_ms).toBeLessThanOrEqual(200);
+  if (bip110RuleNavigation !== null) {
+    expect(bip110RuleNavigation.ruleIds).toHaveLength(7);
+    expect(new Set(bip110RuleNavigation.ruleIds).size).toBe(7);
+    expect(bip110RuleNavigation.handlerDurationsMs).toHaveLength(7);
+    expect(Math.max(...bip110RuleNavigation.handlerDurationsMs)).toBe(
+      bip110RuleNavigation.handlerDurationMs,
+    );
+    expect(bip110RuleNavigation.selectedRule).toBe(
+      bip110RuleNavigation.ruleIds.at(-1),
+    );
+    expect(bip110RuleNavigation.handlerDurationMs).toBeLessThanOrEqual(200);
+    expect(bip110MemorySample).not.toBeNull();
+    expect(gate.bip110_page_heap_bytes).not.toBeNull();
+    expect(gate.bip110_cross_context_bytes).not.toBeNull();
+    expect(
+      bip110MemorySample?.page_heap.used_size_bytes ?? Number.POSITIVE_INFINITY,
+    ).toBeLessThanOrEqual(
+      gate.bip110_page_heap_bytes ?? Number.NEGATIVE_INFINITY,
+    );
+    expect(bip110MemorySample?.worker_inclusive_memory.supported).toBe(true);
+    expect(bip110MemorySample?.worker_inclusive_memory.error).toBeNull();
+    expect(
+      bip110MemorySample?.worker_inclusive_memory.bytes ??
+        Number.POSITIVE_INFINITY,
+    ).toBeLessThanOrEqual(
+      gate.bip110_cross_context_bytes ?? Number.NEGATIVE_INFINITY,
+    );
+  } else {
+    expect(bip110MemorySample).toBeNull();
+  }
   expect(result.maximum_animation_frame_callback_ms).toBeLessThanOrEqual(
     profile === "mobile-slow-4g" ? 16 : 8,
   );

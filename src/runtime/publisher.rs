@@ -10,6 +10,8 @@ use crate::model::{
     ClassificationProgress, ClassificationState, MempoolObservation, MempoolSnapshot,
     SourceAvailability, SourceSummary, TransactionClassifications, TransactionDetailResponse,
 };
+#[cfg(test)]
+use crate::staged_snapshot::reencode_manifest_for_source_with_limits;
 use crate::staged_snapshot::{
     EncodedManifest, EncodedStage, StageDescriptor, StageKind, StagedSnapshotBundle,
     StagedSnapshotLimits, encode_staged_snapshot_with_limits, reencode_manifest_for_source,
@@ -27,6 +29,8 @@ pub(super) struct CurrentStatePublisher {
     next_classification_preparation: std::sync::Mutex<Option<Arc<PreparationBlock>>>,
     #[cfg(test)]
     next_publication_limits: std::sync::Mutex<Option<StagedSnapshotLimits>>,
+    #[cfg(test)]
+    next_poll_start_reencoding_limits: std::sync::Mutex<Option<StagedSnapshotLimits>>,
 }
 
 #[derive(Debug, Default)]
@@ -101,6 +105,8 @@ impl CurrentStatePublisher {
             next_classification_preparation: std::sync::Mutex::new(None),
             #[cfg(test)]
             next_publication_limits: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            next_poll_start_reencoding_limits: std::sync::Mutex::new(None),
         }
     }
 
@@ -153,7 +159,7 @@ impl CurrentStatePublisher {
             };
             let replacement = retained_manifest
                 .as_ref()
-                .map(|manifest| reencode_manifest_for_source(manifest, &source))
+                .map(|manifest| self.reencode_poll_start_manifest(manifest, &source))
                 .transpose()?;
             let mut state = self.state.write().await;
             if state.status_revision != status_revision
@@ -722,6 +728,23 @@ impl CurrentStatePublisher {
         StagedSnapshotLimits::default()
     }
 
+    fn reencode_poll_start_manifest(
+        &self,
+        retained: &crate::staged_snapshot::StagedSnapshotManifest,
+        source: &SourceSummary,
+    ) -> Result<EncodedManifest, crate::staged_snapshot::StagedSnapshotError> {
+        #[cfg(test)]
+        if let Some(limits) = self
+            .next_poll_start_reencoding_limits
+            .lock()
+            .expect("poll-start re-encoding limit test hook is not poisoned")
+            .take()
+        {
+            return reencode_manifest_for_source_with_limits(retained, source, limits);
+        }
+        reencode_manifest_for_source(retained, source)
+    }
+
     #[cfg(test)]
     pub(super) fn block_next_classification_preparation(&self) -> Arc<PreparationBlock> {
         let block = Arc::new(PreparationBlock::default());
@@ -738,6 +761,14 @@ impl CurrentStatePublisher {
             .next_publication_limits
             .lock()
             .expect("publication limit test hook is not poisoned") = Some(limits);
+    }
+
+    #[cfg(test)]
+    pub(super) fn limit_next_poll_start_reencoding(&self, limits: StagedSnapshotLimits) {
+        *self
+            .next_poll_start_reencoding_limits
+            .lock()
+            .expect("poll-start re-encoding limit test hook is not poisoned") = Some(limits);
     }
 
     #[cfg(test)]

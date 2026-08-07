@@ -86,6 +86,71 @@ const waitForRendering = async (page: Page): Promise<void> => {
   );
 };
 
+interface SelectedStrokePixelProfile {
+  count: number;
+  solidCount: number;
+  redTotal: number;
+  greenTotal: number;
+  blueTotal: number;
+}
+
+const selectedTerrainStrokePixelProfile = async (
+  page: Page,
+): Promise<SelectedStrokePixelProfile> => {
+  await page.goto(
+    "/?source=vps-core-01&classifier=knots_bip110&rule=element_size",
+  );
+  await expect(page.locator("#page-status")).toHaveAttribute(
+    "data-readiness",
+    "complete-feature-ready",
+  );
+  await page.locator("#terrain-tab").click();
+  await expect(
+    page.locator('#rule-list button[data-rule="element_size"]'),
+  ).toHaveAttribute("aria-pressed", "true");
+  await waitForRendering(page);
+  return page.locator("#terrain-canvas").evaluate((canvas) => {
+    const context = (canvas as HTMLCanvasElement).getContext("2d");
+    if (context === null) throw new Error("terrain canvas has no 2D context");
+    const profile: SelectedStrokePixelProfile = {
+      count: 0,
+      solidCount: 0,
+      redTotal: 0,
+      greenTotal: 0,
+      blueTotal: 0,
+    };
+    const pixels = context.getImageData(
+      0,
+      0,
+      context.canvas.width,
+      context.canvas.height,
+    ).data;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const red = pixels[index] ?? 0;
+      const green = pixels[index + 1] ?? 0;
+      const blue = pixels[index + 2] ?? 0;
+      const alpha = pixels[index + 3] ?? 0;
+      if (
+        red >= 80 &&
+        red <= 150 &&
+        green >= 230 &&
+        blue >= 225 &&
+        Math.abs(green - blue) <= 12 &&
+        alpha > 0
+      ) {
+        profile.count += 1;
+        profile.redTotal += red;
+        profile.greenTotal += green;
+        profile.blueTotal += blue;
+        if (red === 110 && green === 242 && blue === 240 && alpha === 255) {
+          profile.solidCount += 1;
+        }
+      }
+    }
+    return profile;
+  });
+};
+
 const resetLayoutShiftScore = async (page: Page): Promise<void> => {
   await waitForRendering(page);
   await page.evaluate(() => {
@@ -329,13 +394,17 @@ test.describe("progressive v2 publications", () => {
       await expect(page.locator("#fee-age-tab")).toBeDisabled();
       const classifierControls = page.locator("#classification-labels button");
       await expect(classifierControls.first()).toBeEnabled();
-      await classifierControls.first().click();
+      const selectedControl = page.locator(
+        '#classification-labels button[data-label="version_2"]',
+      );
+      await selectedControl.click();
+      await expect(selectedControl).toHaveAttribute("aria-pressed", "true");
       await expect(classifierControls.first()).toHaveAttribute(
         "aria-pressed",
-        "true",
+        "false",
       );
-      await classifierControls.first().focus();
-      await expect(classifierControls.first()).toBeFocused();
+      await selectedControl.focus();
+      await expect(selectedControl).toBeFocused();
 
       gate.release();
       await expect(status).toHaveAttribute(
@@ -344,7 +413,12 @@ test.describe("progressive v2 publications", () => {
       );
       await expect(page.locator("#classification-lens-select")).toBeEnabled();
       await expect(page.locator("#fee-age-tab")).toBeEnabled();
-      await expect(classifierControls.first()).toBeFocused();
+      await expect(selectedControl).toHaveAttribute("aria-pressed", "true");
+      await expect(classifierControls.first()).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+      await expect(selectedControl).toBeFocused();
     } finally {
       gate.release();
     }
@@ -496,5 +570,35 @@ test.describe("atomic publication replacement", () => {
       "true",
     );
     await expect(page.locator("#comparison-refresh")).toBeEnabled();
+  });
+});
+
+test.describe("policy terrain raster", () => {
+  test("matches direct selected-region stroke pixels", async ({
+    context,
+    page,
+  }) => {
+    const rasterProfile = await selectedTerrainStrokePixelProfile(page);
+    const directPage = await context.newPage();
+    await directPage.addInitScript(() => {
+      Reflect.deleteProperty(globalThis, "Path2D");
+    });
+    try {
+      const directProfile = await selectedTerrainStrokePixelProfile(directPage);
+      expect(rasterProfile.count).toBeGreaterThan(0);
+      expect(rasterProfile.count).toBe(directProfile.count);
+      expect(rasterProfile.solidCount).toBe(directProfile.solidCount);
+      expect(
+        Math.abs(rasterProfile.redTotal - directProfile.redTotal),
+      ).toBeLessThanOrEqual(320);
+      expect(
+        Math.abs(rasterProfile.greenTotal - directProfile.greenTotal),
+      ).toBeLessThanOrEqual(320);
+      expect(
+        Math.abs(rasterProfile.blueTotal - directProfile.blueTotal),
+      ).toBeLessThanOrEqual(320);
+    } finally {
+      await directPage.close();
+    }
   });
 });

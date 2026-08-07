@@ -183,8 +183,8 @@ process rather than an independently versioned static package.
 
 Each manifest and stage receives a weak `ETag`. A manifest validator changes
 when membership, classification, lifecycle, poll-start, or failure metadata
-changes. Stage validators are their SHA-256 content identifiers and change only
-with their exact bodies. Conditional reads of current representations return
+changes. A stage validator embeds its SHA-256 content identifier and changes
+only with the exact body. Conditional reads of current representations return
 `304` without sending a body. A well-formed content identifier absent from the
 current publication returns non-cacheable `409`. An identifier that belongs to
 a different current stage, or a request for a stage kind or classifier that is
@@ -260,7 +260,12 @@ Compatible, indeterminate, and unavailable assessments remain distinct.
 Complete violations are grouped by their exact set of violated rules, while
 partial violations retain separate proven-plus-unresolved sets. Rule controls
 are marginal filters and the full seven-rule evidence remains available only in
-this presentation. Fee rate by age remains a secondary view.
+this presentation. The cooperative classifier pass also builds compact row
+indexes for all seven marginal rule populations. The terrain keeps one logical
+glyph per transaction for hit testing, while two bounded per-layout canvas
+rasters let rule changes compose dim and highlighted regions without replaying
+every glyph. Changing the layout size, metric, or selection kind replaces that
+raster pair. Fee rate by age remains a secondary view.
 
 The comparison page fetches two independent snapshots and merge-joins their
 sorted `txid` arrays in the browser. It derives present-in-both and two

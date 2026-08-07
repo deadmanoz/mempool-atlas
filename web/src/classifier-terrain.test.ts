@@ -9,6 +9,10 @@ import {
   createBucketTerrainLayout,
 } from "./bucket-terrain";
 import {
+  bip110RulePopulation,
+  bip110RulePopulationSummary,
+} from "./bip110-rule-index";
+import {
   classifierBucketContainsLabel,
   classifierBucketDescription,
   classifierBucketForTransaction,
@@ -29,6 +33,7 @@ import type {
   ClassifierDescriptor,
   MempoolTransaction,
 } from "./types";
+import { RULE_IDS } from "./types";
 
 const descriptor: ClassifierDescriptor = {
   id: "example_classifier",
@@ -75,6 +80,19 @@ const secondDescriptor: ClassifierDescriptor = {
   ...descriptor,
   id: "second_classifier",
   title: "Second classifier",
+};
+
+const bip110Descriptor: ClassifierDescriptor = {
+  id: "knots_bip110",
+  version: "1",
+  title: "BIP-110",
+  methodology: "policy",
+  semantics: "rule_set",
+  required_facts: ["raw_transaction"],
+  labels: [
+    { key: "compatible", label: "Compatible", description: "Compatible." },
+    { key: "violating", label: "Violating", description: "Violating." },
+  ],
 };
 
 const packedColumn = (
@@ -223,6 +241,77 @@ const transaction = (
   });
 
 describe("classifier terrain", () => {
+  it("precomputes the BIP-110 rule index with the classifier buckets", async () => {
+    let assessmentReads = 0;
+    const transactions = [
+      mempoolTransaction(1, {
+        vsize: 100,
+        bip110: {
+          status: "violating",
+          primary_rule: "element_size",
+          violated_rules: ["element_size"],
+          unknown_rules: [],
+        },
+        classifications: [
+          {
+            classifier_id: bip110Descriptor.id,
+            state: "complete",
+            primary_label: "violating",
+            labels: ["violating"],
+            missing_facts: [],
+            evidence: null,
+          },
+        ],
+      }),
+      mempoolTransaction(2, {
+        vsize: 300,
+        bip110: {
+          status: "violating",
+          primary_rule: "element_size",
+          violated_rules: ["element_size", "tapscript_op_if"],
+          unknown_rules: [],
+        },
+        classifications: [
+          {
+            classifier_id: bip110Descriptor.id,
+            state: "complete",
+            primary_label: "violating",
+            labels: ["violating"],
+            missing_facts: [],
+            evidence: null,
+          },
+        ],
+      }),
+    ].map((entry) => {
+      const assessment = entry.bip110;
+      Object.defineProperty(entry, "bip110", {
+        configurable: true,
+        get: () => {
+          assessmentReads += 1;
+          return assessment;
+        },
+      });
+      return entry;
+    });
+
+    await precomputeClassifierBuckets(transactions, [bip110Descriptor], {
+      batchSize: 1,
+      yieldBetweenBatches: async () => Promise.resolve(),
+    });
+
+    expect(assessmentReads).toBe(transactions.length);
+    expect(
+      RULE_IDS.map(
+        (rule) => bip110RulePopulationSummary(transactions, rule).count,
+      ),
+    ).toEqual([0, 2, 0, 0, 0, 0, 1]);
+    const population = bip110RulePopulation(transactions, "element_size");
+    expect(population).toMatchObject({ count: 2, vsize: 400 });
+    expect(population.transactions[0]?.txid).toBe(transactions[1]?.txid);
+    expect(bip110RulePopulation(transactions, "element_size")).toBe(population);
+    expect(assessmentReads).toBe(transactions.length);
+  });
+
   it("precomputes multiple classifiers in bounded batches over 70k packed rows", async () => {
     const store = new PackedPrimaryPublicationStore(
       packedPrimaryPublication(70_000),

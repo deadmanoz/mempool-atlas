@@ -11,7 +11,8 @@ captured public mempool is stored in the repository.
 - `just perf-fixtures` also exports two 70,000-transaction sources for
   performance measurement.
 - `just stage-projection` regenerates the checked-in staged byte evidence and
-  enforces every node and comparison transfer ceiling.
+  enforces every node and comparison transfer ceiling. Reproducing its exact
+  gzip evidence requires Node.js 22.23.2, the version pinned in CI.
 - `just perf-web` builds `web/dist`, starts one production-shaped isolated
   origin, runs the desktop and constrained-mobile matrix, and writes
   `web/.perf-results/latest.json`.
@@ -56,6 +57,13 @@ preparation, and replacement commit. The raw result records the included
 responsiveness intervals. Forced garbage collection and memory measurement sit
 between those intervals and are deliberately excluded from the responsiveness
 gate.
+
+The node run takes another collected memory sample after activating the
+complete BIP-110 terrain and visibly rendering each of its seven rule
+selections. This specialist sample includes the logical glyph layout, compact
+rule indexes, and retained dim/highlight raster pair. Its release ceilings are
+90,000,000 bytes of page heap and 120 MiB of worker-inclusive memory, separate
+from the 40,000,000-byte and 60 MiB complete-model ceilings.
 
 The memory API depends on Chrome's Performance Manager, which is not present in
 headless Chromium. The performance matrix therefore uses a normal Chromium
@@ -102,6 +110,12 @@ and the merger rejects results that omit it.
 Both products must retain their primary view during bounded publication churn.
 They may replace it only with another internally coherent publication and must
 never combine stages declared by different manifests.
+
+The node performance case activates and settles the complete BIP-110 terrain as
+setup, then cycles all seven rule controls inside a dedicated responsiveness
+interval. The release gate covers both the synchronous handlers and the cached
+visible repaint. Replacement preparation and commit run first in independent
+intervals so specialist terrain state cannot contaminate their measurements.
 
 ## Exact staged projection
 

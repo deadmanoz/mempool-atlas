@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   nodePublicationCandidateReadyDetail,
   prepareNodePublicationCandidate,
+  retainNodePublicationSelection,
 } from "./node-publication-candidate";
 import { mempoolTransaction } from "./test-fixtures";
 import type {
@@ -95,6 +96,7 @@ const source = (): SourceSummary => ({
 
 const publication = (): LoadedSourcePublication => ({
   source: source(),
+  publication_id: "12".repeat(32),
   publication: snapshot(),
 });
 
@@ -107,6 +109,7 @@ describe("prepareNodePublicationCandidate", () => {
     );
 
     expect(candidate.selectedClassifierId).toBe("transaction_properties");
+    expect(candidate.selectedClassifierLabel).toBeNull();
     expect(candidate.selectedClassifierBucketKey).toBeNull();
     expect(candidate.selectedInspector).toEqual({
       kind: "rule",
@@ -125,6 +128,91 @@ describe("prepareNodePublicationCandidate", () => {
     });
   });
 
+  it("retains primary-stage interaction state when the same publication completes", async () => {
+    const candidate = await prepareNodePublicationCandidate(
+      publication(),
+      {
+        source: "core",
+        classifier: "transaction_properties",
+        selection: null,
+        txid: null,
+      },
+      false,
+    );
+    const bucketKey = "complete:version_2" as const;
+
+    const retained = retainNodePublicationSelection(candidate, {
+      viewState: candidate.viewState,
+      terrainMode: "count",
+      currentPublicationId: candidate.publicationId,
+      selectedClassifierLabel: "version_2",
+      selectedClassifierBucketKey: bucketKey,
+      selectedInspector: { kind: "rule", rule: "taproot_annex" },
+    });
+
+    expect(retained.selectedClassifierLabel).toBe("version_2");
+    expect(retained.selectedClassifierBucketKey).toBe(bucketKey);
+  });
+
+  it("does not carry interaction state into a different publication", async () => {
+    const candidate = await prepareNodePublicationCandidate(
+      publication(),
+      {
+        source: "core",
+        classifier: "transaction_properties",
+        selection: null,
+        txid: null,
+      },
+      false,
+    );
+
+    const retained = retainNodePublicationSelection(candidate, {
+      viewState: candidate.viewState,
+      terrainMode: "count",
+      currentPublicationId: "34".repeat(32),
+      selectedClassifierLabel: "version_2",
+      selectedClassifierBucketKey: "complete:version_2",
+      selectedInspector: { kind: "rule", rule: "taproot_annex" },
+    });
+
+    expect(retained).toBe(candidate);
+    expect(retained.selectedClassifierLabel).toBeNull();
+    expect(retained.selectedClassifierBucketKey).toBeNull();
+  });
+
+  it("retains the policy inspector for the same publication", async () => {
+    const candidate = await prepareNodePublicationCandidate(
+      publication(),
+      {
+        source: "core",
+        classifier: "knots_bip110",
+        selection: null,
+        txid: null,
+      },
+      false,
+    );
+    const selectedInspector = {
+      kind: "rule",
+      rule: "taproot_annex",
+    } as const;
+    const viewState = {
+      ...candidate.viewState,
+      selection: selectedInspector,
+    };
+
+    const retained = retainNodePublicationSelection(candidate, {
+      viewState,
+      terrainMode: "count",
+      currentPublicationId: candidate.publicationId,
+      selectedClassifierLabel: null,
+      selectedClassifierBucketKey: null,
+      selectedInspector,
+    });
+
+    expect(retained.selectedInspector).toEqual(selectedInspector);
+    expect(retained.viewState.selection).toEqual(selectedInspector);
+  });
+
   it("preserves an explicit BIP-110 selection", async () => {
     const selection = { kind: "rule", rule: "taproot_annex" } as const;
     const candidate = await prepareNodePublicationCandidate(
@@ -141,6 +229,24 @@ describe("prepareNodePublicationCandidate", () => {
     expect(candidate.selectedClassifierId).toBe("knots_bip110");
     expect(candidate.selectedInspector).toEqual(selection);
     expect(candidate.viewState.selection).toEqual(selection);
+  });
+
+  it("chooses the largest indexed BIP-110 rule population", async () => {
+    const candidate = await prepareNodePublicationCandidate(
+      publication(),
+      {
+        source: "core",
+        classifier: "knots_bip110",
+        selection: null,
+        txid: null,
+      },
+      false,
+    );
+
+    expect(candidate.selectedInspector).toEqual({
+      kind: "rule",
+      rule: "output_size",
+    });
   });
 
   it("rejects an incoherent renderer stage before exposing a candidate", async () => {

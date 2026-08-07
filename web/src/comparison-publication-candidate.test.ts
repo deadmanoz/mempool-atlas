@@ -9,7 +9,12 @@ const publication = (sourceId: string, values: number[]) => {
     sourceId,
     values.map((value) => mempoolTransaction(value)),
   );
-  return { source: loaded.source, publication: loaded.snapshot };
+  return {
+    source: loaded.source,
+    publication_id:
+      `${sourceId.charCodeAt(0).toString(16).padStart(2, "0")}`.repeat(32),
+    publication: loaded.snapshot,
+  };
 };
 
 describe("comparison publication candidate", () => {

@@ -149,8 +149,13 @@ impl AtlasRuntime {
                 }
             };
             if let Err(error) = source.runtime.record_poll_started(started_at_ms).await {
-                outcomes.push((source_order, Err(error)));
-                continue;
+                warn!(
+                    round_id,
+                    source_order,
+                    source_id = %source.runtime.source_id(),
+                    error = %error,
+                    "failed to publish poll-start metadata; continuing source poll"
+                );
             }
             let outcome = match source
                 .rpc
@@ -645,6 +650,11 @@ impl SourceRuntime {
     #[cfg(test)]
     fn limit_next_publication(&self, limits: StagedSnapshotLimits) {
         self.publisher.limit_next_publication(limits);
+    }
+
+    #[cfg(test)]
+    fn limit_next_poll_start_reencoding(&self, limits: StagedSnapshotLimits) {
+        self.publisher.limit_next_poll_start_reencoding(limits);
     }
 }
 
