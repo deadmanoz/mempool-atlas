@@ -605,6 +605,7 @@ describe("createTerrainLayout", () => {
       setTransform: ReturnType<typeof vi.fn>;
       strokeRect: ReturnType<typeof vi.fn>;
     }> = [];
+    const layerCanvases: HTMLCanvasElement[] = [];
     const createElement = vi.fn(() => {
       const layerContext = {
         fillStyle: "",
@@ -623,11 +624,13 @@ describe("createTerrainLayout", () => {
           strokeRect: ReturnType<typeof vi.fn>;
         },
       );
-      return {
+      const layerCanvas = {
         width: 0,
         height: 0,
         getContext: () => layerContext,
       } as unknown as HTMLCanvasElement;
+      layerCanvases.push(layerCanvas);
+      return layerCanvas;
     });
     vi.stubGlobal("Path2D", TestPath2D);
     vi.stubGlobal("document", { createElement });
@@ -727,6 +730,17 @@ describe("createTerrainLayout", () => {
         0,
         0,
       );
+
+      canvas.width = 5_120;
+      canvas.height = 2_880;
+      paintTerrain(context, layout, {
+        kind: "region",
+        regionKey: elementRegion!.key,
+      });
+      expect(createElement).toHaveBeenCalledTimes(8);
+      expect(
+        (layerCanvases[6]?.width ?? 0) * (layerCanvases[6]?.height ?? 0),
+      ).toBeLessThanOrEqual(4_194_304);
     } finally {
       vi.unstubAllGlobals();
     }

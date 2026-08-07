@@ -75,6 +75,23 @@ interface ComparisonMembership {
   totals: ComparisonTotals;
 }
 
+interface ComparisonMembershipRows {
+  commonLeft: Uint32Array;
+  commonRight: Uint32Array;
+  leftOnly: Uint32Array;
+  rightOnly: Uint32Array;
+}
+
+interface PackedComparisonMembership extends ComparisonMembership {
+  rows: ComparisonMembershipRows;
+}
+
+const membershipRowsByComparison = new WeakMap<
+  CurrentComparison,
+  ComparisonMembershipRows
+>();
+const EMPTY_COMPARISON_ROWS = new Uint32Array();
+
 const comparedEntry = (
   left: MempoolTransaction | null,
   right: MempoolTransaction | null,
@@ -226,7 +243,7 @@ const comparePackedMembership = (
   left: LoadedSourceSnapshot,
   right: LoadedSourceSnapshot,
   membershipReady: boolean,
-): ComparisonMembership => {
+): PackedComparisonMembership => {
   const leftCount = packedSnapshotRowCount(left.snapshot);
   const rightCount = packedSnapshotRowCount(right.snapshot);
   if (leftCount > 0xffff_ffff || rightCount > 0xffff_ffff) {
@@ -256,7 +273,8 @@ const comparePackedMembership = (
     },
   });
 
-  const commonRows = new Uint32Array(commonCount * 2);
+  const commonLeftRows = new Uint32Array(commonCount);
+  const commonRightRows = new Uint32Array(commonCount);
   const commonDifferingWtxids = new Uint8Array(commonCount);
   const leftOnlyRows = new Uint32Array(leftOnlyCount);
   const rightOnlyRows = new Uint32Array(rightOnlyCount);
@@ -265,8 +283,8 @@ const comparePackedMembership = (
   let rightOnlyIndex = 0;
   visitPackedMerge(left.snapshot, leftCount, right.snapshot, rightCount, {
     common: (leftRow, rightRow) => {
-      commonRows[commonIndex * 2] = leftRow;
-      commonRows[commonIndex * 2 + 1] = rightRow;
+      commonLeftRows[commonIndex] = leftRow;
+      commonRightRows[commonIndex] = rightRow;
       if (membershipReady) {
         const sameWtxid = packedSnapshotRowsShareWtxid(
           left.snapshot,
@@ -293,8 +311,8 @@ const comparePackedMembership = (
 
   return {
     common: lazyComparedEntries(commonCount, (index) => {
-      const leftRow = commonRows[index * 2];
-      const rightRow = commonRows[index * 2 + 1];
+      const leftRow = commonLeftRows[index];
+      const rightRow = commonRightRows[index];
       if (leftRow === undefined || rightRow === undefined) {
         throw new RangeError("Packed common comparison index is unavailable");
       }
@@ -331,6 +349,12 @@ const comparePackedMembership = (
       );
     }),
     common_differing_wtxids: commonDifferingWtxids,
+    rows: {
+      commonLeft: commonLeftRows,
+      commonRight: commonRightRows,
+      leftOnly: leftOnlyRows,
+      rightOnly: rightOnlyRows,
+    },
     totals: {
       union_count: commonCount + leftOnlyCount + rightOnlyCount,
       common_count: commonCount,
@@ -364,11 +388,15 @@ export const compareCurrentSnapshots = (
     throw new Error("A comparison requires two distinct sources");
   }
 
-  const membership = comparePackedMembership(left, right, membershipReady);
+  const { rows, ...membership } = comparePackedMembership(
+    left,
+    right,
+    membershipReady,
+  );
 
   const leftObserved = left.snapshot.observed_at_ms;
   const rightObserved = right.snapshot.observed_at_ms;
-  return {
+  const comparison: CurrentComparison = {
     left,
     right,
     observed_skew_ms: Math.abs(leftObserved - rightObserved),
@@ -380,6 +408,26 @@ export const compareCurrentSnapshots = (
           : "right",
     ...membership,
   };
+  membershipRowsByComparison.set(comparison, rows);
+  return comparison;
+};
+
+export const comparisonRegionTransactionRows = (
+  comparison: CurrentComparison,
+  region: ComparisonRegionKey,
+  side: ComparisonSide,
+): Uint32Array => {
+  const rows = membershipRowsByComparison.get(comparison);
+  if (rows === undefined) {
+    throw new TypeError("Comparison membership rows are unavailable");
+  }
+  if (region === "common") {
+    return side === "left" ? rows.commonLeft : rows.commonRight;
+  }
+  if (region === "left_only") {
+    return side === "left" ? rows.leftOnly : EMPTY_COMPARISON_ROWS;
+  }
+  return side === "right" ? rows.rightOnly : EMPTY_COMPARISON_ROWS;
 };
 
 export const comparisonRegionEntries = (

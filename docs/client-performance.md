@@ -39,6 +39,8 @@ Each node and comparison run starts in a fresh browser context and records:
   server processing, transfer time, decode, and validation;
 - metadata, primary-interactive, and complete-feature-ready wall clocks;
 - DOM count, CLS, LCP candidates, and long tasks;
+- production-scale interaction handler, settle, long-task, and frame-callback
+  evidence;
 - page-target heap after collection; and
 - worker-inclusive retained memory and attribution from the same
   cross-origin-isolated milestone.
@@ -65,6 +67,11 @@ rule indexes, and retained dim/highlight raster pair. Its release ceilings are
 90,000,000 bytes of page heap and 120 MiB of worker-inclusive memory, separate
 from the 40,000,000-byte and 60 MiB complete-model ceilings.
 
+Canvas backing stores are outside the V8 heap and worker-inclusive measurements.
+Each retained specialist raster is therefore capped at 4,194,304 pixels; the
+dim/highlight pair has a nominal 32 MiB RGBA ceiling even on high-density large
+displays.
+
 The memory API depends on Chrome's Performance Manager, which is not present in
 headless Chromium. The performance matrix therefore uses a normal Chromium
 window with the documented `ForceEagerMeasureMemory` testing flag. A separate
@@ -76,12 +83,12 @@ The constrained-mobile transfer gates use the pinned, transport-independent
 throughput calibration of `159461.45607954692` bytes per second. A faster local
 run reports its measured feasibility but never loosens these ceilings.
 
-| Milestone | Wall-clock gate | Compressed-byte ceiling |
-| --- | ---: | ---: |
-| Node primary interactive | 30 seconds | 3,189,229 bytes |
-| Node complete feature ready | 52 seconds | 6,059,535 bytes |
-| Comparison primary interactive | 50 seconds | 5,740,612 bytes |
-| Comparison complete feature ready | 94 seconds | 12,119,070 bytes |
+| Milestone                         | Wall-clock gate | Compressed-byte ceiling |
+| --------------------------------- | --------------: | ----------------------: |
+| Node primary interactive          |      30 seconds |         3,189,229 bytes |
+| Node complete feature ready       |      52 seconds |         6,059,535 bytes |
+| Comparison primary interactive    |      50 seconds |         5,740,612 bytes |
+| Comparison complete feature ready |      94 seconds |        12,119,070 bytes |
 
 The complete-byte values in this table are pre-authorized targets. Exceeding a
 target sets `requires_pre_authorized_rederivation` and requires the transfer
@@ -91,21 +98,23 @@ complete node publication and 13,075,839 bytes for a complete comparison.
 Crossing either hard maximum fails `just stage-projection`.
 
 Node primary readiness requires the manifest, population, and selected
-classifier lane. The complete population must support exact search, selection,
-canonical URL state, active-lane terrain, filters, and keyboard navigation.
-Membership, witness, fee, age, structure, other classifier lanes, and detail
-remain visibly pending until their exact stages validate.
+classifier lane. The primary population must support exact search, selection,
+canonical URL state, active-lane terrain, label or rule filters, and keyboard
+navigation. The fee, age, and virtual-size filter form is not available yet.
+Membership, witness, structure, other classifier lanes, and detail remain
+visibly pending until their exact stages validate.
 
 Comparison primary readiness requires both manifests, both populations, both
-selected lanes, and both BIP-110 lanes. It must support the complete merge-join,
-common and source-only regions, search, navigation, selected-classifier views,
-and source-local policy views. Witness and structure-dependent claims remain
-pending. Complete readiness requires every stage of both coherent
-publications, every distribution and policy model committed to its view, and no
-outstanding decode or derivation work. Non-interactive density-canvas raster
-painting may remain frame-deferred, including while a below-fold panel is
-outside its observation margin. The raw result declares this readiness contract
-and the merger rejects results that omit it.
+selected BIP-110 lanes. It must support the complete merge-join, common and
+source-only regions, search, navigation, and source-local BIP-110 policy views.
+Witness and structure-dependent claims remain pending. Complete readiness
+requires every stage of both coherent publications, the currently selected
+distribution and policy models committed to their views, and no outstanding
+decode or derivation work required by the visible complete view.
+Non-interactive density-canvas raster painting may remain frame-deferred,
+including while a below-fold panel is outside its observation margin. The raw
+result declares this readiness contract and the merger rejects results that
+omit it.
 
 Both products must retain their primary view during bounded publication churn.
 They may replace it only with another internally coherent publication and must
@@ -122,18 +131,35 @@ interval. The release gate covers both the synchronous handlers and the cached
 visible repaint. Replacement preparation and commit run first in independent
 intervals so specialist terrain state cannot contaminate their measurements.
 
+After the complete memory sample, each stable node run activates the fee-rate
+by age lens and waits for its 70,000-row canvas to paint, then submits a
+non-default fee-rate filter and waits for the filtered canvas to repaint. Each
+stable comparison run switches the source-local distributions from all
+transactions to the common population and waits for both aggregate models to
+commit. A complete comparison candidate prepares that common source-local model
+before readiness and adopts only its aggregate arrays into the candidate-owned
+distribution cache. It retains no additional transaction population. The much
+smaller source-only scopes remain lazy. Every interaction records its
+synchronous handler time, input-to-settled time, outcome, and exact
+responsiveness interval in the raw and merged results. The handler ceiling is
+200 ms and the settle ceiling is 5 seconds. The existing 200 ms long-task
+ceiling and profile-specific 8 ms desktop or 16 ms constrained-mobile
+animation-frame ceiling apply across those intervals too. Offscreen deferred
+density raster work remains outside the scope-switch settle point, consistent
+with the complete-readiness contract.
+
 ## Exact staged projection
 
 `docs/client-performance-staged-projection.json` is the checked-in release
 evidence produced by the canonical 70,000-row exporter. At gzip level 6, the
 current wire format measures:
 
-| Release gate | Exact worst case | Ceiling | Result |
-| --- | ---: | ---: | --- |
-| Node primary | 2,413,387 bytes | 3,189,229 bytes | pass |
-| Node complete | 5,312,854 bytes | 6,059,535 bytes | pass |
-| Comparison primary | 4,877,288 bytes | 5,740,612 bytes | pass |
-| Comparison complete | 10,606,466 bytes | 12,119,070 bytes | pass |
+| Release gate        | Exact worst case |          Ceiling | Result |
+| ------------------- | ---------------: | ---------------: | ------ |
+| Node primary        |  2,413,387 bytes |  3,189,229 bytes | pass   |
+| Node complete       |  5,312,854 bytes |  6,059,535 bytes | pass   |
+| Comparison primary  |  4,877,288 bytes |  5,740,612 bytes | pass   |
+| Comparison complete | 10,606,466 bytes | 12,119,070 bytes | pass   |
 
 At the pinned throughput, the corresponding transfer projections are 25.135,
 47.318, 44.586, and 84.515 seconds. These projections reserve the remainder of
@@ -144,9 +170,17 @@ substitute for an interactive product.
 
 ## Functional guarantees
 
-Functional Playwright separately proves early source metadata, explicit pending
-states, primary and complete readiness, coherent supersession recovery,
-transaction-detail agreement, and no horizontal page overflow at the supported
-320 px minimum. Stable release runs must complete without injected faults;
-supersession and rate-limit cases are exercised as separate bounded recovery
-tests.
+Functional Playwright proves early source metadata, explicit pending states,
+primary and complete readiness, atomic replacement while a candidate is held,
+and transaction-detail deferral until complete membership arrives. The early
+metadata group runs its mobile cases at the 320 px minimum; its two loading
+transitions assert no horizontal page overflow before and after data arrives.
+The completed-page viewport suite covers 390, 768, and 1440 px widths.
+
+Performance Playwright separately injects one `503` into a node manifest
+refresh and one completion-stage refresh in comparison, then proves that the
+retained complete publication remains usable and the next refresh recovers.
+Stable release measurements run without injected faults. Worker unit tests own
+the bounded `409` supersession and `429` rate-limit retry contracts, while API
+and worker unit tests own transaction-detail parsing and agreement with the
+loaded publication.

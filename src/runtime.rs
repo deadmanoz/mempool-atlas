@@ -519,7 +519,7 @@ impl SourceRuntime {
 
     pub(crate) async fn stage_payload(
         &self,
-        kind: Option<StageKind>,
+        kind: StageKind,
         classifier_id: Option<&str>,
         content_id: &str,
     ) -> StageLookup {

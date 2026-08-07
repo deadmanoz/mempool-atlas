@@ -1,5 +1,6 @@
 import type { MempoolTransaction } from "./types";
 import {
+  forEachCooperatively,
   yieldCooperatively,
   type CooperativeWorkOptions,
 } from "./cooperative-work";
@@ -121,6 +122,27 @@ export const transactionIndexView = (
   return createView(parent.source, flattenedRows);
 };
 
+/**
+ * Create a packed view over row storage already owned by another current-state
+ * model. The caller must retain the rows without mutating them for the view's
+ * lifetime. This avoids copying comparison membership indexes while preserving
+ * the packed source metadata used by sort and lookup hot paths.
+ */
+export const transactionIndexViewFromRetainedRows = (
+  transactions: readonly MempoolTransaction[],
+  rows: Uint32Array,
+): MempoolTransaction[] => {
+  if (metadataFor(transactions) !== null) {
+    throw new TypeError("Retained row views require a root transaction source");
+  }
+  for (const row of rows) {
+    if (row >= transactions.length) {
+      throw new RangeError(`Transaction row ${row} is out of range`);
+    }
+  }
+  return createView(transactions, rows);
+};
+
 export const filterTransactionView = (
   transactions: readonly MempoolTransaction[],
   predicate: (transaction: MempoolTransaction, index: number) => boolean,
@@ -137,6 +159,28 @@ export const filterTransactionView = (
       retainedCount += 1;
     }
   }
+  return createView(source, retainedRows.slice(0, retainedCount));
+};
+
+export const filterTransactionViewCooperatively = async (
+  transactions: readonly MempoolTransaction[],
+  predicate: (transaction: MempoolTransaction, index: number) => boolean,
+  options: CooperativeWorkOptions = {},
+): Promise<MempoolTransaction[]> => {
+  const parent = metadataFor(transactions);
+  const source = parent?.source ?? transactions;
+  const retainedRows = new Uint32Array(transactions.length);
+  let retainedCount = 0;
+  await forEachCooperatively(
+    transactions,
+    (transaction, index) => {
+      if (!predicate(transaction, index)) return;
+      retainedRows[retainedCount] = parent?.rows[index] ?? index;
+      retainedCount += 1;
+    },
+    options,
+  );
+  options.signal?.throwIfAborted();
   return createView(source, retainedRows.slice(0, retainedCount));
 };
 

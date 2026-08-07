@@ -98,7 +98,10 @@ const classifierTerrainGroupsCache = new WeakMap<
   ClassifierTerrainGroups
 >();
 
-export interface ClassifierBucketPrecomputeOptions extends CooperativeWorkOptions {}
+export interface ClassifierBucketPrecomputeOptions extends CooperativeWorkOptions {
+  sortTimeBudgetMs?: number;
+  aggregateOnly?: boolean;
+}
 
 export type ClassifierTerrainLayout = BucketTerrainLayout<
   ClassifierTerrainSectionKey,
@@ -322,20 +325,23 @@ const classifierLabelPopulationCache = (
 
 const createClassifierBucketBuilder = (
   descriptor: ClassifierDescriptor,
+  retainMarginalIndexes: boolean = true,
 ): ClassifierBucketBuilder => ({
   descriptor,
   bip110Rules:
-    descriptor.id === KNOTS_BIP110_CLASSIFIER_ID
+    retainMarginalIndexes && descriptor.id === KNOTS_BIP110_CLASSIFIER_ID
       ? createBip110RuleIndexBuilder()
       : null,
   knownLabelKeys: new Set(descriptor.labels.map(({ key }) => key)),
   buckets: new Map(),
-  labels: new Map(
-    descriptor.labels.map(({ key }) => [
-      key,
-      { rows: [], vsize: 0, sampleRows: [] },
-    ]),
-  ),
+  labels: retainMarginalIndexes
+    ? new Map(
+        descriptor.labels.map(({ key }) => [
+          key,
+          { rows: [], vsize: 0, sampleRows: [] },
+        ]),
+      )
+    : new Map(),
 });
 
 const addClassifierLabelSample = (
@@ -389,6 +395,9 @@ const addTransactionToClassifierBuckets = (
   }
   accumulator.rows.push(row);
   accumulator.vsize += transaction.vsize;
+  if (labels.size === 0 && accumulator.observedLabelKeys === undefined) {
+    return;
+  }
   const classification = classificationResult(transaction, descriptor.id);
   const resultLabels = classification?.labels ?? [];
   for (let index = 0; index < resultLabels.length; index += 1) {
@@ -479,6 +488,23 @@ const cacheClassifierBuilderCooperatively = async (
   builder: ClassifierBucketBuilder,
   options: ClassifierBucketPrecomputeOptions,
 ): Promise<void> => {
+  const finalizationTimeBudgetMs = options.sortTimeBudgetMs ?? 4;
+  if (
+    !Number.isFinite(finalizationTimeBudgetMs) ||
+    finalizationTimeBudgetMs <= 0
+  ) {
+    throw new RangeError(
+      "Classifier finalization time budget must be positive",
+    );
+  }
+  let finalizationStartedAt = performance.now();
+  const yieldAfterFinalizationSlice = async (): Promise<void> => {
+    if (performance.now() - finalizationStartedAt < finalizationTimeBudgetMs) {
+      return;
+    }
+    await yieldCooperatively(options);
+    finalizationStartedAt = performance.now();
+  };
   const accumulators = [...builder.buckets.values()].sort((left, right) =>
     compareBuckets(builder.descriptor, left.signature, right.signature),
   );
@@ -488,10 +514,17 @@ const cacheClassifierBuilderCooperatively = async (
     const accumulator = accumulators[index];
     if (accumulator === undefined) continue;
     const { signature, rows, vsize, observedLabelKeys } = accumulator;
-    const entries = await sortTransactionViewByVsizeCooperatively(
-      transactionIndexView(transactions, rows),
-      options,
-    );
+    const entries = options.aggregateOnly
+      ? transactionIndexView(transactions, rows)
+      : await sortTransactionViewByVsizeCooperatively(
+          transactionIndexView(transactions, rows),
+          {
+            ...options,
+            ...(options.sortTimeBudgetMs === undefined
+              ? {}
+              : { timeBudgetMs: options.sortTimeBudgetMs }),
+          },
+        );
     const observed =
       observedLabelKeys === undefined
         ? undefined
@@ -507,34 +540,43 @@ const cacheClassifierBuilderCooperatively = async (
       totalShare:
         transactions.length === 0 ? 0 : entries.length / transactions.length,
     });
-    if (index + 1 < accumulators.length) await yieldCooperatively(options);
+    if (index + 1 < accumulators.length) {
+      await yieldAfterFinalizationSlice();
+    }
   }
 
-  const labelEntries = [...builder.labels];
-  const labels = new Map<string, ClassifierLabelPopulationIndex>();
-  for (let index = 0; index < labelEntries.length; index += 1) {
-    options.signal?.throwIfAborted();
-    const entry = labelEntries[index];
-    if (entry === undefined) continue;
-    const [labelKey, { rows, vsize, sampleRows }] = entry;
-    labels.set(labelKey, {
-      rows: Uint32Array.from(rows),
-      vsize,
-      population: null,
-      sample: transactionIndexView(
-        transactions,
-        sampleRows.map(({ row }) => row),
-      ),
-    });
-    if (index + 1 < labelEntries.length) await yieldCooperatively(options);
+  if (!options.aggregateOnly) {
+    const labelEntries = [...builder.labels];
+    const labels = new Map<string, ClassifierLabelPopulationIndex>();
+    for (let index = 0; index < labelEntries.length; index += 1) {
+      options.signal?.throwIfAborted();
+      const entry = labelEntries[index];
+      if (entry === undefined) continue;
+      const [labelKey, { rows, vsize, sampleRows }] = entry;
+      labels.set(labelKey, {
+        rows: Uint32Array.from(rows),
+        vsize,
+        population: null,
+        sample: transactionIndexView(
+          transactions,
+          sampleRows.map(({ row }) => row),
+        ),
+      });
+      if (index + 1 < labelEntries.length) {
+        await yieldAfterFinalizationSlice();
+      }
+    }
+    classifierLabelPopulationCache(transactions).set(
+      builder.descriptor,
+      labels,
+    );
+    if (builder.bip110Rules !== null) {
+      cacheBip110RuleIndex(transactions, builder.bip110Rules);
+    }
   }
 
   options.signal?.throwIfAborted();
   classifierBucketCache(transactions).set(builder.descriptor, buckets);
-  classifierLabelPopulationCache(transactions).set(builder.descriptor, labels);
-  if (builder.bip110Rules !== null) {
-    cacheBip110RuleIndex(transactions, builder.bip110Rules);
-  }
 };
 
 /**
@@ -552,7 +594,9 @@ export const precomputeClassifierBuckets = async (
   const byDescriptor = classifierBucketCache(transactions);
   const builders = [...new Set(descriptors)]
     .filter((descriptor) => byDescriptor.get(descriptor) === undefined)
-    .map(createClassifierBucketBuilder);
+    .map((descriptor) =>
+      createClassifierBucketBuilder(descriptor, !options.aggregateOnly),
+    );
   if (builders.length === 0) return;
 
   await forEachCooperatively(
@@ -595,6 +639,29 @@ export const classifierBuckets = (
   return cacheClassifierBuilder(transactions, builder);
 };
 
+const ensureClassifierLabelPopulations = (
+  transactions: readonly MempoolTransaction[],
+  descriptor: ClassifierDescriptor,
+): Map<string, ClassifierLabelPopulationIndex> => {
+  const cache = classifierLabelPopulationCache(transactions);
+  const cached = cache.get(descriptor);
+  if (cached !== undefined) return cached;
+
+  const builder = createClassifierBucketBuilder(descriptor);
+  for (let row = 0; row < transactions.length; row += 1) {
+    const transaction = transactions[row];
+    if (transaction !== undefined) {
+      addTransactionToClassifierBuckets(builder, transaction, row);
+    }
+  }
+  const labels = finalizeClassifierLabelPopulations(transactions, builder);
+  cache.set(descriptor, labels);
+  if (builder.bip110Rules !== null) {
+    cacheBip110RuleIndex(transactions, builder.bip110Rules);
+  }
+  return labels;
+};
+
 /**
  * Return the cached marginal population for one classifier label. Cooperative
  * precomputation retains compact row indices and aggregate virtual size for
@@ -606,12 +673,9 @@ export const classifierLabelPopulation = (
   descriptor: ClassifierDescriptor,
   labelKey: string,
 ): ClassifierLabelPopulation | null => {
-  let byLabel = classifierLabelPopulationCache(transactions).get(descriptor);
-  if (byLabel === undefined) {
-    classifierBuckets(transactions, descriptor);
-    byLabel = classifierLabelPopulationCache(transactions).get(descriptor);
-  }
-  const index = byLabel?.get(labelKey);
+  const index = ensureClassifierLabelPopulations(transactions, descriptor).get(
+    labelKey,
+  );
   if (index === undefined) return null;
   if (index.population !== null) return index.population;
   const rows = index.rows;
@@ -639,12 +703,9 @@ export const classifierLabelSamplePopulation = (
   descriptor: ClassifierDescriptor,
   labelKey: string,
 ): ClassifierLabelSamplePopulation | null => {
-  let byLabel = classifierLabelPopulationCache(transactions).get(descriptor);
-  if (byLabel === undefined) {
-    classifierBuckets(transactions, descriptor);
-    byLabel = classifierLabelPopulationCache(transactions).get(descriptor);
-  }
-  const index = byLabel?.get(labelKey);
+  const index = ensureClassifierLabelPopulations(transactions, descriptor).get(
+    labelKey,
+  );
   if (index === undefined) return null;
   const count = index.population?.count ?? index.rows?.length ?? 0;
   return {

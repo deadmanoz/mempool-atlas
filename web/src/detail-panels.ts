@@ -79,6 +79,45 @@ export interface JointChartOptions {
 
 export const DEFAULT_JOINT_COLOR = { r: 102, g: 227, b: 232 } as const;
 
+interface JointChartGeometry {
+  width: number;
+  height: number;
+  gridWidth: number;
+  gridHeight: number;
+  cellSpanX: number;
+  cellSpanY: number;
+  ratio: number;
+}
+
+export const prepareJointChartCanvas = (
+  canvas: HTMLCanvasElement,
+  density: JointDensity,
+): JointChartGeometry | null => {
+  if (density.totalWeight <= 0) return null;
+  const width = canvas.clientWidth;
+  if (width === 0) return null;
+  const gridWidth = width - JOINT_MARGIN - JOINT_GAP;
+  const cellSpanX = gridWidth / density.columns;
+  const cellSpanY = cellSpanX * 0.82;
+  const gridHeight = cellSpanY * density.rows;
+  const height = Math.round(gridHeight + JOINT_MARGIN + JOINT_GAP);
+  const ratio = window.devicePixelRatio || 1;
+  const backingWidth = Math.round(width * ratio);
+  const backingHeight = Math.round(height * ratio);
+  if (canvas.width !== backingWidth) canvas.width = backingWidth;
+  if (canvas.height !== backingHeight) canvas.height = backingHeight;
+  canvas.style.height = `${height}px`;
+  return {
+    width,
+    height,
+    gridWidth,
+    gridHeight,
+    cellSpanX,
+    cellSpanY,
+    ratio,
+  };
+};
+
 export const renderJointChart = (
   container: HTMLElement,
   canvas: HTMLCanvasElement,
@@ -97,21 +136,10 @@ export const renderJointChart = (
     container.append(emptyPanelState(options.emptyMessage));
     return;
   }
-  const width = canvas.clientWidth;
-  if (width === 0) {
-    return;
-  }
-  const gridWidth = width - JOINT_MARGIN - JOINT_GAP;
-  const cellSpanX = gridWidth / density.columns;
-  const cellSpanY = cellSpanX * 0.82;
-  const gridHeight = cellSpanY * density.rows;
-  const height = Math.round(gridHeight + JOINT_MARGIN + JOINT_GAP);
-  const ratio = window.devicePixelRatio || 1;
-  const backingWidth = Math.round(width * ratio);
-  const backingHeight = Math.round(height * ratio);
-  if (canvas.width !== backingWidth) canvas.width = backingWidth;
-  if (canvas.height !== backingHeight) canvas.height = backingHeight;
-  canvas.style.height = `${height}px`;
+  const geometry = prepareJointChartCanvas(canvas, density);
+  if (geometry === null) return;
+  const { width, height, gridWidth, gridHeight, cellSpanX, cellSpanY, ratio } =
+    geometry;
   const context = canvas.getContext("2d");
   if (context === null) {
     return;

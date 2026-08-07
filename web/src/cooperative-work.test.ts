@@ -56,6 +56,35 @@ describe("forEachCooperatively", () => {
     expect(yieldBetweenBatches).toHaveBeenCalledTimes(2);
   });
 
+  it("uses a view's retained iterator instead of repeated numeric lookup", async () => {
+    const values = new Proxy([1, 2, 3], {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator) {
+          return function* (): IterableIterator<number> {
+            yield* target;
+          };
+        }
+        if (typeof property === "string" && /^[0-9]+$/.test(property)) {
+          throw new Error("numeric lookup should not be used");
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const visited: Array<readonly [number, number]> = [];
+
+    await forEachCooperatively(
+      values,
+      (value, index) => visited.push([value, index]),
+      { batchSize: 2 },
+    );
+
+    expect(visited).toEqual([
+      [1, 0],
+      [2, 1],
+      [3, 2],
+    ]);
+  });
+
   it("stops before the next batch when aborted during a yield", async () => {
     const controller = new AbortController();
     const visited: number[] = [];

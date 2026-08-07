@@ -8,9 +8,10 @@ import {
 import { installAnalytics } from "./analytics";
 import {
   DEFAULT_FILTERS,
-  filterTransactions,
+  filterTransactionsCooperatively,
   type MempoolFilters,
 } from "./filters";
+import { combineAbortSignals } from "./cooperative-work";
 import * as firstPublication from "./first-publication-failure";
 import { pinSelectedInBoundedSample } from "./bounded-sample";
 import {
@@ -50,7 +51,7 @@ import {
   type ClassifierBucketKey,
   type ClassifierTerrainLayout,
 } from "./classifier-terrain";
-import { renderSwimView } from "./swim-view";
+import { renderSwimViewCooperatively } from "./swim-view";
 import {
   countFormat,
   decimalFormat,
@@ -242,6 +243,8 @@ let policyTerrainLayout: TerrainLayout | null = null;
 let classifierTerrainLayout: ClassifierTerrainLayout | null = null;
 let pendingTerrainFrame: number | null = null;
 let pendingFeeAgeFrame: number | null = null;
+let feeAgeRenderController: AbortController | null = null;
+let filterController: AbortController | null = null;
 let detailSequence = 0;
 let detailController: AbortController | null = null;
 let selectedTransactionId: string | null = null;
@@ -1671,27 +1674,60 @@ const renderFeeAgeFrame = (): void => {
   ) {
     return;
   }
-  const summary = renderSwimView(
+  const snapshot = currentSnapshot;
+  const transactions = filteredTransactions;
+  const controller = new AbortController();
+  feeAgeRenderController = controller;
+  void renderSwimViewCooperatively(
     feeAgeCanvas,
-    filteredTransactions,
-    currentSnapshot.observed_at_ms,
-  );
-  visualSummary.textContent = `${countFormat.format(summary.transactionCount)} transactions representing ${formatVsize(summary.totalVsize)}. Rows are base fee rate, columns and colour are age, and square area is virtual size.`;
-  feeAgeCanvas.setAttribute(
-    "aria-label",
-    `Fee rate by age view containing ${countFormat.format(summary.transactionCount)} filtered transactions.`,
-  );
+    transactions,
+    snapshot.observed_at_ms,
+    { signal: controller.signal },
+  )
+    .then((summary) => {
+      if (
+        controller.signal.aborted ||
+        feeAgeRenderController !== controller ||
+        currentSnapshot !== snapshot ||
+        filteredTransactions !== transactions ||
+        feeAgeView.hidden
+      ) {
+        return;
+      }
+      visualSummary.textContent = `${countFormat.format(summary.transactionCount)} transactions representing ${formatVsize(summary.totalVsize)}. Rows are base fee rate, columns and colour are age, and square area is virtual size.`;
+      feeAgeCanvas.setAttribute(
+        "aria-label",
+        `Fee rate by age view containing ${countFormat.format(summary.transactionCount)} filtered transactions.`,
+      );
+    })
+    .catch((error: unknown) => {
+      if (
+        !controller.signal.aborted &&
+        !(error instanceof DOMException && error.name === "AbortError")
+      ) {
+        console.error("Unable to render fee-rate by age view", error);
+      }
+    })
+    .finally(() => {
+      if (feeAgeRenderController === controller) {
+        feeAgeRenderController = null;
+      }
+    });
 };
 
 const scheduleFeeAgeRender = (): void => {
-  if (
-    pendingFeeAgeFrame !== null ||
-    currentSnapshot === null ||
-    filteredTransactions.length === 0
-  ) {
+  if (currentSnapshot === null || filteredTransactions.length === 0) {
     return;
   }
-  pendingFeeAgeFrame = window.requestAnimationFrame(renderFeeAgeFrame);
+  feeAgeRenderController?.abort();
+  if (pendingFeeAgeFrame !== null) {
+    window.cancelAnimationFrame(pendingFeeAgeFrame);
+  }
+  const callback = function feeAgeRenderFrame() {
+    renderFeeAgeFrame();
+  };
+  Object.assign(callback, { __atlasPerfLabel: "fee-age-render" });
+  pendingFeeAgeFrame = window.requestAnimationFrame(callback);
 };
 
 const selectCompositionSegment = (
@@ -1747,25 +1783,62 @@ const startSnapshotDistributionsRender = (): void => {
   });
 };
 
-const applyFilters = (): void => {
+const applyFilters = async (signal?: AbortSignal): Promise<boolean> => {
+  filterController?.abort();
+  filterController = null;
   if (currentSnapshot === null) {
     filteredTransactions = [];
     filterSummary.textContent = "No snapshot loaded.";
-    return;
+    return false;
   }
-  filteredTransactions = filterTransactions(
-    currentSnapshot.transactions,
-    readFilters(),
-    currentSnapshot.observed_at_ms,
+  const snapshot = currentSnapshot;
+  const filters = readFilters();
+  const controller = new AbortController();
+  filterController = controller;
+  const combined = combineAbortSignals(
+    signal === undefined ? [controller.signal] : [controller.signal, signal],
   );
-  filterSummary.textContent = `Showing ${countFormat.format(filteredTransactions.length)} of ${countFormat.format(currentSnapshot.transaction_count)} transactions.`;
-  feeAgeStage.hidden = filteredTransactions.length === 0;
-  feeAgeEmpty.hidden = filteredTransactions.length !== 0;
-  feeAgeEmpty.textContent =
-    currentSnapshot.transaction_count === 0
-      ? "This snapshot contains an empty mempool."
-      : "No transactions match the current filters.";
-  scheduleFeeAgeRender();
+  filterSummary.textContent = "Applying membership filters…";
+  try {
+    const nextTransactions = await filterTransactionsCooperatively(
+      snapshot.transactions,
+      filters,
+      snapshot.observed_at_ms,
+      { signal: combined.signal },
+    );
+    if (
+      combined.signal.aborted ||
+      filterController !== controller ||
+      currentSnapshot !== snapshot
+    ) {
+      return false;
+    }
+    filteredTransactions = nextTransactions;
+    filterSummary.textContent = `Showing ${countFormat.format(filteredTransactions.length)} of ${countFormat.format(snapshot.transaction_count)} transactions.`;
+    feeAgeStage.hidden = filteredTransactions.length === 0;
+    feeAgeEmpty.hidden = filteredTransactions.length !== 0;
+    feeAgeEmpty.textContent =
+      snapshot.transaction_count === 0
+        ? "This snapshot contains an empty mempool."
+        : "No transactions match the current filters.";
+    scheduleFeeAgeRender();
+    return true;
+  } catch (error) {
+    if (combined.signal.aborted) return false;
+    throw error;
+  } finally {
+    combined.dispose();
+    if (filterController === controller) filterController = null;
+  }
+};
+
+const startFilterInteraction = (): void => {
+  void applyFilters().catch((error: unknown) => {
+    pageStatus.dataset.state = "error";
+    statusTitle.textContent = "Membership filters unavailable";
+    statusDetail.textContent =
+      error instanceof Error ? error.message : "Unable to filter this snapshot";
+  });
 };
 
 const selectLens = (lens: Lens): void => {
@@ -1782,6 +1855,10 @@ const selectLens = (lens: Lens): void => {
   overviewView.hidden = !overviewSelected;
   terrainView.hidden = !terrainSelected;
   feeAgeView.hidden = !feeAgeSelected;
+  if (!feeAgeSelected) {
+    feeAgeRenderController?.abort();
+    feeAgeRenderController = null;
+  }
   if (terrainSelected) {
     scheduleTerrainRender();
   } else if (feeAgeSelected) {
@@ -1891,12 +1968,12 @@ const renderResponse = async (
   pageStatus.dataset.state = source.availability;
   sourceSelect.value = source.source_id;
   sourceSummaryView.renderSnapshot(source, snapshot);
-  feeAgeTab.disabled = !complete;
-  classificationLensSelect.disabled = !complete;
-  minimumFeeRate.disabled = !complete;
-  maximumAge.disabled = !complete;
-  minimumVsize.disabled = !complete;
-  resetFilters.disabled = !complete;
+  feeAgeTab.disabled = true;
+  classificationLensSelect.disabled = true;
+  minimumFeeRate.disabled = true;
+  maximumAge.disabled = true;
+  minimumVsize.disabled = true;
+  resetFilters.disabled = true;
   currentSnapshot = snapshot;
   currentSnapshotIdentity = candidate.snapshotIdentity;
   currentClassification = candidate.classification;
@@ -1948,7 +2025,7 @@ const renderResponse = async (
   renderClassification(snapshot, currentClassification);
   renderInspector();
   if (complete) {
-    applyFilters();
+    if (!(await applyFilters(signal))) return;
     if (
       distributions === null ||
       !snapshotDistributionsView.commit(
@@ -1959,6 +2036,12 @@ const renderResponse = async (
     ) {
       throw new Error("Prepared snapshot distributions became stale");
     }
+    feeAgeTab.disabled = false;
+    classificationLensSelect.disabled = false;
+    minimumFeeRate.disabled = false;
+    maximumAge.disabled = false;
+    minimumVsize.disabled = false;
+    resetFilters.disabled = false;
   }
   if (!complete) {
     statusTitle.textContent = "Snapshot classifications ready";
@@ -2186,6 +2269,8 @@ const initialize = async (): Promise<void> => {
 };
 
 const prepareForSourceLoad = (source: SourceSummary): void => {
+  filterController?.abort();
+  filterController = null;
   nodeViewState = {
     source: source.source_id,
     classifier: selectedClassifierId,
@@ -2548,14 +2633,14 @@ terrainCanvas.addEventListener("keydown", (event) => {
 
 filtersForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  applyFilters();
+  startFilterInteraction();
 });
 
 resetFilters.addEventListener("click", () => {
   minimumFeeRate.value = String(DEFAULT_FILTERS.minimumFeeRate);
   maximumAge.value = "all";
   minimumVsize.value = String(DEFAULT_FILTERS.minimumVsize);
-  applyFilters();
+  startFilterInteraction();
 });
 
 sourceSelect.addEventListener("change", () => {

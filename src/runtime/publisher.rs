@@ -206,16 +206,13 @@ impl CurrentStatePublisher {
 
     pub(super) async fn stage_payload(
         &self,
-        kind: Option<StageKind>,
+        kind: StageKind,
         classifier_id: Option<&str>,
         content_id: &str,
     ) -> StageLookup {
         let state = self.state.read().await;
         let Some(publication) = &state.publication else {
             return StageLookup::Unavailable;
-        };
-        let Some(kind) = kind else {
-            return StageLookup::Unknown;
         };
         let Some(stage) = publication.stages.iter().find(|stage| {
             stage.descriptor.kind == kind
@@ -567,9 +564,8 @@ impl CurrentStatePublisher {
             {
                 continue;
             }
-            let encoded_bytes = manifest.bytes.len();
             let publication_id = manifest.value.publication_id.clone();
-            replace_manifest(&mut state, manifest)?;
+            let encoded_bytes = replace_manifest(&mut state, manifest)?;
             state.classification_state = Some(classification_state);
             state.status_revision = state.status_revision.wrapping_add(1);
             let total_classified_count = state.classifications.len();
@@ -642,8 +638,7 @@ impl CurrentStatePublisher {
             }
             let (publication_id, encoded_bytes) = if let Some(manifest) = manifest {
                 let publication_id = manifest.value.publication_id.clone();
-                let encoded_bytes = manifest.bytes.len();
-                replace_manifest(&mut state, manifest)?;
+                let encoded_bytes = replace_manifest(&mut state, manifest)?;
                 (Some(publication_id), encoded_bytes)
             } else {
                 (None, 0)
@@ -901,14 +896,14 @@ fn published_stage(stage: EncodedStage) -> PublishedStage {
 fn replace_manifest(
     state: &mut CurrentState,
     manifest: EncodedManifest,
-) -> Result<(), RuntimeError> {
+) -> Result<usize, RuntimeError> {
     let publication = state
         .publication
         .as_mut()
         .ok_or(RuntimeError::PublicationStateWithoutBundle)?;
     publication.manifest_value = manifest.value;
     publication.manifest = encoded_manifest_body(manifest.content_id, manifest.bytes);
-    Ok(())
+    Ok(publication.encoded_bytes())
 }
 
 fn manifest_etag(content_id: &str) -> String {
@@ -1035,5 +1030,61 @@ mod tests {
             .expect_err("missing publication bundle must be reported");
 
         assert!(matches!(error, RuntimeError::PublicationStateWithoutBundle));
+    }
+
+    #[test]
+    fn manifest_replacement_reports_the_full_retained_bundle_size() {
+        let publisher = CurrentStatePublisher::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            Duration::from_secs(30),
+        );
+        let snapshot = Arc::new(
+            MempoolSnapshot::new(
+                "core".to_owned(),
+                "Bitcoin Core".to_owned(),
+                1_700_000_000_000,
+                ChainTip {
+                    height: 900_000,
+                    hash: "00".repeat(32),
+                },
+                Vec::new(),
+            )
+            .expect("snapshot"),
+        );
+        let source = summary_from_parts(
+            &publisher,
+            None,
+            Some(&snapshot),
+            Some(ClassificationState::Complete),
+            None,
+        );
+        let bundle = encode_staged_snapshot_with_limits(
+            &source,
+            &snapshot,
+            None,
+            StagedSnapshotLimits::default(),
+        )
+        .expect("encoded staged snapshot");
+        let retained_manifest = bundle.manifest.value.clone();
+        let mut state = CurrentState {
+            publication: Some(CurrentV2Publication::from_bundle(bundle)),
+            ..CurrentState::default()
+        };
+        let mut changed_source = source;
+        changed_source.last_error = Some("RPC timeout".to_owned());
+        let replacement = reencode_manifest_for_source(&retained_manifest, &changed_source)
+            .expect("replacement manifest");
+
+        let encoded_bytes = replace_manifest(&mut state, replacement).expect("replace manifest");
+        let publication = state.publication.as_ref().expect("publication");
+        let stage_bytes = publication
+            .stages
+            .iter()
+            .map(|stage| stage.body.len())
+            .sum::<usize>();
+
+        assert_eq!(encoded_bytes, publication.manifest.body.len() + stage_bytes);
+        assert_eq!(encoded_bytes, publication.encoded_bytes());
     }
 }

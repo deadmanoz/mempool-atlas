@@ -215,10 +215,21 @@ export const buildSnapshotDistributionModelCooperatively = async (
     groupLimit,
     dataGroupLimit,
   }: SnapshotDistributionInput,
-  options: CooperativeWorkOptions = {},
+  options: CooperativeWorkOptions & {
+    classifierSortTimeBudgetMs?: number;
+    aggregateOnlyClassifierBuckets?: boolean;
+  } = {},
 ): Promise<SnapshotDistributionModel> => {
   options.signal?.throwIfAborted();
-  await precomputeClassifierBuckets(transactions, classifierCatalog, options);
+  await precomputeClassifierBuckets(transactions, classifierCatalog, {
+    ...options,
+    ...(options.classifierSortTimeBudgetMs === undefined
+      ? {}
+      : { sortTimeBudgetMs: options.classifierSortTimeBudgetMs }),
+    ...(options.aggregateOnlyClassifierBuckets === undefined
+      ? {}
+      : { aggregateOnly: options.aggregateOnlyClassifierBuckets }),
+  });
   options.signal?.throwIfAborted();
 
   const groups = panelBucketGroups(

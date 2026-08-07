@@ -468,19 +468,27 @@ fn validate_reused_membership(
         || !population.descriptor.dependency_ids.is_empty()
         || population.descriptor.uncompressed_bytes
             != count_u64(population.bytes.len(), "population stage byte length")?
-        || population.descriptor.content_id != Digest::of(&population.bytes).hex
     {
         return Err(invalid("retained population stage is inconsistent"));
     }
     if membership.descriptor.kind != StageKind::Membership
         || membership.descriptor.classifier_id.is_some()
         || membership.descriptor.row_count != row_count
-        || membership.descriptor.dependency_ids != [population.descriptor.content_id.clone()]
+        || membership.descriptor.dependency_ids.len() != 1
+        || membership.descriptor.dependency_ids.first() != Some(&population.descriptor.content_id)
         || membership.descriptor.uncompressed_bytes
             != count_u64(membership.bytes.len(), "membership stage byte length")?
-        || membership.descriptor.content_id != Digest::of(&membership.bytes).hex
     {
         return Err(invalid("retained membership stage is inconsistent"));
+    }
+    #[cfg(debug_assertions)]
+    {
+        if population.descriptor.content_id != Digest::of(&population.bytes).hex {
+            return Err(invalid("retained population stage digest is inconsistent"));
+        }
+        if membership.descriptor.content_id != Digest::of(&membership.bytes).hex {
+            return Err(invalid("retained membership stage digest is inconsistent"));
+        }
     }
     Ok(())
 }
@@ -970,12 +978,17 @@ fn exact_dictionary_codes<T>(
 where
     T: Serialize,
 {
+    const INITIAL_DICTIONARY_CAPACITY: usize = 16;
+
     let values = values.into_iter();
     let expected = values.size_hint().1.unwrap_or(values.size_hint().0);
-    let mut dictionary = try_vec_with_capacity(expected, "classifier dictionary")?;
+    // Classifier taxonomies have low cardinality even when a mempool has many rows. Keep the
+    // eager allocation bounded, then let these collections grow if a future classifier needs it.
+    let dictionary_capacity = expected.min(INITIAL_DICTIONARY_CAPACITY);
+    let mut dictionary = try_vec_with_capacity(dictionary_capacity, "classifier dictionary")?;
     let mut indexes = HashMap::new();
     indexes
-        .try_reserve(expected)
+        .try_reserve(dictionary_capacity)
         .map_err(|error| allocation("classifier dictionary index", error))?;
     let mut codes = try_vec_with_capacity(expected, "classifier result codes")?;
     for value in values {
@@ -987,6 +1000,12 @@ where
         let code = if let Some(code) = indexes.get(&key) {
             *code
         } else {
+            dictionary
+                .try_reserve(1)
+                .map_err(|error| allocation("classifier dictionary", error))?;
+            indexes
+                .try_reserve(1)
+                .map_err(|error| allocation("classifier dictionary index", error))?;
             dictionary.push(value);
             let code = count_u64(dictionary.len(), "dictionary code")?;
             indexes.insert(key, code);
@@ -1325,6 +1344,8 @@ mod tests {
         Bip110Assessment, Bip110RuleId, Bip110Status, ClassificationProgress, ClassificationState,
         MembershipFacts, TransactionStructure, classifier_catalog,
     };
+
+    mod hot_paths;
 
     fn hash(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)

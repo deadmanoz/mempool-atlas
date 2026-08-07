@@ -4,6 +4,7 @@ import { mempoolTransaction } from "./test-fixtures";
 import {
   concatenateTransactionViews,
   filterTransactionView,
+  filterTransactionViewCooperatively,
   sortTransactionView,
   sortTransactionViewByVsize,
   sortTransactionViewByVsizeCooperatively,
@@ -49,6 +50,48 @@ describe("transaction index views", () => {
     expect(sorted.map(({ vsize }) => vsize)).toEqual([400, 300, 200]);
     transactions[3] = mempoolTransaction(5, { vsize: 450 });
     expect(sorted[0]?.vsize).toBe(450);
+  });
+
+  it("cooperatively preserves filtered view semantics", async () => {
+    const transactions = Array.from({ length: 257 }, (_, index) =>
+      mempoolTransaction(index + 1, { vsize: 100 + (index % 7) }),
+    );
+    const expected = filterTransactionView(
+      transactions,
+      ({ vsize }) => vsize >= 104,
+    );
+    const yields: number[] = [];
+
+    const actual = await filterTransactionViewCooperatively(
+      transactions,
+      ({ vsize }) => vsize >= 104,
+      {
+        batchSize: 32,
+        yieldBetweenBatches: () => {
+          yields.push(1);
+        },
+      },
+    );
+
+    expect(actual.map(({ txid }) => txid)).toEqual(
+      expected.map(({ txid }) => txid),
+    );
+    expect(yields.length).toBeGreaterThan(0);
+  });
+
+  it("does not expose an aborted cooperative filter", async () => {
+    const controller = new AbortController();
+    const transactions = Array.from({ length: 100 }, (_, index) =>
+      mempoolTransaction(index + 1),
+    );
+
+    await expect(
+      filterTransactionViewCooperatively(transactions, () => true, {
+        batchSize: 10,
+        signal: controller.signal,
+        yieldBetweenBatches: () => controller.abort(),
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("sorts the standard terrain order without changing array behavior", () => {

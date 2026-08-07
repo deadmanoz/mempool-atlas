@@ -1,4 +1,10 @@
-import { TRANSACTION_PROPERTIES_CLASSIFIER_ID } from "./classifier-terrain";
+import {
+  buildComparisonDistributionSideModel,
+  comparisonDistributionVariant,
+  comparisonSnapshotIdentity,
+  sameComparisonSnapshotIdentity,
+  type ComparisonSnapshotIdentity,
+} from "./comparison-distribution-model";
 import {
   commitComparisonDistributionSide,
   createComparisonDistributionPanels,
@@ -6,15 +12,17 @@ import {
 } from "./comparison-distribution-panels";
 import {
   comparisonDistributionScopeSuffix,
-  comparisonDistributionTransactions,
   type ComparisonDistributionScope,
 } from "./comparison-distribution-population";
 import type { ComparisonSide, CurrentComparison } from "./comparison-model";
-import { DEFAULT_JOINT_COLOR, renderJointChart } from "./detail-panels";
+import {
+  DEFAULT_JOINT_COLOR,
+  prepareJointChartCanvas,
+  renderJointChart,
+} from "./detail-panels";
 import type { JointDensity } from "./fee-distribution";
 import {
   SnapshotDistributionCache,
-  buildSnapshotDistributionModelCooperatively,
   type SnapshotDistributionModel,
 } from "./snapshot-distributions";
 
@@ -41,18 +49,20 @@ export interface ComparisonDistributionsView {
   reset(): void;
 }
 
-interface ComparisonSnapshotIdentity {
-  sourceId: string;
-  observedAtMs: number;
-  classificationRevision: number;
-}
-
 const PREPARED_COMPARISON_VIEW = Symbol("prepared-comparison-view");
 
 export interface PreparedComparisonDistributions {
   readonly current: CurrentComparison;
   readonly scope: ComparisonDistributionScope;
   readonly models: Readonly<Record<ComparisonSide, SnapshotDistributionModel>>;
+  readonly prefetchedModels: Readonly<
+    Partial<
+      Record<
+        ComparisonDistributionScope,
+        Readonly<Record<ComparisonSide, SnapshotDistributionModel>>
+      >
+    >
+  >;
   readonly variants: Readonly<Record<ComparisonSide, string>>;
   readonly leftIdentity: ComparisonSnapshotIdentity;
   readonly rightIdentity: ComparisonSnapshotIdentity;
@@ -66,30 +76,6 @@ const DISTRIBUTION_SCOPES: readonly ComparisonDistributionScope[] = [
   "left_only",
   "right_only",
 ];
-const COMPARISON_PANEL_GROUP_LIMIT = 4;
-
-const comparisonSnapshotIdentity = (
-  current: CurrentComparison,
-  side: ComparisonSide,
-): ComparisonSnapshotIdentity => ({
-  sourceId: current[side].snapshot.source_id,
-  observedAtMs: current[side].snapshot.observed_at_ms,
-  classificationRevision: current[side].snapshot.classification_revision,
-});
-
-const sameComparisonSnapshotIdentity = (
-  current: CurrentComparison,
-  side: ComparisonSide,
-  identity: ComparisonSnapshotIdentity,
-): boolean => {
-  const { snapshot } = current[side];
-  return (
-    snapshot.source_id === identity.sourceId &&
-    snapshot.observed_at_ms === identity.observedAtMs &&
-    snapshot.classification_revision === identity.classificationRevision
-  );
-};
-
 const requiredDescendant = <T extends HTMLElement>(
   root: HTMLElement,
   id: string,
@@ -214,51 +200,24 @@ export const createComparisonDistributionsView = (
     }
   };
 
-  const variantFor = (
-    side: ComparisonSide,
-    renderScope: ComparisonDistributionScope,
-  ): string =>
-    `side=${side};scope=${renderScope};metric=vsize;groups=${COMPARISON_PANEL_GROUP_LIMIT};dataGroups=${COMPARISON_PANEL_GROUP_LIMIT}`;
-
-  const buildSideModel = (
-    current: CurrentComparison,
-    side: ComparisonSide,
-    renderScope: ComparisonDistributionScope,
-    signal: AbortSignal,
-  ): Promise<SnapshotDistributionModel> => {
-    const { snapshot } = current[side];
-    const propertyDescriptor = snapshot.classifier_catalog.find(
-      ({ id }) => id === TRANSACTION_PROPERTIES_CLASSIFIER_ID,
-    );
-    return buildSnapshotDistributionModelCooperatively(
-      {
-        transactions: comparisonDistributionTransactions(
-          current,
-          side,
-          renderScope,
-        ),
-        classifierCatalog: snapshot.classifier_catalog,
-        selectedClassifier: propertyDescriptor ?? null,
-        observedAtMs: snapshot.observed_at_ms,
-        metric: "vsize",
-        groupLimit: COMPARISON_PANEL_GROUP_LIMIT,
-        dataGroupLimit: COMPARISON_PANEL_GROUP_LIMIT,
-      },
-      { signal },
-    );
-  };
-
   const preparedComparison = (
     current: CurrentComparison,
     renderScope: ComparisonDistributionScope,
     models: Record<ComparisonSide, SnapshotDistributionModel>,
+    prefetchedModels: Partial<
+      Record<
+        ComparisonDistributionScope,
+        Record<ComparisonSide, SnapshotDistributionModel>
+      >
+    > = {},
   ): PreparedComparisonDistributions => ({
     current,
     scope: renderScope,
     models,
+    prefetchedModels,
     variants: {
-      left: variantFor("left", renderScope),
-      right: variantFor("right", renderScope),
+      left: comparisonDistributionVariant("left", renderScope),
+      right: comparisonDistributionVariant("right", renderScope),
     },
     leftIdentity: comparisonSnapshotIdentity(current, "left"),
     rightIdentity: comparisonSnapshotIdentity(current, "right"),
@@ -272,17 +231,32 @@ export const createComparisonDistributionsView = (
     signal?.throwIfAborted();
     const renderScope = scope;
     const renderSignal = signal ?? new AbortController().signal;
-    const models = {} as Record<ComparisonSide, SnapshotDistributionModel>;
-    for (const side of COMPARISON_SIDES) {
-      models[side] = await buildSideModel(
-        current,
-        side,
-        renderScope,
-        renderSignal,
-      );
+    const buildScopeModels = async (
+      targetScope: ComparisonDistributionScope,
+    ): Promise<Record<ComparisonSide, SnapshotDistributionModel>> => {
+      const models = {} as Record<ComparisonSide, SnapshotDistributionModel>;
+      for (const side of COMPARISON_SIDES) {
+        models[side] = await buildComparisonDistributionSideModel(
+          current,
+          side,
+          targetScope,
+          renderSignal,
+        );
+      }
+      return models;
+    };
+    const models = await buildScopeModels(renderScope);
+    const prefetchedModels: Partial<
+      Record<
+        ComparisonDistributionScope,
+        Record<ComparisonSide, SnapshotDistributionModel>
+      >
+    > = {};
+    if (renderScope === "all" && current.totals.common_count > 0) {
+      prefetchedModels.common = await buildScopeModels("common");
     }
     signal?.throwIfAborted();
-    return preparedComparison(current, renderScope, models);
+    return preparedComparison(current, renderScope, models, prefetchedModels);
   };
 
   const commitPrepared = (
@@ -309,8 +283,32 @@ export const createComparisonDistributionsView = (
       jointDensities[side] = model.jointDensity;
       complexityDensities[side] = model.complexityDensity;
     }
+    for (const prefetchedScope of DISTRIBUTION_SCOPES) {
+      const models = prepared.prefetchedModels[prefetchedScope];
+      if (models === undefined || prefetchedScope === prepared.scope) continue;
+      for (const side of COMPARISON_SIDES) {
+        cache.adopt(
+          current,
+          comparisonDistributionVariant(side, prefetchedScope),
+          models[side],
+        );
+      }
+    }
     currentComparison = current;
     root.hidden = false;
+    for (const side of COMPARISON_SIDES) {
+      const jointDensity = jointDensities[side];
+      if (jointDensity !== null) {
+        prepareJointChartCanvas(panels[side].joint.canvas, jointDensity);
+      }
+      const complexityDensity = complexityDensities[side];
+      if (complexityDensity !== null) {
+        prepareJointChartCanvas(
+          panels[side].complexity.canvas,
+          complexityDensity,
+        );
+      }
+    }
     committedRevision = revision;
     scheduleDensityRender();
     return true;
@@ -367,11 +365,17 @@ export const createComparisonDistributionsView = (
     try {
       const models = {} as Record<ComparisonSide, SnapshotDistributionModel>;
       for (const side of COMPARISON_SIDES) {
-        const variant = variantFor(side, renderScope);
+        const variant = comparisonDistributionVariant(side, renderScope);
         models[side] = await cache.getAsync(
           current,
           variant,
-          (signal) => buildSideModel(current, side, renderScope, signal),
+          (signal) =>
+            buildComparisonDistributionSideModel(
+              current,
+              side,
+              renderScope,
+              signal,
+            ),
           controller.signal,
         );
       }

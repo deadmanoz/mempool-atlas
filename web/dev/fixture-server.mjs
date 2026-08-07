@@ -1,7 +1,7 @@
 // Development-only Atlas v2 API server backed by canonical Rust-exported
 // bytes. The timed request path selects buffers prepared at startup and never
 // constructs or serializes a response.
-import { readFileSync } from "node:fs";
+import { readFileSync, writeSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +14,7 @@ const FIXTURE_DIRECTORY = resolve(HERE, "../.perf-fixtures/functional");
 const MANIFEST_PATH = join(FIXTURE_DIRECTORY, "manifest.json");
 
 const failFixtureLoad = () => {
-  process.stderr.write(`${FIXTURE_ERROR}\n`);
+  writeSync(process.stderr.fd, `${FIXTURE_ERROR}\n`);
   process.exit(1);
 };
 
@@ -58,27 +58,12 @@ const loadBody = (descriptor, cacheable) => {
     if (bytes.byteLength !== descriptor.uncompressed_bytes) {
       failFixtureLoad();
     }
-    const parsed = JSON.parse(bytes.toString("utf8"));
-    const dependencyMismatch = Buffer.from(
-      JSON.stringify({
-        ...parsed,
-        dependency_ids:
-          Array.isArray(parsed.dependency_ids) &&
-          parsed.dependency_ids.length > 0
-            ? ["00".repeat(32), ...parsed.dependency_ids.slice(1)]
-            : ["00".repeat(32)],
-      }),
-    );
+    JSON.parse(bytes.toString("utf8"));
     return Object.freeze({
       bytes,
       cacheable,
       contentId: descriptor.content_id,
       contentType: descriptor.content_type,
-      mutations: Object.freeze({
-        "dependency-mismatch": dependencyMismatch,
-        "digest-mismatch": Buffer.concat([bytes, Buffer.from("\n")]),
-        "malformed-json": Buffer.from('{"schema_version":2'),
-      }),
     });
   } catch {
     failFixtureLoad();
@@ -121,16 +106,10 @@ for (const detail of manifest.transaction_details)
 
 const errorBodies = Object.freeze({
   notFound: Buffer.from('{"error":"not found"}'),
-  superseded: Buffer.from('{"error":"stage is not current"}'),
-  unavailable: Buffer.from(
-    JSON.stringify({
-      type: "v2_unavailable",
-      title: "Current v2 publication unavailable",
-      status: 503,
-      detail:
-        "Atlas has not published a current complete snapshot for this source.",
-    }),
+  queryNotSupported: Buffer.from(
+    '{"error":"query-dependent v2 representations are not supported"}',
   ),
+  superseded: Buffer.from('{"error":"stage is not current"}'),
 });
 
 const send = (request, response, status, bytes, headers = {}) => {
@@ -157,6 +136,10 @@ const server = createServer((request, response) => {
     return;
   }
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  if (url.search.length > 0) {
+    send(request, response, 400, errorBodies.queryNotSupported);
+    return;
+  }
   const body = routes.get(url.pathname);
   if (body === undefined) {
     if ([...stagePrefixes].some((prefix) => url.pathname.startsWith(prefix))) {
@@ -167,19 +150,7 @@ const server = createServer((request, response) => {
     return;
   }
 
-  const fixtureMutation = url.searchParams.get("fixture");
-  if (fixtureMutation === "v2_unavailable" && /\/mempool$/.test(url.pathname)) {
-    send(request, response, 503, errorBodies.unavailable, {
-      "content-type": "application/problem+json",
-    });
-    return;
-  }
-  if (fixtureMutation === "superseded") {
-    send(request, response, 409, errorBodies.superseded);
-    return;
-  }
-
-  const bytes = body.mutations[fixtureMutation] ?? body.bytes;
+  const bytes = body.bytes;
   const etag = `W/"${body.contentId}"`;
   const headers = {
     "cache-control": body.cacheable
@@ -190,11 +161,7 @@ const server = createServer((request, response) => {
     "x-atlas-uncompressed-length": String(bytes.byteLength),
     ...(body.cacheable ? { etag } : {}),
   };
-  if (
-    body.cacheable &&
-    fixtureMutation === null &&
-    request.headers["if-none-match"] === etag
-  ) {
+  if (body.cacheable && request.headers["if-none-match"] === etag) {
     response.writeHead(304, headers);
     response.end();
     return;

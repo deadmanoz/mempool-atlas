@@ -12,10 +12,7 @@ async fn publication_stages(runtime: &SourceRuntime, manifest: &Value) -> Vec<Pu
         };
         let classifier_id = descriptor["classifier_id"].as_str();
         let content_id = descriptor["content_id"].as_str().expect("content ID");
-        match runtime
-            .stage_payload(Some(kind), classifier_id, content_id)
-            .await
-        {
+        match runtime.stage_payload(kind, classifier_id, content_id).await {
             StageLookup::Ready(payload) => payloads.push(payload),
             lookup => panic!("unexpected stage lookup: {lookup:?}"),
         }
@@ -46,14 +43,14 @@ async fn classification_publication_reuses_membership_buffers() {
         .and_then(|stage| stage["content_id"].as_str())
         .expect("membership ID");
     let population_before = match runtime
-        .stage_payload(Some(StageKind::Population), None, population_id)
+        .stage_payload(StageKind::Population, None, population_id)
         .await
     {
         StageLookup::Ready(payload) => payload,
         lookup => panic!("unexpected population lookup: {lookup:?}"),
     };
     let membership_before = match runtime
-        .stage_payload(Some(StageKind::Membership), None, membership_id)
+        .stage_payload(StageKind::Membership, None, membership_id)
         .await
     {
         StageLookup::Ready(payload) => payload,
@@ -65,14 +62,14 @@ async fn classification_publication_reuses_membership_buffers() {
         .await
         .expect("publish classification");
     let population_after = match runtime
-        .stage_payload(Some(StageKind::Population), None, population_id)
+        .stage_payload(StageKind::Population, None, population_id)
         .await
     {
         StageLookup::Ready(payload) => payload,
         lookup => panic!("unexpected population lookup: {lookup:?}"),
     };
     let membership_after = match runtime
-        .stage_payload(Some(StageKind::Membership), None, membership_id)
+        .stage_payload(StageKind::Membership, None, membership_id)
         .await
     {
         StageLookup::Ready(payload) => payload,
@@ -201,7 +198,7 @@ async fn classification_publication_failure_pauses_without_staling_membership() 
         .and_then(|stage| stage["content_id"].as_str())
         .expect("membership ID");
     let membership_before = match runtime
-        .stage_payload(Some(StageKind::Membership), None, membership_id)
+        .stage_payload(StageKind::Membership, None, membership_id)
         .await
     {
         StageLookup::Ready(payload) => payload,
@@ -245,7 +242,7 @@ async fn classification_publication_failure_pauses_without_staling_membership() 
         TransactionLookup::Unclassified
     ));
     let membership_after = match runtime
-        .stage_payload(Some(StageKind::Membership), None, membership_id)
+        .stage_payload(StageKind::Membership, None, membership_id)
         .await
     {
         StageLookup::Ready(payload) => payload,

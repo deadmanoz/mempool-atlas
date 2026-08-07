@@ -136,7 +136,7 @@ async fn snapshot_stage(
         .get(&source_id)
         .ok_or_else(|| ApiError::source_not_found(&source_id))?;
     stage_response(
-        source.stage_payload(Some(kind), None, &stage_id).await,
+        source.stage_payload(kind, None, &stage_id).await,
         &request_headers,
     )
 }
@@ -155,7 +155,7 @@ async fn classifier_stage(
         .ok_or_else(|| ApiError::source_not_found(&source_id))?;
     stage_response(
         source
-            .stage_payload(Some(StageKind::Classifier), Some(&classifier_id), &stage_id)
+            .stage_payload(StageKind::Classifier, Some(&classifier_id), &stage_id)
             .await,
         &request_headers,
     )
@@ -699,10 +699,12 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_api_route_is_not_cacheable() {
-        let (status, policy) = cache_control(application(runtime()), "/api/v2/nonexistent").await;
-
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(policy.as_deref(), Some("no-store"));
+        let application = application(runtime());
+        for path in ["/api/v2/nonexistent", "/api/v1/sources"] {
+            let (status, policy) = cache_control(application.clone(), path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(policy.as_deref(), Some("no-store"), "{path}");
+        }
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ import {
   commitSnapshotDistributionPanels,
   createSnapshotDistributionPanelElements,
   EMPTY_SNAPSHOT_MESSAGE,
+  prepareSnapshotDistributionJointCanvases,
   renderSnapshotDistributionJointPanels,
   syncSnapshotDistributionSelection,
 } from "./snapshot-distribution-panels";
@@ -261,6 +262,11 @@ export const createSnapshotDistributionsView = ({
         descriptor: prepared.descriptor,
         onSelectBucket,
       });
+      prepareSnapshotDistributionJointCanvases(
+        panels,
+        jointDensity,
+        complexityDensity,
+      );
       scheduleJointRender();
     }
     return true;

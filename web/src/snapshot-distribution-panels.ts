@@ -6,6 +6,7 @@ import {
   DEFAULT_JOINT_COLOR,
   feeRateAxisRow,
   panelAxisRow,
+  prepareJointChartCanvas,
   renderCompositionBars,
   renderJointChart,
   renderMosaicChart,
@@ -139,6 +140,19 @@ export const renderSnapshotDistributionJointPanels = (
         emptyMessage: "No structure facts are available yet.",
       },
     );
+  }
+};
+
+export const prepareSnapshotDistributionJointCanvases = (
+  elements: SnapshotDistributionPanelElements,
+  jointDensity: JointDensity | null,
+  complexityDensity: JointDensity | null,
+): void => {
+  if (jointDensity !== null) {
+    prepareJointChartCanvas(elements.jointCanvas, jointDensity);
+  }
+  if (complexityDensity !== null) {
+    prepareJointChartCanvas(elements.complexityCanvas, complexityDensity);
   }
 };
 

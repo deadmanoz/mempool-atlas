@@ -67,7 +67,7 @@ web-dev:
 
 # Export the small canonical fixture set used by frontend development and E2E.
 functional-fixtures:
-    cargo run --release --features perf-fixtures --bin export-perf-fixture -- --profile functional
+    cargo run --profile fixtures --features perf-fixtures --bin export-perf-fixture -- --profile functional
 
 # Export the functional fixtures plus the production-scale performance set.
 perf-fixtures: functional-fixtures
@@ -75,7 +75,7 @@ perf-fixtures: functional-fixtures
 
 # Refresh the compact cross-language digest fixture from Rust-owned model data.
 publication-digest-fixture:
-    cargo run --release --features perf-fixtures --bin export-perf-fixture -- --profile performance --output-root target/publication-digest-fixture --transaction-count 3 --source-count 1
+    cargo run --profile fixtures --features perf-fixtures --bin export-perf-fixture -- --profile performance --output-root target/publication-digest-fixture --transaction-count 3 --source-count 1
     mkdir -p tests/fixtures
     cp target/publication-digest-fixture/performance/snapshots/perf-node-01/manifest.json tests/fixtures/publication-digest-v2.json
 

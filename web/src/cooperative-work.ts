@@ -91,13 +91,21 @@ export const forEachCooperatively = async <T>(
     throw new RangeError("Cooperative batch size must be a positive integer");
   }
   options.signal?.throwIfAborted();
-  for (let start = 0; start < values.length; start += batchSize) {
-    const end = Math.min(start + batchSize, values.length);
-    for (let index = start; index < end; index += 1) {
-      const value = values[index];
-      if (value !== undefined) visit(value, index);
+  const length = values.length;
+  const iterator = values[Symbol.iterator]();
+  let index = 0;
+  while (index < length) {
+    const end = Math.min(index + batchSize, length);
+    while (index < end) {
+      const next = iterator.next();
+      if (next.done) {
+        options.signal?.throwIfAborted();
+        return;
+      }
+      if (next.value !== undefined) visit(next.value, index);
+      index += 1;
     }
-    if (end < values.length) {
+    if (index < length) {
       await yieldCooperatively(options);
     }
   }

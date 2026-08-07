@@ -403,12 +403,43 @@ describe("classifier terrain", () => {
     expect(classifierBuckets(transactions, propertyDescriptor)).toBe(actual);
   });
 
+  it("builds aggregate-only buckets without sorting or retaining marginal indexes", async () => {
+    const transactions = [
+      transaction(1, 100, result("complete", ["alpha"])),
+      transaction(2, 300, result("complete", ["alpha"])),
+      transaction(3, 200, result("complete", ["alpha"])),
+    ];
+
+    await precomputeClassifierBuckets(transactions, [descriptor], {
+      aggregateOnly: true,
+      batchSize: 1,
+    });
+
+    const bucket = classifierBuckets(transactions, descriptor)[0];
+    expect(bucket?.transactions.map(({ vsize }) => vsize)).toEqual([
+      100, 300, 200,
+    ]);
+    expect(
+      classifierLabelPopulation(
+        transactions,
+        descriptor,
+        "alpha",
+      )?.transactions.map(({ vsize }) => vsize),
+    ).toEqual([300, 200, 100]);
+  });
+
   it("rejects invalid cooperative batch sizes before scanning", async () => {
     const transactions = [transaction(1, 100, result("complete", ["alpha"]))];
 
     await expect(
       precomputeClassifierBuckets(transactions, [descriptor], { batchSize: 0 }),
     ).rejects.toThrow("positive integer");
+
+    await expect(
+      precomputeClassifierBuckets([...transactions], [descriptor], {
+        sortTimeBudgetMs: 0,
+      }),
+    ).rejects.toThrow("time budget must be positive");
   });
 
   it("does not publish a partial cache when precomputation is aborted", async () => {
@@ -421,7 +452,7 @@ describe("classifier terrain", () => {
 
     await expect(
       precomputeClassifierBuckets(transactions, [descriptor], {
-        batchSize: 10,
+        batchSize: 1,
         signal: controller.signal,
         yieldBetweenBatches: () => controller.abort(),
       }),

@@ -225,6 +225,13 @@ describe("createComparisonDistributionsView", () => {
 
     const prepared = await view.prepare(candidate);
 
+    expect(prepared.prefetchedModels.common).toBeDefined();
+    expect(prepared.prefetchedModels.common?.left.totals.population.count).toBe(
+      1,
+    );
+    expect(
+      prepared.prefetchedModels.common?.right.totals.population.count,
+    ).toBe(1);
     expect(root.getAttribute("aria-busy")).toBe("false");
     expect(root.querySelector("#spectrum-left svg")).toBe(activeSpectrum);
     expect(root.querySelector("#dist-comp-left-title")?.textContent).toContain(
@@ -250,6 +257,14 @@ describe("createComparisonDistributionsView", () => {
       "CANDIDATE-A node",
     );
     expect(root.querySelector("#spectrum-left svg")).not.toBe(activeSpectrum);
+
+    root.querySelector<HTMLButtonElement>("#dist-scope-common")?.click();
+    await vi.waitFor(() => {
+      expect(root.getAttribute("aria-busy")).toBe("false");
+      expect(
+        root.querySelector("#dist-comp-left-title")?.textContent,
+      ).toContain("present in both");
+    });
   });
 
   it("replaces a nonempty owner with empty aggregates and resets its lifecycle", async () => {

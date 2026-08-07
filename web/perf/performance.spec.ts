@@ -63,6 +63,14 @@ type ResponsivenessInterval = {
   end_time_ms: number;
 };
 
+type MeasuredInteraction = {
+  label: string;
+  handler_duration_ms: number;
+  settle_duration_ms: number;
+  responsiveness_interval: ResponsivenessInterval;
+  outcome: Record<string, string | number | boolean>;
+};
+
 type ReplacementMeasurement = {
   memory: MemoryResult;
   responsivenessIntervals: readonly ResponsivenessInterval[];
@@ -324,6 +332,9 @@ const GATES: Readonly<Record<Scenario, ScenarioGate>> = Object.freeze({
     bip110_cross_context_bytes: null,
   },
 });
+
+const INTERACTION_HANDLER_GATE_MS = 200;
+const INTERACTION_SETTLE_GATE_MS = 5_000;
 
 const installObservers = async (page: Page): Promise<void> => {
   await page.addInitScript(() => {
@@ -674,6 +685,52 @@ const settleFrames = async (page: Page): Promise<number> =>
         });
       }),
   );
+
+type ClickHandlerTiming = {
+  intervalStartTimeMs: number;
+  startTimeMs: number;
+  endTimeMs: number;
+  durationMs: number;
+};
+
+const measureClickHandler = async (
+  page: Page,
+  selector: string,
+): Promise<ClickHandlerTiming> => {
+  const intervalStartTimeMs = await page.evaluate(() => performance.now());
+  const handler = await page.evaluate((targetSelector) => {
+    const target = document.querySelector<HTMLElement>(targetSelector);
+    if (target === null) {
+      throw new Error(`interaction target ${targetSelector} is unavailable`);
+    }
+    const startTimeMs = performance.now();
+    target.click();
+    const endTimeMs = performance.now();
+    return {
+      startTimeMs,
+      endTimeMs,
+      durationMs: endTimeMs - startTimeMs,
+    };
+  }, selector);
+  return { intervalStartTimeMs, ...handler };
+};
+
+const measuredInteraction = (
+  label: string,
+  handler: ClickHandlerTiming,
+  settledAtMs: number,
+  outcome: MeasuredInteraction["outcome"],
+): MeasuredInteraction => ({
+  label,
+  handler_duration_ms: handler.durationMs,
+  settle_duration_ms: settledAtMs - handler.intervalStartTimeMs,
+  responsiveness_interval: {
+    label,
+    start_time_ms: handler.intervalStartTimeMs,
+    end_time_ms: settledAtMs,
+  },
+  outcome,
+});
 
 const installPrimaryMemoryGate = async (
   page: Page,
@@ -1264,6 +1321,113 @@ const measureReplacementRetained = async (
   };
 };
 
+const filterSummaryCounts = (
+  summary: string,
+): { filtered: number; total: number } => {
+  const match = summary.match(/^Showing ([\d,]+) of ([\d,]+) transactions\.$/);
+  if (match === null) {
+    throw new Error(`node filter summary is invalid: ${summary}`);
+  }
+  return {
+    filtered: Number((match[1] ?? "").replaceAll(",", "")),
+    total: Number((match[2] ?? "").replaceAll(",", "")),
+  };
+};
+
+const measureNodePackedStoreInteractions = async (
+  page: Page,
+): Promise<MeasuredInteraction[]> => {
+  const feeAgeHandler = await measureClickHandler(page, "#fee-age-tab");
+  await expect(page.locator("#fee-age-tab")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator("#mempool-canvas")).toHaveAttribute(
+    "aria-label",
+    "Fee rate by age view containing 70,000 filtered transactions.",
+  );
+  const feeAgeSettledAtMs = await settleFrames(page);
+  const feeAgeMeasurement = measuredInteraction(
+    "node-fee-rate-by-age-activation",
+    feeAgeHandler,
+    feeAgeSettledAtMs,
+    {
+      selected_lens: "fee-rate-by-age",
+      rendered_transaction_count: 70_000,
+    },
+  );
+
+  await page.locator("#minimum-fee-rate").fill("2");
+  const filterHandler = await measureClickHandler(
+    page,
+    '#filters button[type="submit"]',
+  );
+  await expect(page.locator("#filter-summary")).toHaveText(
+    /^Showing [\d,]+ of 70,000 transactions\.$/,
+  );
+  const summary = (await page.locator("#filter-summary").textContent()) ?? "";
+  const counts = filterSummaryCounts(summary);
+  await expect(page.locator("#mempool-canvas")).toHaveAttribute(
+    "aria-label",
+    new RegExp(
+      `^Fee rate by age view containing ${counts.filtered.toLocaleString("en-US")} filtered transactions\\.$`,
+    ),
+  );
+  const filterSettledAtMs = await settleFrames(page);
+  const filterMeasurement = measuredInteraction(
+    "node-filter-submit",
+    filterHandler,
+    filterSettledAtMs,
+    {
+      minimum_fee_rate: 2,
+      filtered_transaction_count: counts.filtered,
+      source_transaction_count: counts.total,
+      rendered_transaction_count: counts.filtered,
+    },
+  );
+
+  if (
+    counts.filtered <= 0 ||
+    counts.filtered >= counts.total ||
+    counts.total !== 70_000
+  ) {
+    throw new Error("node interaction did not exercise the production fixture");
+  }
+  return [feeAgeMeasurement, filterMeasurement];
+};
+
+const measureComparisonPackedStoreInteraction = async (
+  page: Page,
+): Promise<MeasuredInteraction[]> => {
+  const root = page.locator("#comparison-distributions");
+  await expect(root).toBeVisible();
+  await expect(root).toHaveAttribute("aria-busy", "false");
+  const handler = await measureClickHandler(page, "#dist-scope-common");
+  await expect(page.locator("#dist-scope-common")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(root).toHaveAttribute("aria-busy", "false", {
+    timeout: 180_000,
+  });
+  await expect(page.locator("#dist-comp-left-title")).toContainText(
+    "present in both",
+  );
+  const settledAtMs = await settleFrames(page);
+  return [
+    measuredInteraction(
+      "comparison-distribution-scope-switch",
+      handler,
+      settledAtMs,
+      {
+        selected_scope: "common",
+        left_model_committed: true,
+        right_model_committed: true,
+      },
+    ),
+  ];
+};
+
 const measureBip110RuleNavigation = async (
   page: Page,
 ): Promise<Bip110RuleNavigationMeasurement> => {
@@ -1483,6 +1647,10 @@ const runScenario = async (
   await client.send("HeapProfiler.collectGarbage");
   const completeHeap = await client.send("Runtime.getHeapUsage");
   const completeMemory = await measureMemory(page);
+  const measuredInteractions =
+    scenario === "node"
+      ? await measureNodePackedStoreInteractions(page)
+      : await measureComparisonPackedStoreInteraction(page);
   const bip110RuleNavigation =
     scenario === "node" ? await measureBip110RuleNavigation(page) : null;
   await settleFrames(page);
@@ -1514,6 +1682,9 @@ const runScenario = async (
       end_time_ms: preInstrumentationEnd,
     },
     ...replacement.responsivenessIntervals,
+    ...measuredInteractions.map(
+      ({ responsiveness_interval: interval }) => interval,
+    ),
     ...(bip110RuleNavigation === null
       ? []
       : [bip110RuleNavigation.responsivenessInterval]),
@@ -1536,6 +1707,14 @@ const runScenario = async (
   const maximumFrameCallbackMs = Math.max(
     0,
     ...responsivenessFrames.map((callback) => callback.duration_ms),
+  );
+  const maximumInteractionHandlerMs = Math.max(
+    ...measuredInteractions.map(
+      ({ handler_duration_ms }) => handler_duration_ms,
+    ),
+  );
+  const maximumInteractionSettleMs = Math.max(
+    ...measuredInteractions.map(({ settle_duration_ms }) => settle_duration_ms),
   );
   const gate = GATES[scenario];
   const result = {
@@ -1598,6 +1777,9 @@ const runScenario = async (
     animation_frame_callbacks: browserMetrics.animation_frame_callbacks,
     responsiveness_animation_frame_callbacks: responsivenessFrames,
     maximum_animation_frame_callback_ms: maximumFrameCallbackMs,
+    measured_interactions: measuredInteractions,
+    maximum_interaction_handler_ms: maximumInteractionHandlerMs,
+    maximum_interaction_settle_ms: maximumInteractionSettleMs,
     readiness_contract: {
       complete_models_committed: true,
       deferred_density_raster_excluded: true,
@@ -1712,6 +1894,12 @@ const runScenario = async (
     manifests.reduce((total, manifest) => total + manifest.stages.length, 0),
   );
   expect(result.maximum_responsiveness_long_task_ms).toBeLessThanOrEqual(200);
+  expect(result.maximum_interaction_handler_ms).toBeLessThanOrEqual(
+    INTERACTION_HANDLER_GATE_MS,
+  );
+  expect(result.maximum_interaction_settle_ms).toBeLessThanOrEqual(
+    INTERACTION_SETTLE_GATE_MS,
+  );
   if (bip110RuleNavigation !== null) {
     expect(bip110RuleNavigation.ruleIds).toHaveLength(7);
     expect(new Set(bip110RuleNavigation.ruleIds).size).toBe(7);

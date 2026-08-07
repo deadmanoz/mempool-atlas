@@ -257,35 +257,32 @@ detail when the publication is non-empty, and conditional `304` behavior.
 Rate-limit actions and direct-origin
 isolation require separate staging and firewall checks.
 
-## Release switch
+## Release deployment
 
 The application package exposes `/api/v2` as its single public API contract.
+The edge configuration must contain no Atlas route, redirect, transform, cache
+rule, or rate-limit arm for any other API version.
 
 1. Add a temporary fail-closed edge rule for the Atlas hostname while the
    release is switched.
-2. Delete every old `/api/v1` Cache Rule, cache exception, transform, and rate
-   limit path arm while the temporary block remains active. Do not retain a
-   compatibility route or proxy.
-3. Preflight the v2 manifest/stage cache rules, no-stale behavior, CSP worker
+2. Preflight the v2 manifest/stage cache rules, no-stale behavior, CSP worker
    allowance, method rule, WAF policy, and rate limits. Keep the temporary block
    active.
-4. Switch the single pinned Nix package containing the matching server and
+3. Switch the single pinned Nix package containing the matching server and
    browser.
-5. Verify loopback discovery, manifest, every declared stage, detail, and
+4. Verify loopback discovery, manifest, every declared stage, detail, and
    validators. Then remove the temporary edge block.
-6. Run `just smoke-public`, ten cold sequential node loads, five cold concurrent
+5. Run `just smoke-public`, ten cold sequential node loads, five cold concurrent
    node loads, and the worst-case comparison load through the public hostname.
 
 The edge and Nix control planes cannot change atomically. The temporary block
 makes the gap fail closed instead of serving mixed generations.
 
 Rollback is limited to another reviewed v2 revision with the same edge
-contract. There is no rollback to v1, and no v1 route, adapter, or Cache Rule
-should remain after this cutover. First restore the temporary edge block.
-Switch the fleet lock, restore the matching Cloudflare cache and security
-rules, purge the `atlas.example.com/api/v2` prefix, and only then remove the
-block and run the smoke test. A Nix rollback does not revert Cloudflare state
-by itself.
+contract. First restore the temporary edge block. Switch the fleet lock,
+restore the matching Cloudflare cache and security rules, purge the
+`atlas.example.com/api/v2` prefix, and only then remove the block and run the
+smoke test. A Nix rollback does not revert Cloudflare state by itself.
 
 ## Failure and rollback checks
 

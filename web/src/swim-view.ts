@@ -1,3 +1,8 @@
+import {
+  type CooperativeWorkOptions,
+  forEachCooperatively,
+  yieldCooperatively,
+} from "./cooperative-work";
 import type { MempoolTransaction } from "./types";
 
 const MINUTE_MS = 60_000;
@@ -252,6 +257,93 @@ export const createSwimLayout = (
   };
 };
 
+export const createSwimLayoutCooperatively = async (
+  transactions: readonly MempoolTransaction[],
+  width: number,
+  height: number,
+  observedAtMs: number,
+  options: CooperativeWorkOptions = {},
+): Promise<SwimLayout> => {
+  const geometry = createGeometry(width, height);
+  const batches: SwimGlyphBatch[] = AGE_COLUMNS.map((column) => ({
+    color: column.color,
+    glyphs: [],
+  }));
+  const feeLaneCounts = Array<number>(FEE_RATE_LANES.length).fill(0);
+  const ageColumnCounts = Array<number>(AGE_COLUMNS.length).fill(0);
+  let totalVsize = 0;
+  let maximumVsize = 0;
+  await forEachCooperatively(
+    transactions,
+    (transaction) => {
+      totalVsize += transaction.vsize;
+      maximumVsize = Math.max(maximumVsize, transaction.vsize);
+    },
+    options,
+  );
+  const coveragePixelsPerVbyte =
+    totalVsize === 0
+      ? 0
+      : (geometry.plotWidth * geometry.plotHeight * TARGET_GLYPH_COVERAGE) /
+        totalVsize;
+  const maximumPixelsPerVbyte =
+    maximumVsize === 0 ? 0 : (MAX_GLYPH_SIZE * MAX_GLYPH_SIZE) / maximumVsize;
+  const pixelsPerVbyte = Math.min(
+    coveragePixelsPerVbyte,
+    maximumPixelsPerVbyte,
+  );
+
+  await forEachCooperatively(
+    transactions,
+    (transaction) => {
+      const feeRate = transaction.fee_sats / transaction.vsize;
+      const feeLane = feeRateLaneIndex(feeRate);
+      const ageColumn = ageColumnIndex(
+        observedAtMs - transaction.entered_at_ms,
+      );
+      const calculatedSize = Math.sqrt(transaction.vsize * pixelsPerVbyte);
+      const size = Math.min(
+        MAX_GLYPH_SIZE,
+        geometry.columnWidth,
+        geometry.laneHeight,
+        Math.max(MIN_GLYPH_SIZE, calculatedSize),
+      );
+      const position = glyphPosition(
+        transaction.txid,
+        geometry.plotLeft + ageColumn * geometry.columnWidth,
+        geometry.plotTop + feeLane * geometry.laneHeight,
+        geometry.columnWidth,
+        geometry.laneHeight,
+        size,
+      );
+      const batch = batches[ageColumn];
+      if (batch === undefined) {
+        throw new Error(`Missing glyph batch for age column ${ageColumn}`);
+      }
+      batch.glyphs.push({
+        ...position,
+        size,
+        feeLaneIndex: feeLane,
+        ageColumnIndex: ageColumn,
+      });
+      feeLaneCounts[feeLane] = (feeLaneCounts[feeLane] ?? 0) + 1;
+      ageColumnCounts[ageColumn] = (ageColumnCounts[ageColumn] ?? 0) + 1;
+    },
+    options,
+  );
+
+  return {
+    geometry,
+    batches,
+    summary: {
+      transactionCount: transactions.length,
+      totalVsize,
+      feeLaneCounts,
+      ageColumnCounts,
+    },
+  };
+};
+
 export const paintMembershipGlyphs = (
   context: GlyphPaintContext,
   layout: SwimLayout,
@@ -260,6 +352,24 @@ export const paintMembershipGlyphs = (
     context.fillStyle = batch.color;
     for (const glyph of batch.glyphs) {
       context.fillRect(glyph.x, glyph.y, glyph.size, glyph.size);
+    }
+  }
+};
+
+export const paintMembershipGlyphsCooperatively = async (
+  context: GlyphPaintContext,
+  layout: SwimLayout,
+  options: CooperativeWorkOptions = {},
+): Promise<void> => {
+  for (const [index, batch] of layout.batches.entries()) {
+    context.fillStyle = batch.color;
+    await forEachCooperatively(
+      batch.glyphs,
+      (glyph) => context.fillRect(glyph.x, glyph.y, glyph.size, glyph.size),
+      options,
+    );
+    if (index + 1 < layout.batches.length) {
+      await yieldCooperatively(options);
     }
   }
 };
@@ -341,5 +451,40 @@ export const renderSwimView = (
   const layout = createSwimLayout(transactions, width, height, observedAtMs);
   paintGrid(context, layout);
   paintMembershipGlyphs(context, layout);
+  return layout.summary;
+};
+
+export const renderSwimViewCooperatively = async (
+  canvas: HTMLCanvasElement,
+  transactions: readonly MempoolTransaction[],
+  observedAtMs: number,
+  options: CooperativeWorkOptions = {},
+): Promise<SwimSummary> => {
+  const bounds = canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.round(bounds.width));
+  const height = Math.max(1, Math.round(bounds.height));
+  const pixelRatio = Math.min(window.devicePixelRatio, 2);
+  const backingWidth = Math.round(width * pixelRatio);
+  const backingHeight = Math.round(height * pixelRatio);
+  if (canvas.width !== backingWidth || canvas.height !== backingHeight) {
+    canvas.width = backingWidth;
+    canvas.height = backingHeight;
+  }
+
+  const context = canvas.getContext("2d");
+  if (context === null) {
+    throw new Error("Canvas 2D rendering is unavailable");
+  }
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  const layout = await createSwimLayoutCooperatively(
+    transactions,
+    width,
+    height,
+    observedAtMs,
+    options,
+  );
+  options.signal?.throwIfAborted();
+  paintGrid(context, layout);
+  await paintMembershipGlyphsCooperatively(context, layout, options);
   return layout.summary;
 };

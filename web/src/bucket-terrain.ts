@@ -137,6 +137,7 @@ const REGION_GAP = 3;
 const REGION_LABEL_HEIGHT = 36;
 const GLYPH_GAP = 0.32;
 const MIN_CONTENT_EXTENT = 0.5;
+const MAX_RASTER_PIXELS = 4_194_304;
 
 interface BucketTerrainRasterCache {
   styleKey: string;
@@ -594,8 +595,14 @@ const createBucketTerrainRasterCache = <
   ) {
     return null;
   }
-  const pixelWidth = context.canvas.width;
-  const pixelHeight = context.canvas.height;
+  const canvasPixelWidth = context.canvas.width;
+  const canvasPixelHeight = context.canvas.height;
+  const rasterScale = Math.min(
+    1,
+    Math.sqrt(MAX_RASTER_PIXELS / (canvasPixelWidth * canvasPixelHeight)),
+  );
+  const pixelWidth = Math.max(1, Math.floor(canvasPixelWidth * rasterScale));
+  const pixelHeight = Math.max(1, Math.floor(canvasPixelHeight * rasterScale));
   const cached = rasterCacheByLayout.get(layout);
   if (
     cached !== undefined &&

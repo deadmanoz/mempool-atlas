@@ -282,14 +282,16 @@ and partial violation signatures remain separate, marginal rule counts may
 overlap, and filter samples retain at most twelve deterministic entries.
 Repeated filter selections reuse the aggregate and bounded sample. Mirrored
 source-local distribution panels render each side's complete snapshot on
-shared fixed axes
-using the same browser-derived builders as the node viewer across all nine
-questions; the two populations are summarized independently and never merged.
+shared fixed axes using the same browser-derived builders as the node viewer
+across all nine questions; the two populations are summarized independently
+and never merged.
 A population scope selector restricts every mirrored panel to the whole
 snapshot, the transactions present in both snapshots, or the transactions
 observed in only one source, using the same merge-join regions as the
-membership canvas; a side with no members in the selected population says so
-rather than showing an empty chart as data.
+membership canvas. Each complete comparison candidate prepares the common
+scope and adopts only its aggregate arrays into the candidate-owned cache; the
+smaller source-only scopes remain lazy. A side with no members in the selected
+population says so rather than showing an empty chart as data.
 
 The membership regions and primary comparison workspace precede the secondary
 distribution and policy panels in document order. Stable source-card,

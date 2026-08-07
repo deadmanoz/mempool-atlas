@@ -1,5 +1,16 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
+
+import {
+  interactionLabelsForScenario,
+  validateInteractionEvidence,
+} from "./interaction-evidence.mjs";
 
 const WEB_ROOT = resolve(import.meta.dirname, "..");
 const RESULT_ROOT = join(WEB_ROOT, ".perf-results");
@@ -9,6 +20,8 @@ const PINNED_THROUGHPUT_BYTES_PER_SECOND = 159_461.45607954692;
 const RELEASE_GATES = Object.freeze({
   metadata_usable_ms: 5_000,
   maximum_responsiveness_long_task_ms: 200,
+  interaction_handler_ms: 200,
+  interaction_settle_ms: 5_000,
   bip110_rule_navigation_handler_ms: 200,
   maximum_animation_frame_callback_ms: Object.freeze({
     desktop: 8,
@@ -41,7 +54,7 @@ const RELEASE_GATES = Object.freeze({
   }),
 });
 
-const files = readdirSync(RAW_ROOT)
+const files = (existsSync(RAW_ROOT) ? readdirSync(RAW_ROOT) : [])
   .filter((file) => file.endsWith(".json"))
   .sort();
 if (files.length === 0) {
@@ -337,19 +350,16 @@ const stableLoadSummaries = stableLoads.map((result) => {
     result.responsiveness_intervals,
     `${label}.responsiveness_intervals`,
   );
-  const expectedIntervalLabels =
-    result.scenario === "node"
-      ? [
-          "post-metadata-pre-instrumentation",
-          "replacement-prepare",
-          "replacement-commit",
-          "bip110-rule-navigation",
-        ]
-      : [
-          "post-metadata-pre-instrumentation",
-          "replacement-prepare",
-          "replacement-commit",
-        ];
+  const expectedInteractionLabels = interactionLabelsForScenario(
+    result.scenario,
+  );
+  const expectedIntervalLabels = [
+    "post-metadata-pre-instrumentation",
+    "replacement-prepare",
+    "replacement-commit",
+    ...expectedInteractionLabels,
+    ...(result.scenario === "node" ? ["bip110-rule-navigation"] : []),
+  ];
   if (
     responsivenessIntervals.length !== expectedIntervalLabels.length ||
     responsivenessIntervals.some(
@@ -379,6 +389,7 @@ const stableLoadSummaries = stableLoads.map((result) => {
       throw new Error(`${label}.responsiveness_intervals overlap`);
     }
   });
+  validateInteractionEvidence(result, responsivenessIntervals, label);
   if (result.scenario === "node") {
     const measurement = result.bip110_rule_navigation;
     if (typeof measurement !== "object" || measurement === null) {
@@ -434,7 +445,9 @@ const stableLoadSummaries = stableLoads.map((result) => {
       );
     }
     const measuredInterval = measurement.responsivenessInterval;
-    const recordedInterval = responsivenessIntervals[3];
+    const recordedInterval = responsivenessIntervals.find(
+      (interval) => interval.label === "bip110-rule-navigation",
+    );
     if (
       typeof measuredInterval !== "object" ||
       measuredInterval === null ||
@@ -618,6 +631,12 @@ const stableLoadSummaries = stableLoads.map((result) => {
     long_task:
       result.maximum_responsiveness_long_task_ms <=
       RELEASE_GATES.maximum_responsiveness_long_task_ms,
+    interaction_handler:
+      result.maximum_interaction_handler_ms <=
+      RELEASE_GATES.interaction_handler_ms,
+    interaction_settle:
+      result.maximum_interaction_settle_ms <=
+      RELEASE_GATES.interaction_settle_ms,
     frame_callback:
       result.maximum_animation_frame_callback_ms <=
       RELEASE_GATES.maximum_animation_frame_callback_ms[result.profile],
@@ -684,6 +703,9 @@ const stableLoadSummaries = stableLoads.map((result) => {
         result.maximum_responsiveness_long_task_ms,
       maximum_animation_frame_callback_ms:
         result.maximum_animation_frame_callback_ms,
+      measured_interactions: result.measured_interactions,
+      maximum_interaction_handler_ms: result.maximum_interaction_handler_ms,
+      maximum_interaction_settle_ms: result.maximum_interaction_settle_ms,
       cls: result.cls,
     },
     readiness_contract: result.readiness_contract,
