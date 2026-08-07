@@ -38,6 +38,7 @@ pub(super) struct CurrentStatePublisher {
 #[derive(Debug, Default)]
 struct CurrentState {
     last_poll_started_at_ms: Option<u64>,
+    poll_start_publication_failed: bool,
     membership: Option<Arc<MempoolSnapshot>>,
     latest: Option<Arc<MempoolSnapshot>>,
     classifications: TransactionClassifications,
@@ -140,7 +141,9 @@ impl CurrentStatePublisher {
                 retained_manifest,
             ) = {
                 let state = self.state.read().await;
-                if state.last_poll_started_at_ms == Some(started_at_ms) {
+                if state.last_poll_started_at_ms == Some(started_at_ms)
+                    && !state.poll_start_publication_failed
+                {
                     return Ok(());
                 }
                 let source = summary_from_parts(
@@ -161,10 +164,25 @@ impl CurrentStatePublisher {
                         .map(|publication| publication.manifest_value.clone()),
                 )
             };
-            let replacement = retained_manifest
-                .as_ref()
-                .map(|manifest| self.reencode_poll_start_manifest(manifest, &source))
-                .transpose()?;
+            let replacement = if let Some(manifest) = retained_manifest.as_ref() {
+                match self.reencode_poll_start_manifest(manifest, &source) {
+                    Ok(replacement) => Some(replacement),
+                    Err(error) => {
+                        let mut state = self.state.write().await;
+                        if state.status_revision != status_revision
+                            || state.classification_generation != classification_generation
+                            || state.classification_revision != classification_revision
+                        {
+                            continue;
+                        }
+                        state.poll_start_publication_failed = true;
+                        state.status_revision = state.status_revision.wrapping_add(1);
+                        return Err(error.into());
+                    }
+                }
+            } else {
+                None
+            };
             #[cfg(test)]
             if replacement.is_some() {
                 self.wait_on_next_manifest_replacement_preparation().await;
@@ -180,6 +198,7 @@ impl CurrentStatePublisher {
                 replace_manifest(&mut state, manifest)?;
             }
             state.last_poll_started_at_ms = Some(started_at_ms);
+            state.poll_start_publication_failed = false;
             state.status_revision = state.status_revision.wrapping_add(1);
             return Ok(());
         }
@@ -300,7 +319,11 @@ impl CurrentStatePublisher {
                 (
                     state.status_revision,
                     state.classification_generation,
-                    state.last_poll_started_at_ms,
+                    if state.poll_start_publication_failed {
+                        None
+                    } else {
+                        state.last_poll_started_at_ms
+                    },
                 )
             };
             if current_generation.is_some_and(|current| current >= generation) {
@@ -334,6 +357,8 @@ impl CurrentStatePublisher {
             state.latest = Some(Arc::clone(&prepared.latest));
             state.classifications = prepared.classifications;
             debug_assert!(state.classifications.len() <= membership.transactions.len());
+            state.last_poll_started_at_ms = last_poll_started_at_ms;
+            state.poll_start_publication_failed = false;
             state.last_error = None;
             state.classification_generation = Some(generation);
             state.classification_revision = revision;

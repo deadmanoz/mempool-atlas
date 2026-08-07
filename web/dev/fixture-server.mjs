@@ -5,6 +5,7 @@ import { readFileSync, writeSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const MANIFEST_VERSION = 2;
 const FIXTURE_ERROR =
@@ -15,6 +16,26 @@ const MANIFEST_PATH = join(FIXTURE_DIRECTORY, "manifest.json");
 const CONTENT_ID = /^[0-9a-f]{64}$/;
 const CLASSIFIER_ID = /^[a-z][a-z0-9_]*$/;
 const SNAPSHOT_STAGE_KINDS = new Set(["population", "membership", "structure"]);
+const FIXTURE_PORT_TEXT = process.env.ATLAS_FIXTURE_PORT ?? "3101";
+const EMULATE_CLOUDFLARE_HEADERS =
+  process.env.ATLAS_FIXTURE_CLOUDFLARE_HEADERS === "1";
+const FIXTURE_DETAIL_STATUS_TEXT =
+  process.env.ATLAS_FIXTURE_DETAIL_STATUS ?? "200";
+
+if (!/^(0|[1-9][0-9]{0,4})$/.test(FIXTURE_PORT_TEXT)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_PORT\n");
+  process.exit(2);
+}
+const FIXTURE_PORT = Number(FIXTURE_PORT_TEXT);
+if (FIXTURE_PORT > 65535) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_PORT\n");
+  process.exit(2);
+}
+if (!/^(200|404|503)$/.test(FIXTURE_DETAIL_STATUS_TEXT)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_DETAIL_STATUS\n");
+  process.exit(2);
+}
+const FIXTURE_DETAIL_STATUS = Number(FIXTURE_DETAIL_STATUS_TEXT);
 
 const failFixtureLoad = () => {
   writeSync(process.stderr.fd, `${FIXTURE_ERROR}\n`);
@@ -65,6 +86,7 @@ const loadBody = (descriptor, cacheable) => {
     return Object.freeze({
       bytes,
       cacheable,
+      gzipBytes: gzipSync(bytes),
       contentId: descriptor.content_id,
       contentType: descriptor.content_type,
     });
@@ -200,12 +222,30 @@ const errorBodies = Object.freeze({
   ),
   superseded: Buffer.from('{"error":"stage is not current"}'),
 });
+const transactionDetailPath =
+  /^\/api\/v2\/sources\/[^/]+\/transactions\/([0-9a-f]{64})$/;
 
-const send = (request, response, status, bytes, headers = {}) => {
+const cloudflareHeaders = (cacheStatus) =>
+  EMULATE_CLOUDFLARE_HEADERS
+    ? {
+        "cf-cache-status": cacheStatus,
+        "cf-ray": "fixture-ray",
+      }
+    : {};
+
+const send = (
+  request,
+  response,
+  status,
+  bytes,
+  headers = {},
+  cacheStatus = "BYPASS",
+) => {
   response.writeHead(status, {
     "cache-control": "no-store",
     "content-length": String(bytes.byteLength),
     "content-type": "application/json",
+    ...cloudflareHeaders(cacheStatus),
     ...headers,
   });
   response.end(request.method === "HEAD" ? undefined : bytes);
@@ -224,8 +264,9 @@ const server = createServer((request, response) => {
     );
     return;
   }
-  const url = new URL(request.url ?? "/", "http://127.0.0.1");
-  if (url.search.length > 0) {
+  const requestTarget = request.url ?? "/";
+  const url = new URL(requestTarget, "http://127.0.0.1");
+  if (requestTarget.includes("?")) {
     send(request, response, 400, errorBodies.queryNotSupported);
     return;
   }
@@ -244,6 +285,21 @@ const server = createServer((request, response) => {
     );
     return;
   }
+  const detailMatch = url.pathname.match(transactionDetailPath);
+  if (detailMatch !== null && FIXTURE_DETAIL_STATUS !== 200) {
+    const txid = detailMatch[1];
+    const detailError =
+      FIXTURE_DETAIL_STATUS === 404
+        ? `transaction "${txid}" is not in the current snapshot`
+        : `transaction "${txid}" is present but has no policy assessment in the current snapshot`;
+    send(
+      request,
+      response,
+      FIXTURE_DETAIL_STATUS,
+      Buffer.from(JSON.stringify({ error: detailError })),
+    );
+    return;
+  }
 
   const bytes = body.bytes;
   const etag = `W/"${body.contentId}"`;
@@ -257,16 +313,36 @@ const server = createServer((request, response) => {
     ...(body.cacheable ? { etag } : {}),
   };
   if (body.cacheable && request.headers["if-none-match"] === etag) {
-    response.writeHead(304, headers);
+    response.writeHead(304, {
+      ...cloudflareHeaders("REVALIDATED"),
+      ...headers,
+    });
     response.end();
     return;
   }
-  send(request, response, 200, bytes, headers);
+  const acceptsGzip = /(?:^|,)\s*gzip(?:\s*;|\s*,|\s*$)/i.test(
+    request.headers["accept-encoding"] ?? "",
+  );
+  send(
+    request,
+    response,
+    200,
+    acceptsGzip ? body.gzipBytes : bytes,
+    {
+      ...headers,
+      ...(acceptsGzip ? { "content-encoding": "gzip" } : {}),
+    },
+    body.cacheable ? "MISS" : "BYPASS",
+  );
 });
 
-server.listen(3101, "127.0.0.1", () => {
+server.listen(FIXTURE_PORT, "127.0.0.1", () => {
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("fixture server did not bind a TCP address");
+  }
   console.log(
-    `fixture atlas v2 api on 127.0.0.1:3101 (${manifest.generated_at_ms})`,
+    `fixture atlas v2 api on 127.0.0.1:${address.port} (${manifest.generated_at_ms})`,
   );
   for (const snapshot of manifest.snapshots) {
     console.log(

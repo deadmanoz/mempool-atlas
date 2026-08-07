@@ -19,6 +19,7 @@ build-web:
 test:
     just test-release
     just test-smoke-public-stages
+    just test-smoke-public-fixture
     just test-rust
     just test-web
 
@@ -27,6 +28,9 @@ test-release:
 
 test-smoke-public-stages:
     ./scripts/test-smoke-public-stages.sh
+
+test-smoke-public-fixture: functional-fixtures
+    ./scripts/test-smoke-public-fixture.sh
 
 test-rust:
     cargo test --features perf-fixtures

@@ -11,6 +11,7 @@ fn retained_membership_validation_preserves_structural_invariants() {
         validate_reused_membership(
             &wrong_population_kind,
             &first.membership,
+            &snapshot,
             snapshot.transaction_count,
         )
         .is_err()
@@ -22,6 +23,7 @@ fn retained_membership_validation_preserves_structural_invariants() {
         validate_reused_membership(
             &wrong_population_length,
             &first.membership,
+            &snapshot,
             snapshot.transaction_count,
         )
         .is_err()
@@ -33,6 +35,7 @@ fn retained_membership_validation_preserves_structural_invariants() {
         validate_reused_membership(
             &first.population,
             &wrong_membership_dependency,
+            &snapshot,
             snapshot.transaction_count,
         )
         .is_err()
@@ -42,6 +45,7 @@ fn retained_membership_validation_preserves_structural_invariants() {
         validate_reused_membership(
             &first.population,
             &first.membership,
+            &snapshot,
             snapshot.transaction_count + 1,
         )
         .is_err()
@@ -53,15 +57,39 @@ fn retained_membership_validation_preserves_structural_invariants() {
 fn retained_membership_validation_checks_digests_in_debug_builds() {
     let (source, snapshot) = fixture();
     let first = encode_staged_snapshot(&source, &snapshot).expect("first encoding");
-    let mut corrupted = first.population.clone();
+    let mut corrupted = first.membership.clone();
     let mut corrupted_bytes = corrupted.bytes.to_vec();
     corrupted_bytes[0] ^= 1;
     corrupted.bytes = Bytes::from(corrupted_bytes);
 
     assert!(
-        validate_reused_membership(&corrupted, &first.membership, snapshot.transaction_count,)
-            .is_err()
+        validate_reused_membership(
+            &first.population,
+            &corrupted,
+            &snapshot,
+            snapshot.transaction_count,
+        )
+        .is_err()
     );
+}
+
+#[test]
+fn retained_membership_rejects_a_different_same_sized_txid_population() {
+    let (source, snapshot) = fixture();
+    let first = encode_staged_snapshot(&source, &snapshot).expect("first encoding");
+    let mut different_snapshot = snapshot.clone();
+    different_snapshot.transactions[0].txid = hash(0);
+
+    let error = encode_staged_snapshot_with_limits(
+        &source,
+        &different_snapshot,
+        Some((first.population, first.membership)),
+        StagedSnapshotLimits::default(),
+    )
+    .expect_err("retained population must match the snapshot txids");
+
+    assert!(matches!(error, StagedSnapshotError::Invalid(message) if
+        message == "retained population stage does not match snapshot txids"));
 }
 
 #[test]

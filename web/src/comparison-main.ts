@@ -47,6 +47,7 @@ import {
   type ComparisonPolicyView,
 } from "./comparison-policy-view";
 import { prepareComparisonCommitCandidate } from "./comparison-publication-candidate";
+import { requirePublicationCommitRetry } from "./publication-commit-budget";
 import {
   comparisonRegionEntries,
   policySideForRegion,
@@ -1362,9 +1363,11 @@ const renderComparison = async (
     : `${formatTxidCount(current.totals.union_count)} transaction IDs are ready for membership-region and policy exploration. Witness variants, fee distributions, and transaction details are still loading.`;
   renderTransactionNavigator();
   renderInspector();
+  let completedCanvasAttempts = 0;
   while (comparison === current) {
     const renderedRegion = selectedRegion;
     const canvasStatus = await scheduleCanvasRender();
+    completedCanvasAttempts += 1;
     if (
       canvasStatus === "rendered" &&
       comparison === current &&
@@ -1372,6 +1375,7 @@ const renderComparison = async (
     ) {
       break;
     }
+    requirePublicationCommitRetry("Comparison", completedCanvasAttempts);
   }
   if (comparison !== current) return;
 

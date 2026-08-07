@@ -137,7 +137,9 @@ For the manifest and stage rules:
 3. Respect the origin `Cache-Control` and `ETag` headers.
 4. Match only an empty query string. Requests with a non-empty query string
    must bypass the edge cache and reach Atlas, which rejects them as
-   non-cacheable `400` responses.
+   non-cacheable `400` responses. A bare trailing `?` can still satisfy an
+   edge empty-query match and be forwarded, but Atlas rejects that request as
+   a non-cacheable `400` too.
 5. Do not enable stale serving for the API. Atlas already publishes explicit
    source failure and staleness state.
 

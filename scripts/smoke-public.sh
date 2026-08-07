@@ -9,8 +9,17 @@ fi
 # shellcheck source=lib/v2-manifest-stages.sh
 source "$script_dir/lib/v2-manifest-stages.sh"
 
+# Test-only mode permits loopback HTTP and makes the Cloudflare header pair
+# optional. Every origin response, payload, validator, and cache-policy check
+# below remains active.
+local_fixture=0
+if [[ ${1:-} == --local-fixture ]]; then
+    local_fixture=1
+    shift
+fi
+
 if (( $# != 2 )); then
-    printf 'usage: %s https://atlas.example.com SOURCE_ID\n' "$0" >&2
+    printf 'usage: %s [--local-fixture] https://atlas.example.com SOURCE_ID\n' "$0" >&2
     exit 2
 fi
 
@@ -22,13 +31,20 @@ for required_tool in awk cp curl grep head jq mktemp openssl rm xxd; do
         exit 2
     }
 done
-case "$base_url" in
-    https://*) ;;
-    *)
-        printf 'public smoke tests require an https:// URL\n' >&2
+if (( local_fixture )); then
+    if [[ ! "$base_url" =~ ^https?://(127\.0\.0\.1|localhost)(:[0-9]+)?$ ]]; then
+        printf 'local fixture smoke tests require a loopback URL\n' >&2
         exit 2
-        ;;
-esac
+    fi
+else
+    case "$base_url" in
+        https://*) ;;
+        *)
+            printf 'public smoke tests require an https:// URL\n' >&2
+            exit 2
+            ;;
+    esac
+fi
 
 temp_dir=$(mktemp -d)
 cleanup() {
@@ -75,6 +91,11 @@ require_cloudflare_cache_bypass() {
     local path=$1
     local context=$2
     local cache_status
+    if (( local_fixture )) &&
+        [[ -z $(header_value cf-ray "$path") ]] &&
+        [[ -z $(header_value cf-cache-status "$path") ]]; then
+        return
+    fi
     require_header cf-ray "$path" >/dev/null
     cache_status=$(require_header cf-cache-status "$path")
     case "$cache_status" in
@@ -91,6 +112,11 @@ require_cloudflare_cache_handling() {
     local path=$1
     local context=$2
     local cache_status
+    if (( local_fixture )) &&
+        [[ -z $(header_value cf-ray "$path") ]] &&
+        [[ -z $(header_value cf-cache-status "$path") ]]; then
+        return
+    fi
     require_header cf-ray "$path" >/dev/null
     cache_status=$(require_header cf-cache-status "$path")
     case "$cache_status" in
@@ -171,6 +197,22 @@ query_status=$(curl --silent --show-error --max-time 30 \
     exit 1
 }
 require_cloudflare_cache_bypass "$temp_dir/query.headers" "manifest query rejection"
+
+bare_query_status=$(curl --silent --show-error --max-time 30 \
+    --dump-header "$temp_dir/bare-query.headers" \
+    --output "$temp_dir/bare-query.json" --write-out '%{http_code}' \
+    "$manifest_url?")
+[[ "$bare_query_status" == 400 ]] || {
+    printf 'bare manifest query probe returned %s instead of 400\n' \
+        "$bare_query_status" >&2
+    exit 1
+}
+[[ $(require_header cache-control "$temp_dir/bare-query.headers") == no-store ]] || {
+    printf 'bare manifest query rejection must remain non-cacheable\n' >&2
+    exit 1
+}
+require_cloudflare_cache_bypass \
+    "$temp_dir/bare-query.headers" "bare manifest query rejection"
 
 jq -e --arg source_id "$source_id" '
     .transaction_count as $rows |

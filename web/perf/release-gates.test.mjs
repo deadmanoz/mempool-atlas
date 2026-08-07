@@ -14,6 +14,15 @@ const performanceDoc = readFileSync(
   "utf8",
 );
 const formattedBytes = (value) => value.toLocaleString("en-US");
+const documentedReleaseGates = () => {
+  const match = performanceDoc.match(
+    /<!-- release-gates:start -->\s*```json\s*([\s\S]*?)\s*```\s*<!-- release-gates:end -->/,
+  );
+  if (!match) {
+    throw new Error("documented release gate inventory is missing");
+  }
+  return JSON.parse(match[1]);
+};
 
 describe("release gate source of truth", () => {
   it("drives the browser byte gates from the staged projection gates", () => {
@@ -31,7 +40,11 @@ describe("release gate source of truth", () => {
     );
   });
 
-  it("keeps the documented throughput and byte ceilings synchronized", () => {
+  it("keeps every documented executable release gate synchronized", () => {
+    expect(documentedReleaseGates()).toEqual(RELEASE_GATES);
+  });
+
+  it("keeps the documented throughput and projection ceilings synchronized", () => {
     expect(performanceDoc).toContain(
       `\`${PINNED_THROUGHPUT_BYTES_PER_SECOND}\` bytes per second`,
     );

@@ -86,6 +86,55 @@ run reports its measured feasibility but never loosens these ceilings.
 projection, browser, and merged-result ceilings; its unit test keeps the values
 below synchronized with that contract.
 
+The complete executable gate inventory is reproduced below. The unit test
+compares this JSON recursively with `RELEASE_GATES`, including explicit `null`
+values for gates that do not apply to a scenario.
+
+<!-- release-gates:start -->
+
+```json
+{
+  "metadata_usable_ms": 5000,
+  "maximum_responsiveness_long_task_ms": 200,
+  "interaction_handler_ms": 200,
+  "interaction_settle_ms": 5000,
+  "bip110_rule_navigation_handler_ms": 200,
+  "maximum_animation_frame_callback_ms": {
+    "desktop": 8,
+    "mobile-slow-4g": 16
+  },
+  "cls": 0.1,
+  "node": {
+    "primary_interaction_ms": 30000,
+    "complete_feature_ready_ms": 52000,
+    "primary_transfer_budget_ms": 20000,
+    "complete_transfer_budget_ms": 38000,
+    "primary_encoded_body_bytes": 3189229,
+    "complete_encoded_body_bytes": 6059535,
+    "page_heap_bytes": 40000000,
+    "cross_context_bytes": 62914560,
+    "replacement_retained_bytes": 94371840,
+    "bip110_page_heap_bytes": 90000000,
+    "bip110_cross_context_bytes": 125829120
+  },
+  "comparison": {
+    "primary_interaction_ms": 50000,
+    "complete_feature_ready_ms": 94000,
+    "primary_transfer_budget_ms": 36000,
+    "complete_transfer_budget_ms": 76000,
+    "primary_encoded_body_bytes": 5740612,
+    "complete_encoded_body_bytes": 12119070,
+    "page_heap_bytes": 60000000,
+    "cross_context_bytes": 104857600,
+    "replacement_retained_bytes": 157286400,
+    "bip110_page_heap_bytes": null,
+    "bip110_cross_context_bytes": null
+  }
+}
+```
+
+<!-- release-gates:end -->
+
 | Milestone                         | Wall-clock gate | Compressed-byte ceiling |
 | --------------------------------- | --------------: | ----------------------: |
 | Node primary interactive          |      30 seconds |         3,189,229 bytes |

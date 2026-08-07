@@ -9,13 +9,13 @@
 //! the least-significant bit first within each byte.
 
 use std::collections::{BTreeSet, HashMap};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bitcoin::hashes::{Hash, sha256};
 use bytes::Bytes;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::model::{
@@ -173,6 +173,11 @@ struct PopulationBody {
     vsize: UnsignedColumn,
 }
 
+#[derive(Deserialize)]
+struct RetainedPopulationIdentity<'a> {
+    txids_base64: &'a str,
+}
+
 #[derive(Serialize)]
 struct MembershipBody {
     schema_version: u64,
@@ -268,7 +273,7 @@ pub(crate) fn encode_staged_snapshot_with_limits(
 
     let (population_stage, membership_stage) =
         if let Some((population, membership)) = reused_membership {
-            validate_reused_membership(&population, &membership, row_count)?;
+            validate_reused_membership(&population, &membership, snapshot, row_count)?;
             budget.charge("population stage", population.bytes.len())?;
             budget.charge("membership stage", membership.bytes.len())?;
             (population, membership)
@@ -460,6 +465,7 @@ pub(crate) fn reencode_manifest_for_source_with_limits(
 fn validate_reused_membership(
     population: &EncodedStage,
     membership: &EncodedStage,
+    snapshot: &MempoolSnapshot,
     row_count: u64,
 ) -> Result<(), StagedSnapshotError> {
     if population.descriptor.kind != StageKind::Population
@@ -481,6 +487,7 @@ fn validate_reused_membership(
     {
         return Err(invalid("retained membership stage is inconsistent"));
     }
+    validate_reused_population_txids(population, snapshot)?;
     #[cfg(debug_assertions)]
     {
         if population.descriptor.content_id != Digest::of(&population.bytes).hex {
@@ -489,6 +496,36 @@ fn validate_reused_membership(
         if membership.descriptor.content_id != Digest::of(&membership.bytes).hex {
             return Err(invalid("retained membership stage digest is inconsistent"));
         }
+    }
+    Ok(())
+}
+
+fn validate_reused_population_txids(
+    population: &EncodedStage,
+    snapshot: &MempoolSnapshot,
+) -> Result<(), StagedSnapshotError> {
+    let identity = serde_json::from_slice::<RetainedPopulationIdentity>(&population.bytes)
+        .map_err(|_| invalid("retained population stage txids are inconsistent"))?;
+    let mut decoded =
+        base64::read::DecoderReader::new(identity.txids_base64.as_bytes(), &BASE64_STANDARD);
+    let mut retained_txid = [0_u8; 32];
+    for transaction in &snapshot.transactions {
+        decoded
+            .read_exact(&mut retained_txid)
+            .map_err(|_| invalid("retained population stage txids are inconsistent"))?;
+        if retained_txid != parse_display_hash(&transaction.txid, "txid")? {
+            return Err(invalid(
+                "retained population stage does not match snapshot txids",
+            ));
+        }
+    }
+    let mut trailing = [0_u8; 1];
+    if decoded
+        .read(&mut trailing)
+        .map_err(|_| invalid("retained population stage txids are inconsistent"))?
+        != 0
+    {
+        return Err(invalid("retained population stage has excess txids"));
     }
     Ok(())
 }

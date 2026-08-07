@@ -704,6 +704,53 @@ async fn poll_start_publication_failure_does_not_hide_the_rpc_outcome() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn successful_poll_clears_a_start_time_left_by_poll_start_publication_failure() {
+    let probe = Arc::new(MembershipProbe::default());
+    let (address, server) = start_membership_fixture("core", Arc::clone(&probe), false).await;
+    let poll_interval = Duration::from_secs(60);
+    let runtime = Arc::new(
+        SourceRuntime::new("core".to_owned(), "Bitcoin Core".to_owned(), poll_interval)
+            .expect("source runtime"),
+    );
+    let url = format!("http://{address}/");
+    let source = AtlasSource::new(
+        Arc::clone(&runtime),
+        RpcClient::new(&url, "atlas", "secret", 100).expect("membership RPC client"),
+        ClassificationPipeline::new(
+            &url,
+            "atlas".to_owned(),
+            "secret".to_owned(),
+            ClassificationLimits::new(1, 1, 1024 * 1024).expect("classification limits"),
+        )
+        .expect("classification client"),
+    );
+    let atlas = AtlasRuntime::new(vec![source], poll_interval).expect("Atlas runtime");
+
+    atlas.poll_round(1).await;
+    assert!(runtime.summary().await.last_poll_started_at_ms.is_some());
+
+    runtime.limit_next_poll_start_reencoding(StagedSnapshotLimits {
+        max_stage_bytes: 1,
+        max_publication_bytes: 1,
+    });
+    atlas.poll_round(2).await;
+
+    let summary = runtime.summary().await;
+    assert_eq!(summary.availability, SourceAvailability::Ready);
+    assert_eq!(summary.last_poll_started_at_ms, None);
+    assert_eq!(summary.last_error, None);
+    let manifest = runtime
+        .current_manifest_payload()
+        .await
+        .expect("fresh manifest");
+    let manifest = serde_json::from_slice::<Value>(&manifest.body).expect("manifest JSON");
+    assert_eq!(manifest["source"]["last_poll_started_at_ms"], Value::Null);
+    assert_eq!(manifest["source"]["availability"], "ready");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn atlas_runtime_never_overlaps_source_classification_slices() {
     let core_transactions = [
         classification_transaction(700),
