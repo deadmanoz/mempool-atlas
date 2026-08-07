@@ -50,6 +50,7 @@ import { prepareComparisonCommitCandidate } from "./comparison-publication-candi
 import { requirePublicationCommitRetry } from "./publication-commit-budget";
 import {
   comparisonRegionEntries,
+  lookupComparisonTransaction,
   policySideForRegion,
   sourceEntry,
   type ComparedTransaction,
@@ -1875,14 +1876,12 @@ comparisonCanvas.addEventListener("click", (event) => {
     return;
   }
   if (hit?.kind === "transaction") {
-    const entry = comparisonRegionEntries(current, hit.glyph.regionKey).find(
-      ({ txid }) => txid === hit.glyph.txid,
-    );
-    if (entry !== undefined) {
+    const located = lookupComparisonTransaction(current, hit.glyph.txid);
+    if (located !== null && located.region === hit.glyph.regionKey) {
       transitionComparisonView({
         ...currentViewState(),
         region: hit.glyph.regionKey,
-        txid: entry.txid,
+        txid: located.entry.txid,
       });
     }
   }

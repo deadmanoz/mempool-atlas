@@ -17,6 +17,32 @@ import type {
 const HEX = "0123456789abcdef";
 const TXID = /^[0-9a-f]{64}$/;
 const ROW_CACHE_LIMIT = 256;
+const PRIMARY_MEMBERSHIP_FIELDS = [
+  "wtxid",
+  "weight",
+  "fee_sats",
+  "entered_at_ms",
+  "ancestor_count",
+  "ancestor_vsize",
+  "ancestor_fee_sats",
+  "descendant_count",
+  "descendant_vsize",
+  "replaceable",
+  "structure",
+] as const;
+
+const unavailablePrimaryMembership = (): never => {
+  throw new Error("Membership stage is still loading");
+};
+
+const primaryTransactionPrototype = Object.create(Object.prototype) as object;
+for (const field of PRIMARY_MEMBERSHIP_FIELDS) {
+  Object.defineProperty(primaryTransactionPrototype, field, {
+    configurable: false,
+    enumerable: false,
+    get: unavailablePrimaryMembership,
+  });
+}
 
 const isValidRow = (row: number, rowCount: number): boolean =>
   Number.isSafeInteger(row) && row >= 0 && row < rowCount;
@@ -406,7 +432,7 @@ export class PackedPrimaryPublicationStore {
       ({ transfer }) => transfer.classifierId === "knots_bip110",
     );
     const assessmentCode = policy?.assessmentCodes?.at(row) ?? 0;
-    const transaction = {
+    const view = Object.assign(Object.create(primaryTransactionPrototype), {
       txid: hashAt(this.txids, row),
       vsize: this.vsize.at(row),
       classifications: this.classifiers
@@ -417,34 +443,7 @@ export class PackedPrimaryPublicationStore {
           ? null
           : (policy?.transfer.assessmentDictionary?.[assessmentCode - 1] ??
             null),
-    } as Pick<
-      MempoolTransaction,
-      "txid" | "vsize" | "classifications" | "bip110"
-    > &
-      Partial<MempoolTransaction>;
-    const unavailable = (): never => {
-      throw new Error("Membership stage is still loading");
-    };
-    for (const field of [
-      "wtxid",
-      "weight",
-      "fee_sats",
-      "entered_at_ms",
-      "ancestor_count",
-      "ancestor_vsize",
-      "ancestor_fee_sats",
-      "descendant_count",
-      "descendant_vsize",
-      "replaceable",
-      "structure",
-    ] as const) {
-      Object.defineProperty(transaction, field, {
-        configurable: false,
-        enumerable: false,
-        get: unavailable,
-      });
-    }
-    const view = transaction as MempoolTransaction;
+    }) as MempoolTransaction;
     this.rowCache.set(row, view);
     if (this.rowCache.size > ROW_CACHE_LIMIT) {
       const oldest = this.rowCache.keys().next().value;

@@ -62,6 +62,10 @@ import {
   chooseInitialNodeRule,
   prepareNodePublicationCommit,
 } from "./node-publication-candidate";
+import {
+  nodeSampleSelectionContains,
+  resolveNodeSampleSelection,
+} from "./node-sample-selection";
 import { recordAtlasCandidateCommitted } from "./candidate-ready";
 import {
   createNodeSourceSummaryView,
@@ -946,6 +950,15 @@ const renderSampleTable = (): void => {
     return;
   }
   const population = currentInspectorPopulation();
+  const selection = resolveNodeSampleSelection({
+    terrain: selectedLens === "terrain",
+    bip110: selectedClassifierIsBip110(),
+    inspector: selectedInspector,
+    descriptor: currentClassifierDescriptor(),
+    bucketKey: selectedClassifierBucketKey,
+    classifierId: selectedClassifierId,
+    label: selectedClassifierLabel,
+  });
   const largest = population?.transactions.slice(0, 8) ?? [];
   const { entries: sample, pinsSelected } = pinSelectedInBoundedSample(
     largest,
@@ -955,14 +968,8 @@ const renderSampleTable = (): void => {
     8,
     (transaction) =>
       population !== null &&
-      (selectedLens !== "terrain" && selectedClassifierLabel !== null
-        ? (classificationResult(
-            transaction,
-            selectedClassifierId,
-          )?.labels.includes(selectedClassifierLabel) ?? false)
-        : population.transactions.some(
-            ({ txid }) => txid === transaction.txid,
-          )),
+      selection !== null &&
+      nodeSampleSelectionContains(transaction, selection),
   );
   sampleSummary.textContent =
     population === null || population.count === 0

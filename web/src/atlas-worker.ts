@@ -1369,10 +1369,20 @@ const retainCachedDescriptors = (
   }
 };
 
-const columnValue = (
+interface UnsignedColumnView {
+  readonly bytes: Uint8Array;
+  readonly width: number;
+}
+
+const unsignedColumnView = (
   column: PackedUnsignedColumnTransfer,
-  row: number,
-): number => readUnsigned(new Uint8Array(column.values), column.width, row);
+): UnsignedColumnView => ({
+  bytes: new Uint8Array(column.values),
+  width: column.width,
+});
+
+const columnValue = (column: UnsignedColumnView, row: number): number =>
+  readUnsigned(column.bytes, column.width, row);
 
 const validatePrimaryPublicationSemantics = (
   publication: PackedPrimaryPublicationTransfer,
@@ -1418,9 +1428,15 @@ const validatePrimaryPublicationSemantics = (
   ) {
     throw new TypeError("Primary BIP-110 assessment columns are inconsistent");
   }
+  const vsizeColumn = unsignedColumnView(population.vsize);
+  const resultCodes = unsignedColumnView(classifier.resultCodes);
+  const assessmentCodes =
+    classifier.assessmentCodes === null
+      ? null
+      : unsignedColumnView(classifier.assessmentCodes);
   let totalVsize = 0;
   for (let row = 0; row < manifest.row_count; row += 1) {
-    const vsize = columnValue(population.vsize, row);
+    const vsize = columnValue(vsizeColumn, row);
     if (vsize === 0) {
       throw new TypeError(`Packed population invariant failed at row ${row}`);
     }
@@ -1428,7 +1444,7 @@ const validatePrimaryPublicationSemantics = (
     if (!Number.isSafeInteger(totalVsize)) {
       throw new TypeError("Packed total vsize is unsafe");
     }
-    const resultCode = columnValue(classifier.resultCodes, row);
+    const resultCode = columnValue(resultCodes, row);
     let policyResult: ClassifierResultTupleTransfer | null = null;
     if (resultCode === 0) {
       counts.unclassified += 1;
@@ -1449,7 +1465,6 @@ const validatePrimaryPublicationSemantics = (
       if (policy) policyResult = tuple;
     }
     if (policy) {
-      const assessmentCodes = classifier.assessmentCodes;
       const assessmentDictionary = classifier.assessmentDictionary;
       if (assessmentCodes === null || assessmentDictionary === null) {
         throw new TypeError("Primary BIP-110 assessment columns are missing");
@@ -1529,6 +1544,7 @@ const validatePublicationSemantics = (
       ]),
     ) as Record<string, number>,
     classifier,
+    resultCodes: unsignedColumnView(classifier.resultCodes),
   }));
   const policy = classifiers.find(
     ({ classifierId }) => classifierId === "knots_bip110",
@@ -1540,7 +1556,7 @@ const validatePublicationSemantics = (
   ) {
     throw new TypeError("BIP-110 assessment columns are missing");
   }
-  const assessmentCodes = policy.assessmentCodes;
+  const assessmentCodes = unsignedColumnView(policy.assessmentCodes);
   const assessmentDictionary = policy.assessmentDictionary;
   const statusCounts = {
     compatible: 0,
@@ -1549,18 +1565,24 @@ const validatePublicationSemantics = (
     unclassified: 0,
   };
   const structureBits = new Uint8Array(structure.presenceBits);
+  const vsizeColumn = unsignedColumnView(population.vsize);
+  const weightColumn = unsignedColumnView(membership.weight);
+  const ancestorCountColumn = unsignedColumnView(membership.ancestorCount);
+  const descendantCountColumn = unsignedColumnView(membership.descendantCount);
+  const ancestorVsizeColumn = unsignedColumnView(membership.ancestorVsize);
+  const descendantVsizeColumn = unsignedColumnView(membership.descendantVsize);
   let totalVsize = 0;
   for (let row = 0; row < manifest.row_count; row += 1) {
-    const vsize = columnValue(population.vsize, row);
-    const weight = columnValue(membership.weight, row);
+    const vsize = columnValue(vsizeColumn, row);
+    const weight = columnValue(weightColumn, row);
     if (
       vsize === 0 ||
       weight === 0 ||
       weight > vsize * 4 ||
-      columnValue(membership.ancestorCount, row) === 0 ||
-      columnValue(membership.descendantCount, row) === 0 ||
-      columnValue(membership.ancestorVsize, row) < vsize ||
-      columnValue(membership.descendantVsize, row) < vsize
+      columnValue(ancestorCountColumn, row) === 0 ||
+      columnValue(descendantCountColumn, row) === 0 ||
+      columnValue(ancestorVsizeColumn, row) < vsize ||
+      columnValue(descendantVsizeColumn, row) < vsize
     ) {
       throw new TypeError(`Packed membership invariant failed at row ${row}`);
     }
@@ -1571,7 +1593,7 @@ const validatePublicationSemantics = (
     let resultPresence: boolean | null = null;
     let policyResult: ClassifierResultTupleTransfer | null = null;
     resultCounts.forEach((counts) => {
-      const code = columnValue(counts.classifier.resultCodes, row);
+      const code = columnValue(counts.resultCodes, row);
       const present = code !== 0;
       if (resultPresence === null) resultPresence = present;
       else if (resultPresence !== present) {

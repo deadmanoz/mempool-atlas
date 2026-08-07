@@ -26,6 +26,17 @@ fi
 
 base_url=${1%/}
 source_id=$2
+detail_txid_override=${ATLAS_SMOKE_DETAIL_TXID:-}
+if [[ -n "$detail_txid_override" ]]; then
+    if (( !local_fixture )); then
+        printf 'ATLAS_SMOKE_DETAIL_TXID is available only with --local-fixture\n' >&2
+        exit 2
+    fi
+    if [[ ! "$detail_txid_override" =~ ^[0-9a-f]{64}$ ]]; then
+        printf 'ATLAS_SMOKE_DETAIL_TXID must be a canonical txid\n' >&2
+        exit 2
+    fi
+fi
 for required_tool in awk cp curl grep head jq mktemp openssl rm xxd; do
     command -v "$required_tool" >/dev/null 2>&1 || {
         printf 'public smoke tests require %s on PATH\n' "$required_tool" >&2
@@ -339,7 +350,8 @@ if jq -e '.transaction_count > 0' "$temp_dir/manifest.json" >/dev/null; then
         printf 'population did not decode to a canonical first txid\n' >&2
         exit 1
     }
-    detail_url="$base_url/api/v2/sources/$source_id/transactions/$first_txid"
+    detail_txid=${detail_txid_override:-$first_txid}
+    detail_url="$base_url/api/v2/sources/$source_id/transactions/$detail_txid"
     detail_status=$(curl --silent --show-error --max-time 30 \
         --dump-header "$temp_dir/detail.headers" \
         --output "$temp_dir/detail.json" \
@@ -347,7 +359,7 @@ if jq -e '.transaction_count > 0' "$temp_dir/manifest.json" >/dev/null; then
     case "$detail_status" in
         200) ;;
         404)
-            jq -e --arg txid "$first_txid" '
+            jq -e --arg txid "$detail_txid" '
                 .error == ("transaction \"" + $txid + "\" is not in the current snapshot")
             ' "$temp_dir/detail.json" >/dev/null || {
                 printf 'transaction detail returned an unexpected 404 response\n' >&2
@@ -355,7 +367,7 @@ if jq -e '.transaction_count > 0' "$temp_dir/manifest.json" >/dev/null; then
             }
             ;;
         503)
-            jq -e --arg txid "$first_txid" '
+            jq -e --arg txid "$detail_txid" '
                 .error == ("transaction \"" + $txid + "\" is present but has no policy assessment in the current snapshot")
             ' "$temp_dir/detail.json" >/dev/null || {
                 printf 'transaction detail returned an unexpected 503 response\n' >&2

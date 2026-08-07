@@ -78,7 +78,7 @@ perf-fixtures: functional-fixtures
 
 # Refresh the compact cross-language digest fixture from Rust-owned model data.
 publication-digest-fixture:
-    cargo run --profile fixtures --features perf-fixtures --bin export-perf-fixture -- --profile performance --output-root target/publication-digest-fixture --transaction-count 3 --source-count 1
+    cargo run --profile fixtures --features perf-fixtures --bin export-perf-fixture -- --profile performance --output-root target/publication-digest-fixture --transaction-count 3 --source-count 1 --publication-digest-source-cases tests/fixtures/publication-digest-source-cases-v2.json
     mkdir -p tests/fixtures
     cp target/publication-digest-fixture/performance/snapshots/perf-node-01/manifest.json tests/fixtures/publication-digest-v2.json
 

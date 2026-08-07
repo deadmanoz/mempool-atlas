@@ -10,6 +10,9 @@ captured public mempool is stored in the repository.
   development and functional Playwright coverage.
 - `just perf-fixtures` also exports two 70,000-transaction sources for
   performance measurement.
+- `just publication-digest-fixture` regenerates both compact cross-language
+  publication-digest goldens when the v2 preimage or source metadata cases
+  change.
 - `just stage-projection` regenerates the checked-in staged byte evidence and
   enforces every node and comparison transfer ceiling. Reproducing its exact
   gzip evidence requires Node.js 22.23.2, the version pinned in CI.

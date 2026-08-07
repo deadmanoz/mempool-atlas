@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ComparisonCanvasView } from "./comparison-canvas-view";
-import type { ComparisonDistributionsView } from "./comparison-distributions-view";
+import type {
+  ComparisonDistributionsView,
+  PreparedComparisonDistributions,
+} from "./comparison-distributions-view";
 import {
   prepareComparisonCommitCandidate,
   prepareComparisonPublication,
@@ -35,6 +38,21 @@ const canvasView = (canCommit: () => boolean) => {
     } as unknown as ComparisonCanvasView,
     prepareCandidate,
     canCommitCandidate,
+  };
+};
+
+const distributionsView = (canCommit: () => boolean) => {
+  const prepare = vi.fn(async (current) => {
+    return { current } as unknown as PreparedComparisonDistributions;
+  });
+  const canCommitPrepared = vi.fn(canCommit);
+  return {
+    view: {
+      prepare,
+      canCommit: canCommitPrepared,
+    } as unknown as ComparisonDistributionsView,
+    prepare,
+    canCommit: canCommitPrepared,
   };
 };
 
@@ -96,6 +114,34 @@ describe("comparison publication candidate", () => {
     );
     expect(canvas.prepareCandidate).toHaveBeenCalledTimes(2);
     expect(canvas.canCommitCandidate).toHaveBeenCalledTimes(3);
+  });
+
+  it("reprepares the complete candidate after one distribution invalidation", async () => {
+    let checks = 0;
+    const distributions = distributionsView(() => {
+      checks += 1;
+      return checks > 1;
+    });
+    const canvas = canvasView(() => true);
+    const isCurrent = vi.fn(() => true);
+
+    const prepared = await prepareComparisonCommitCandidate(
+      publication("left", [1, 2, 3]),
+      publication("right", [2, 3, 4]),
+      true,
+      false,
+      new AbortController().signal,
+      isCurrent,
+      distributions.view,
+      canvas.view,
+    );
+
+    expect(prepared.distributions).not.toBeNull();
+    expect(distributions.prepare).toHaveBeenCalledTimes(2);
+    expect(distributions.canCommit).toHaveBeenCalledTimes(3);
+    expect(canvas.prepareCandidate).toHaveBeenCalledTimes(2);
+    expect(canvas.canCommitCandidate).toHaveBeenCalledTimes(3);
+    expect(isCurrent).toHaveBeenCalledTimes(3);
   });
 
   it("exits after four consecutive comparison-canvas invalidations", async () => {

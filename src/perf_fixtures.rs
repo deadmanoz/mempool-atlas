@@ -10,7 +10,6 @@ use crate::model::{
     MempoolEntry, MempoolSnapshot, SourceAvailability, SourceSummary, TransactionStructure,
     classifier_catalog,
 };
-#[cfg(test)]
 use crate::staged_snapshot::reencode_manifest_for_source;
 use crate::staged_snapshot::{EncodedStage, StageKind, encode_staged_snapshot};
 use anyhow::{Context, Result, ensure};
@@ -57,6 +56,79 @@ pub struct ExportOptions {
     pub output_root: PathBuf,
     pub transaction_count: usize,
     pub source_count: usize,
+}
+
+pub fn write_publication_digest_source_cases(output_path: &Path) -> Result<()> {
+    #[derive(Serialize)]
+    struct SourceCases {
+        schema_version: u64,
+        cases: Vec<SourceCase>,
+    }
+
+    #[derive(Serialize)]
+    struct SourceCase {
+        name: &'static str,
+        availability: &'static str,
+        last_poll_started_at_ms: Option<u64>,
+        last_error: Option<&'static str>,
+        publication_id: String,
+    }
+
+    let (sources, _) = performance_sources(PERFORMANCE_REFERENCE_TIME_MS, 3, 1)
+        .context("build publication digest fixture source")?;
+    let source = sources
+        .first()
+        .context("publication digest fixture source is missing")?;
+    let bundle = encode_staged_snapshot(&source.summary, &source.snapshot)
+        .context("encode publication digest fixture")?;
+    let cases = [
+        (
+            "ready",
+            "ready",
+            SourceAvailability::Ready,
+            Some(1_785_999_990_000),
+            None,
+        ),
+        (
+            "stale_retained_failure",
+            "stale",
+            SourceAvailability::Stale,
+            None,
+            Some("Bitcoin node RPC is unavailable"),
+        ),
+    ];
+    let cases = cases
+        .into_iter()
+        .map(
+            |(name, availability_label, availability, last_poll_started_at_ms, last_error)| {
+                let mut case_source = bundle.manifest.value.source.clone();
+                case_source.availability = availability;
+                case_source.last_poll_started_at_ms = last_poll_started_at_ms;
+                case_source.last_error = last_error.map(str::to_owned);
+                let encoded = reencode_manifest_for_source(&bundle.manifest.value, &case_source)
+                    .context("re-encode publication digest source case")?;
+                Ok(SourceCase {
+                    name,
+                    availability: availability_label,
+                    last_poll_started_at_ms,
+                    last_error,
+                    publication_id: encoded.value.publication_id,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+    let mut encoded = serde_json::to_vec_pretty(&SourceCases {
+        schema_version: 2,
+        cases,
+    })?;
+    encoded.push(b'\n');
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create fixture directory {}", parent.display()))?;
+    }
+    fs::write(output_path, encoded)
+        .with_context(|| format!("write source digest fixture {}", output_path.display()))?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

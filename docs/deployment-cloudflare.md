@@ -334,7 +334,7 @@ they do not copy or replace the server and browser artifacts separately under
 6. In `mempool-atlas-deploy`, run:
 
    ```bash
-   just verify-live vps-knots-01-knots
+   just verify-live <presentation-host>
    ```
 
    From this application repository, run `just smoke-public`, ten cold

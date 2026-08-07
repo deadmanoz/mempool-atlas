@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use mempool_atlas::perf_fixtures::{ExportOptions, FixtureProfile, export};
+use mempool_atlas::perf_fixtures::{
+    ExportOptions, FixtureProfile, export, write_publication_digest_source_cases,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -14,6 +16,8 @@ struct Cli {
     transaction_count: usize,
     #[arg(long, default_value_t = 2)]
     source_count: usize,
+    #[arg(long)]
+    publication_digest_source_cases: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -24,6 +28,13 @@ fn main() -> Result<()> {
         transaction_count: cli.transaction_count,
         source_count: cli.source_count,
     })?;
+    if let Some(path) = cli.publication_digest_source_cases {
+        write_publication_digest_source_cases(&path)?;
+        println!(
+            "exported publication digest source cases to {}",
+            path.display()
+        );
+    }
     println!(
         "exported {} fixture profile with {} sources to {}",
         manifest.profile,

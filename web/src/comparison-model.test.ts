@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   compareCurrentSnapshots,
   lookupComparisonTransaction,
+  type ComparedTransaction,
+  type CurrentComparison,
 } from "./comparison-model";
 import { loadedSource } from "./comparison-test-fixtures";
 import { mempoolTransaction, txid } from "./test-fixtures";
@@ -172,6 +174,47 @@ describe("compareCurrentSnapshots", () => {
     expect(lookupComparisonTransaction(comparison, txid(5))).toBeNull();
     expect(lookupComparisonTransaction(comparison, txid(0))).toBeNull();
     expect(lookupComparisonTransaction(comparison, txid(10))).toBeNull();
+    expect(lookupComparisonTransaction(comparison, txid(1))?.region).toBe(
+      "common",
+    );
+  });
+
+  it("looks up a rendered region logarithmically without iterating it", () => {
+    const entries = Array.from(
+      { length: 1_024 },
+      (_, index): ComparedTransaction => ({
+        txid: txid(index),
+        left: null,
+        right: null,
+        same_wtxid: null,
+      }),
+    );
+    let indexedReads = 0;
+    const guardedEntries = new Proxy(entries, {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator || property === "find") {
+          throw new Error("comparison lookup must not iterate a region");
+        }
+        if (
+          typeof property === "string" &&
+          /^(0|[1-9][0-9]*)$/.test(property)
+        ) {
+          indexedReads += 1;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const comparison = {
+      common: guardedEntries,
+      left_only: [],
+      right_only: [],
+    } as unknown as CurrentComparison;
+
+    expect(lookupComparisonTransaction(comparison, txid(777))).toMatchObject({
+      region: "common",
+      entry: { txid: txid(777) },
+    });
+    expect(indexedReads).toBeLessThan(20);
   });
 
   it("rejects comparing a source with itself", () => {

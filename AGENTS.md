@@ -24,6 +24,9 @@ lenses, and serves source-local node and comparison views.
   and transaction detail.
 - `src/api.rs` serves health, readiness, source APIs, and static web
   assets.
+- `src/staged_snapshot.rs` encodes deterministic v2 publication bundles.
+  `src/staged_snapshot/validation.rs` rejects incoherent model inputs before
+  publication; focused tests live in `src/staged_snapshot/tests/`.
 - `src/perf_fixtures.rs` is the feature-gated canonical exporter for generated
   browser fixture bodies. Production builds do not enable `perf-fixtures`.
 - `src/bip110/` is the private pure seven-rule evaluator.
@@ -40,6 +43,8 @@ lenses, and serves source-local node and comparison views.
 - `web/src/comparison-policy-view.ts` owns source-local policy aggregates and
   bounded samples. `web/src/comparison-view-transition.ts` classifies
   interactive state changes before the controller applies effects.
+- `web/src/node-sample-selection.ts` resolves constant-time eligibility when a
+  selected transaction is pinned into a bounded node sample.
 - `web/src/styles.css` owns shared shell, header, toolbar, terrain, and chart
   rules, including their breakpoints. `web/src/comparison-styles.css` adds only
   comparison-page selectors.
@@ -65,6 +70,9 @@ Use `just` targets whenever one exists:
   Atlas API, after a one-time `just test-web-e2e-install`.
 - `just functional-fixtures` exports the small Rust-owned functional profile.
 - `just perf-fixtures` also exports the 70,000-transaction performance profile.
+- `just publication-digest-fixture` regenerates both checked-in Rust/browser
+  publication-digest goldens from the Rust-owned model and source-metadata
+  cases.
 - `just stage-projection` regenerates and enforces the checked staged-byte
   projection. Run it with exactly Node.js 22.23.2 so gzip output matches CI.
 - `just perf-web` builds the production web assets, runs the desktop and Slow

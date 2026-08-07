@@ -74,6 +74,11 @@ start_fixture_server() {
 source_id=$(jq --exit-status --raw-output \
     '[.snapshots[] | select(.transaction_count > 0)][0].source_id' \
     "$fixture_manifest") || fail "functional fixture has no populated source"
+detail_txid=$(jq --exit-status --raw-output --arg source_id "$source_id" '
+    [.transaction_details[] | select(.source_id == $source_id)][0].txid |
+    select(type == "string" and test("^[0-9a-f]{64}$"))
+' "$fixture_manifest") ||
+    fail "functional fixture has no canonical transaction detail for source '$source_id'"
 
 if "$smoke_script" \
     "http://127.0.0.1:1" "$source_id" \
@@ -95,10 +100,21 @@ grep -F 'local fixture smoke tests require a loopback URL' \
     "$test_tmp_dir/non-loopback.stderr" >/dev/null ||
     fail "local fixture mode did not report its loopback restriction"
 
+if ATLAS_SMOKE_DETAIL_TXID="$detail_txid" "$smoke_script" \
+    "https://atlas.example.test" "$source_id" \
+    >"$test_tmp_dir/public-detail-override.stdout" \
+    2>"$test_tmp_dir/public-detail-override.stderr"; then
+    fail "public mode accepted the local transaction-detail override"
+fi
+grep -F 'ATLAS_SMOKE_DETAIL_TXID is available only with --local-fixture' \
+    "$test_tmp_dir/public-detail-override.stderr" >/dev/null ||
+    fail "public mode did not reject the local transaction-detail override"
+
 # First prove the explicit local mode tolerates the absence of Cloudflare-only
 # headers while retaining every origin contract check.
 start_fixture_server 0 200
-"$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
+ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
+    "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
     >"$test_tmp_dir/no-cloudflare.stdout"
 grep -F 'public v2-only Cloudflare smoke checks passed' \
     "$test_tmp_dir/no-cloudflare.stdout" >/dev/null ||
@@ -108,7 +124,8 @@ stop_fixture_server
 # Repeat with lower-case, CRLF-terminated HTTP headers and synthetic edge cache
 # statuses so the portable parser and both cache-status policies execute too.
 start_fixture_server 1 200
-"$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
+ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
+    "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
     >"$test_tmp_dir/cloudflare.stdout"
 grep -F 'public v2-only Cloudflare smoke checks passed' \
     "$test_tmp_dir/cloudflare.stdout" >/dev/null ||
@@ -120,7 +137,8 @@ stop_fixture_server
 # and still require the non-cacheable edge path.
 for detail_status in 404 503; do
     start_fixture_server 1 "$detail_status"
-    "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
+    ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
+        "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
         >"$test_tmp_dir/detail-$detail_status.stdout"
     grep -F 'public v2-only Cloudflare smoke checks passed' \
         "$test_tmp_dir/detail-$detail_status.stdout" >/dev/null ||

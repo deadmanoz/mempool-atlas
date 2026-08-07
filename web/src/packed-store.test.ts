@@ -389,6 +389,52 @@ describe("PackedPrimaryPublicationStore", () => {
     );
   });
 
+  it("shares non-enumerable readonly membership guards across primary rows", () => {
+    const complete = publication();
+    const store = new PackedPrimaryPublicationStore({
+      manifest: complete.manifest,
+      population: complete.population,
+      classifiers: complete.classifiers,
+    });
+    const first = store.snapshot.transactions[0];
+    const second = store.snapshot.transactions[1];
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    if (first === undefined || second === undefined) return;
+
+    expect(Object.getPrototypeOf(first)).toBe(Object.getPrototypeOf(second));
+    expect(Object.keys(first)).toEqual([
+      "txid",
+      "vsize",
+      "classifications",
+      "bip110",
+    ]);
+    for (const field of [
+      "wtxid",
+      "weight",
+      "fee_sats",
+      "entered_at_ms",
+      "ancestor_count",
+      "ancestor_vsize",
+      "ancestor_fee_sats",
+      "descendant_count",
+      "descendant_vsize",
+      "replaceable",
+      "structure",
+    ] as const) {
+      expect(Object.hasOwn(first, field), field).toBe(false);
+      expect(
+        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(first), field),
+        field,
+      ).toMatchObject({ configurable: false, enumerable: false });
+      expect(() => first[field], field).toThrow(
+        "Membership stage is still loading",
+      );
+    }
+    expect(Reflect.set(first, "fee_sats", 42)).toBe(false);
+    expect(() => first.fee_sats).toThrow("Membership stage is still loading");
+  });
+
   it("compares primary publications without reading unavailable membership", () => {
     const leftComplete = publication();
     const rightComplete = publication();
