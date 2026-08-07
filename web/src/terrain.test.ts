@@ -650,6 +650,7 @@ describe("createTerrainLayout", () => {
       expect(elementRegion).toBeDefined();
       expect(opSuccessRegion).toBeDefined();
       const drawImage = vi.fn();
+      const directFill = vi.fn();
       const rect = vi.fn();
       const strokeRect = vi.fn();
       const canvas = { width: 900, height: 600 };
@@ -659,6 +660,9 @@ describe("createTerrainLayout", () => {
         strokeStyle: "",
         lineWidth: 1,
         globalAlpha: 1,
+        clearRect: vi.fn(),
+        fillRect: vi.fn(),
+        fill: directFill,
         drawImage,
         save: vi.fn(),
         restore: vi.fn(),
@@ -730,6 +734,9 @@ describe("createTerrainLayout", () => {
         0,
         0,
       );
+      expect(
+        layerCanvases.every(({ width, height }) => width * height <= 4_194_304),
+      ).toBe(true);
 
       canvas.width = 5_120;
       canvas.height = 2_880;
@@ -737,10 +744,103 @@ describe("createTerrainLayout", () => {
         kind: "region",
         regionKey: elementRegion!.key,
       });
-      expect(createElement).toHaveBeenCalledTimes(8);
-      expect(
-        (layerCanvases[6]?.width ?? 0) * (layerCanvases[6]?.height ?? 0),
-      ).toBeLessThanOrEqual(4_194_304);
+      expect(createElement).toHaveBeenCalledTimes(6);
+      expect(drawImage).toHaveBeenCalledTimes(8);
+      expect(directFill).toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("direct-paints exact glyphs and outlines above the retained-raster cap", () => {
+    class TestPath2D {
+      readonly rectangles: Array<[number, number, number, number]> = [];
+
+      rect(x: number, y: number, width: number, height: number): void {
+        this.rectangles.push([x, y, width, height]);
+      }
+    }
+    const createElement = vi.fn(() => {
+      const layerContext = {
+        fillStyle: "",
+        strokeStyle: "",
+        lineWidth: 1,
+        globalAlpha: 1,
+        setTransform: vi.fn(),
+        clearRect: vi.fn(),
+        fillRect: vi.fn(),
+        strokeRect: vi.fn(),
+        fill: vi.fn(),
+      } as unknown as CanvasRenderingContext2D;
+      return {
+        width: 0,
+        height: 0,
+        getContext: () => layerContext,
+      } as unknown as HTMLCanvasElement;
+    });
+    vi.stubGlobal("Path2D", TestPath2D);
+    vi.stubGlobal("document", { createElement });
+    try {
+      const transactions = Array.from({ length: 1_000 }, (_, index) =>
+        transaction(index + 1, {
+          bip110: violating(index < 500 ? "element_size" : "op_success"),
+        }),
+      );
+      const layout = createTerrainLayout(transactions, 900, 600, "count");
+      const selectedRegion = layout.regions.find((region) =>
+        region.signature?.violatedRules.includes("element_size"),
+      );
+      const selectedGlyph = layout.glyphs[0];
+      expect(selectedRegion).toBeDefined();
+      expect(selectedGlyph).toBeDefined();
+      const filledPaths: TestPath2D[] = [];
+      const drawImage = vi.fn();
+      const strokeRect = vi.fn();
+      const canvas = { width: 5_120, height: 2_880 };
+      expect(canvas.width * canvas.height).toBeGreaterThan(4_194_304);
+      const context = {
+        canvas,
+        fillStyle: "",
+        strokeStyle: "",
+        lineWidth: 1,
+        globalAlpha: 1,
+        clearRect: vi.fn(),
+        fillRect: vi.fn(),
+        fill: (path: TestPath2D) => filledPaths.push(path),
+        drawImage,
+        save: vi.fn(),
+        restore: vi.fn(),
+        beginPath: vi.fn(),
+        rect: vi.fn(),
+        clip: vi.fn(),
+        strokeRect,
+      } as unknown as CanvasRenderingContext2D;
+
+      paintTerrain(
+        context,
+        layout,
+        { kind: "region", regionKey: selectedRegion!.key },
+        selectedGlyph!.txid,
+      );
+
+      expect(createElement).not.toHaveBeenCalled();
+      expect(drawImage).not.toHaveBeenCalled();
+      const paintedRectangles = filledPaths
+        .flatMap(({ rectangles }) => rectangles)
+        .map((rect) => JSON.stringify(rect))
+        .sort();
+      const exactGlyphRectangles = layout.glyphs
+        .map(({ rect }) =>
+          JSON.stringify([rect.x, rect.y, rect.width, rect.height]),
+        )
+        .sort();
+      expect(paintedRectangles).toEqual(exactGlyphRectangles);
+      expect(strokeRect).toHaveBeenCalledWith(
+        ...Object.values(selectedRegion!.rect),
+      );
+      expect(strokeRect).toHaveBeenCalledWith(
+        ...Object.values(selectedGlyph!.rect),
+      );
     } finally {
       vi.unstubAllGlobals();
     }

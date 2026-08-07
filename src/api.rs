@@ -207,7 +207,7 @@ fn cacheable_payload(
 }
 
 fn reject_query(query: Option<String>) -> Result<(), ApiError> {
-    if query.as_deref().is_some_and(|value| !value.is_empty()) {
+    if query.is_some() {
         Err(ApiError::query_not_supported())
     } else {
         Ok(())
@@ -1188,7 +1188,39 @@ mod tests {
             .as_str()
             .expect("classifier content ID");
 
-        assert!(reject_query(Some(String::new())).is_ok());
+        assert!(reject_query(None).is_ok());
+        assert!(reject_query(Some(String::new())).is_err());
+
+        for path in [
+            "/api/v2/sources/core/mempool?".to_owned(),
+            format!("/api/v2/sources/core/mempool/stages/population/{population_id}?"),
+            format!(
+                "/api/v2/sources/core/mempool/stages/classifier/{classifier_id}/{classifier_content_id}?"
+            ),
+        ] {
+            let response = application
+                .clone()
+                .oneshot(Request::get(&path).body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                NO_STORE,
+                "{path}"
+            );
+            assert!(!response.headers().contains_key(header::ETAG), "{path}");
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).expect("error JSON"),
+                json!({
+                    "error": "query-dependent v2 representations are not supported"
+                }),
+                "{path}"
+            );
+        }
 
         let (status, policy) = cache_control(
             application.clone(),

@@ -87,6 +87,8 @@ const waitForRendering = async (page: Page): Promise<void> => {
 };
 
 interface SelectedStrokePixelProfile {
+  backingWidth: number;
+  backingHeight: number;
   count: number;
   solidCount: number;
   redTotal: number;
@@ -113,6 +115,8 @@ const selectedTerrainStrokePixelProfile = async (
     const context = (canvas as HTMLCanvasElement).getContext("2d");
     if (context === null) throw new Error("terrain canvas has no 2D context");
     const profile: SelectedStrokePixelProfile = {
+      backingWidth: context.canvas.width,
+      backingHeight: context.canvas.height,
       count: 0,
       solidCount: 0,
       redTotal: 0,
@@ -794,6 +798,36 @@ test.describe("policy terrain raster", () => {
       ).toBeLessThanOrEqual(channelTolerance);
     } finally {
       await directPage.close();
+    }
+  });
+
+  test("uses exact direct paint above the retained-raster cap", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop", "high-DPI case runs once");
+    const baseURL = testInfo.project.use.baseURL;
+    if (typeof baseURL !== "string") {
+      throw new Error("Playwright project must configure a baseURL");
+    }
+    const context = await browser.newContext({
+      baseURL,
+      viewport: { width: 1_440, height: 900 },
+      deviceScaleFactor: 4,
+    });
+    const path2dPage = await context.newPage();
+    const directPage = await context.newPage();
+    await directPage.addInitScript(() => {
+      Reflect.deleteProperty(globalThis, "Path2D");
+    });
+    try {
+      const path2dProfile = await selectedTerrainStrokePixelProfile(path2dPage);
+      const directProfile = await selectedTerrainStrokePixelProfile(directPage);
+      expect(
+        path2dProfile.backingWidth * path2dProfile.backingHeight,
+      ).toBeGreaterThan(4_194_304);
+      expect(path2dProfile).toEqual(directProfile);
+    } finally {
+      await context.close();
     }
   });
 });

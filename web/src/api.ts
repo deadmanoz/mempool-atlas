@@ -598,6 +598,7 @@ interface PendingPublication {
     | undefined;
   primaryReady: Promise<void>;
   primaryDelivered: boolean;
+  terminalError: Error | null;
   removeAbortListener: () => void;
 }
 
@@ -614,13 +615,23 @@ const rejectPendingAfterPrimary = (
   pending: PendingPublication,
   error: Error,
 ): void => {
-  if (pendingPublications.get(requestId) !== pending) return;
-  pendingPublications.delete(requestId);
-  pending.removeAbortListener();
+  if (
+    pendingPublications.get(requestId) !== pending ||
+    pending.terminalError !== null
+  ) {
+    return;
+  }
+  pending.terminalError = error;
+  const rejectIfPending = (rejection: Error): void => {
+    if (pendingPublications.get(requestId) !== pending) return;
+    pendingPublications.delete(requestId);
+    pending.removeAbortListener();
+    pending.reject(rejection);
+  };
   void pending.primaryReady.then(
-    () => pending.reject(error),
+    () => rejectIfPending(error),
     (primaryError) =>
-      pending.reject(errorValue(primaryError, "Primary publication failed")),
+      rejectIfPending(errorValue(primaryError, "Primary publication failed")),
   );
 };
 
@@ -669,7 +680,7 @@ const worker = (): Worker => {
     (event: MessageEvent<AtlasWorkerResponse>): void => {
       const response = event.data;
       const pending = pendingPublications.get(response.requestId);
-      if (pending === undefined) return;
+      if (pending === undefined || pending.terminalError !== null) return;
       if (response.type === "primary") {
         if (pending.primaryDelivered) return;
         pending.primaryDelivered = true;
@@ -707,7 +718,12 @@ const worker = (): Worker => {
       performance.mark(`atlas:${pending.sourceId}:complete-decoded`);
       void pending.primaryReady.then(
         () => {
-          if (pendingPublications.get(response.requestId) !== pending) return;
+          if (
+            pendingPublications.get(response.requestId) !== pending ||
+            pending.terminalError !== null
+          ) {
+            return;
+          }
           let complete: LoadedSourcePublication;
           try {
             complete = createLoadedSourcePublication(response.publication);
@@ -773,7 +789,8 @@ export const fetchSourcePublication = async (
       cancelPendingPublication(
         requestId,
         pending,
-        new DOMException("Atlas v2 publication timed out", "TimeoutError"),
+        pending.terminalError ??
+          new DOMException("Atlas v2 publication timed out", "TimeoutError"),
       );
     }, PUBLICATION_DEADLINE_MS);
     pendingPublications.set(requestId, {
@@ -783,6 +800,7 @@ export const fetchSourcePublication = async (
       onPrimary,
       primaryReady: Promise.resolve(),
       primaryDelivered: false,
+      terminalError: null,
       removeAbortListener: () => {
         signal?.removeEventListener("abort", abort);
         globalThis.clearTimeout(deadline);

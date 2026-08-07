@@ -690,6 +690,82 @@ describe("publication worker lifecycle", () => {
     releasePrimary();
   });
 
+  it("bounds a terminal worker error behind an unsettled primary callback", async () => {
+    vi.useFakeTimers();
+    class FakeWorker {
+      static instance: FakeWorker;
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+
+      constructor() {
+        FakeWorker.instance = this;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(data: unknown): void {
+        this.listeners
+          .get("message")
+          ?.forEach((listener) => listener({ data }));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    let releasePrimary = (): void => undefined;
+    const primaryPaint = new Promise<void>((resolve) => {
+      releasePrimary = resolve;
+    });
+    const request = fetchSourcePublication(
+      "core",
+      undefined,
+      "transaction_properties",
+      () => primaryPaint,
+    );
+    FakeWorker.instance.emit({
+      type: "primary",
+      requestId: 1,
+      publication: {
+        manifest: publicationManifest,
+        population: populationTransfer,
+        classifiers: [],
+      },
+      timing: workerTiming,
+    });
+    await Promise.resolve();
+    FakeWorker.instance.emit({
+      type: "error",
+      requestId: 1,
+      status: 503,
+      problem: null,
+      message: "Current v2 publication unavailable",
+      retryable: false,
+    });
+    let settled = false;
+    const rejected = request.catch((error: unknown) => {
+      settled = true;
+      return error;
+    });
+
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(rejected).resolves.toMatchObject({
+      message: "Atlas request failed (503): Current v2 publication unavailable",
+      status: 503,
+    });
+    expect(FakeWorker.instance.postMessage).toHaveBeenLastCalledWith({
+      type: "cancel",
+      requestId: 1,
+    });
+    releasePrimary();
+  });
+
   it("cleans pending state when worker construction fails", async () => {
     vi.useFakeTimers();
     class FakeWorker {

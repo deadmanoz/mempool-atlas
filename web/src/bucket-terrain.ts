@@ -595,14 +595,14 @@ const createBucketTerrainRasterCache = <
   ) {
     return null;
   }
-  const canvasPixelWidth = context.canvas.width;
-  const canvasPixelHeight = context.canvas.height;
-  const rasterScale = Math.min(
-    1,
-    Math.sqrt(MAX_RASTER_PIXELS / (canvasPixelWidth * canvasPixelHeight)),
-  );
-  const pixelWidth = Math.max(1, Math.floor(canvasPixelWidth * rasterScale));
-  const pixelHeight = Math.max(1, Math.floor(canvasPixelHeight * rasterScale));
+  const pixelWidth = Math.max(1, context.canvas.width);
+  const pixelHeight = Math.max(1, context.canvas.height);
+  // A smaller retained bitmap would visibly resample dense glyphs and region
+  // outlines. The direct painter keeps native backing resolution without
+  // allocating another over-cap canvas.
+  if (pixelWidth * pixelHeight > MAX_RASTER_PIXELS) {
+    return null;
+  }
   const cached = rasterCacheByLayout.get(layout);
   if (
     cached !== undefined &&
