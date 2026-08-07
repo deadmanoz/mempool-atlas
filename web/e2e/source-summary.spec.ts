@@ -303,6 +303,117 @@ const documentOverflow = async (page: Page): Promise<number> =>
   });
 
 test.describe("early source metadata", () => {
+  test("presents an expected first publication wait without an outage", async ({
+    page,
+  }) => {
+    await page.route(/\/api\/v2\/sources(?:\?.*)?$/, async (route) => {
+      const upstream = await route.fetch();
+      const body = (await upstream.json()) as {
+        sources: Array<Record<string, unknown>>;
+      };
+      body.sources[0] = {
+        ...body.sources[0],
+        availability: "waiting",
+        last_poll_started_at_ms: null,
+        snapshot_observed_at_ms: null,
+        chain_tip: null,
+        transaction_count: null,
+        total_vsize: null,
+        classification: null,
+        last_error: null,
+      };
+      await route.fulfill({ json: body });
+    });
+    await page.route(
+      /\/api\/v2\/sources\/vps-core-01\/mempool(?:\?.*)?$/,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/problem+json",
+          json: {
+            type: "v2_unavailable",
+            title: "Current v2 publication unavailable",
+            status: 503,
+            detail:
+              "Atlas has not published a current complete snapshot for this source.",
+          },
+        });
+      },
+    );
+
+    await page.goto("/?source=vps-core-01");
+
+    const status = page.locator("#page-status");
+    await expect(status).toHaveAttribute("data-state", "waiting");
+    await expect(page.locator("#status-title")).toHaveText(
+      "Waiting for first snapshot",
+    );
+    await expect(page.locator("#status-detail")).toContainText(
+      "No complete observation has been published yet",
+    );
+    await expect(page.getByText("Atlas website unavailable")).toHaveCount(0);
+    await expect(page.locator("#source-summary")).toHaveAttribute(
+      "data-state",
+      "waiting",
+    );
+    await expect(page.locator("#source-summary")).toContainText(
+      "Classification waiting",
+    );
+    await expect(page.locator("#refresh")).toBeEnabled();
+  });
+
+  test("presents a failed first poll as an outage", async ({ page }) => {
+    let discoveries = 0;
+    await page.route(/\/api\/v2\/sources(?:\?.*)?$/, async (route) => {
+      const upstream = await route.fetch();
+      const body = (await upstream.json()) as {
+        sources: Array<Record<string, unknown>>;
+      };
+      discoveries += 1;
+      body.sources[0] = {
+        ...body.sources[0],
+        availability: discoveries === 1 ? "waiting" : "error",
+        last_poll_started_at_ms: null,
+        snapshot_observed_at_ms: null,
+        chain_tip: null,
+        transaction_count: null,
+        total_vsize: null,
+        classification: null,
+        last_error: discoveries === 1 ? null : "Node RPC connection failed",
+      };
+      await route.fulfill({ json: body });
+    });
+    await page.route(
+      /\/api\/v2\/sources\/vps-core-01\/mempool(?:\?.*)?$/,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/problem+json",
+          json: {
+            type: "v2_unavailable",
+            title: "Current v2 publication unavailable",
+            status: 503,
+            detail:
+              "Atlas has not published a current complete snapshot for this source.",
+          },
+        });
+      },
+    );
+
+    await page.goto("/?source=vps-core-01");
+
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-state",
+      "error",
+    );
+    await expect(page.locator("#status-title")).toHaveText(
+      "Atlas website unavailable",
+    );
+    await expect(page.locator("#status-detail")).toHaveText(
+      "Node RPC connection failed",
+    );
+  });
+
   test.beforeEach(async ({ page }, testInfo) => {
     await useMinimumSupportedWidth(page, testInfo);
     await installLayoutShiftObserver(page);

@@ -120,18 +120,18 @@ intervals so specialist terrain state cannot contaminate their measurements.
 ## Exact staged projection
 
 `docs/client-performance-staged-projection.json` is the checked-in release
-evidence produced by the canonical 70,000-row exporter. At gzip level 9, the
+evidence produced by the canonical 70,000-row exporter. At gzip level 6, the
 current wire format measures:
 
 | Release gate | Exact worst case | Ceiling | Result |
 | --- | ---: | ---: | --- |
-| Node primary | 2,413,371 bytes | 3,189,229 bytes | pass |
-| Node complete | 5,303,824 bytes | 6,059,535 bytes | pass |
-| Comparison primary | 4,872,313 bytes | 5,740,612 bytes | pass |
-| Comparison complete | 10,588,449 bytes | 12,119,070 bytes | pass |
+| Node primary | 2,413,387 bytes | 3,189,229 bytes | pass |
+| Node complete | 5,312,854 bytes | 6,059,535 bytes | pass |
+| Comparison primary | 4,877,288 bytes | 5,740,612 bytes | pass |
+| Comparison complete | 10,606,466 bytes | 12,119,070 bytes | pass |
 
 At the pinned throughput, the corresponding transfer projections are 25.135,
-47.261, 44.555, and 84.402 seconds. These projections reserve the remainder of
+47.318, 44.586, and 84.515 seconds. These projections reserve the remainder of
 each wall-clock gate for request overhead, worker decode and validation,
 derivation, packed-model construction, and rendering. `just perf-web` verifies
 the end-to-end browser outcome rather than treating the byte projection as a

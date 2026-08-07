@@ -20,7 +20,6 @@
 
 /web/node_modules/
 /web/dist/
-/web/dist-perf/
 /web/.perf-fixtures/
 /web/.perf-results/
 /web/coverage/

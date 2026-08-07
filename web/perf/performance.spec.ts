@@ -751,6 +751,7 @@ const measurePrimaryMemorySample = async (
   viewport: { width: number; height: number } | null,
   profile: string,
   scenario: Scenario,
+  baseURL: string,
 ): Promise<{
   heap: HeapUsage;
   memory: MemoryResult;
@@ -758,7 +759,7 @@ const measurePrimaryMemorySample = async (
   heldSecondManifestSourceIds: readonly string[];
 }> => {
   const context = await browser.newContext({
-    baseURL: "http://127.0.0.1:4181",
+    baseURL,
     viewport: viewport ?? { width: 1440, height: 900 },
   });
   const page = await context.newPage();
@@ -1338,6 +1339,7 @@ const runScenario = async (
   page: Page,
   profile: string,
   scenario: Scenario,
+  baseURL: string,
 ): Promise<void> => {
   const browser = page.context().browser();
   if (browser === null) throw new Error("performance browser is unavailable");
@@ -1346,6 +1348,7 @@ const runScenario = async (
     page.viewportSize(),
     profile,
     scenario,
+    baseURL,
   );
   const client = await page.context().newCDPSession(page);
   await client.send("HeapProfiler.enable");
@@ -1795,7 +1798,11 @@ const runScenario = async (
 
 for (const scenario of ["node", "comparison"] as const) {
   test(`${scenario} staged production build`, async ({ page }, testInfo) => {
-    await runScenario(page, testInfo.project.name, scenario);
+    const baseURL = testInfo.project.use.baseURL;
+    if (typeof baseURL !== "string") {
+      throw new Error("performance project must configure a baseURL");
+    }
+    await runScenario(page, testInfo.project.name, scenario, baseURL);
   });
 }
 

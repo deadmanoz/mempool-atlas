@@ -94,9 +94,13 @@ const source = (): SourceSummary => ({
   last_error: null,
 });
 
-const publication = (): LoadedSourcePublication => ({
+const publication = (
+  snapshotIdentity = "snapshot-a",
+  publicationId = "12".repeat(32),
+): LoadedSourcePublication => ({
   source: source(),
-  publication_id: "12".repeat(32),
+  publication_id: publicationId,
+  snapshot_identity: snapshotIdentity,
   publication: snapshot(),
 });
 
@@ -123,14 +127,14 @@ describe("prepareNodePublicationCandidate", () => {
     });
     expect(nodePublicationCandidateReadyDetail(candidate)).toEqual({
       surface: "node",
-      candidateKey: "core:1700000001000:7",
+      candidateKey: "snapshot-a",
       sourceIds: ["core"],
     });
   });
 
-  it("retains primary-stage interaction state when the same publication completes", async () => {
+  it("retains primary-stage interaction state when snapshot content is unchanged", async () => {
     const candidate = await prepareNodePublicationCandidate(
-      publication(),
+      publication("snapshot-a", "34".repeat(32)),
       {
         source: "core",
         classifier: "transaction_properties",
@@ -144,7 +148,7 @@ describe("prepareNodePublicationCandidate", () => {
     const retained = retainNodePublicationSelection(candidate, {
       viewState: candidate.viewState,
       terrainMode: "count",
-      currentPublicationId: candidate.publicationId,
+      currentSnapshotIdentity: "snapshot-a",
       selectedClassifierLabel: "version_2",
       selectedClassifierBucketKey: bucketKey,
       selectedInspector: { kind: "rule", rule: "taproot_annex" },
@@ -154,7 +158,7 @@ describe("prepareNodePublicationCandidate", () => {
     expect(retained.selectedClassifierBucketKey).toBe(bucketKey);
   });
 
-  it("does not carry interaction state into a different publication", async () => {
+  it("does not carry interaction state into different snapshot content", async () => {
     const candidate = await prepareNodePublicationCandidate(
       publication(),
       {
@@ -169,7 +173,7 @@ describe("prepareNodePublicationCandidate", () => {
     const retained = retainNodePublicationSelection(candidate, {
       viewState: candidate.viewState,
       terrainMode: "count",
-      currentPublicationId: "34".repeat(32),
+      currentSnapshotIdentity: "snapshot-b",
       selectedClassifierLabel: "version_2",
       selectedClassifierBucketKey: "complete:version_2",
       selectedInspector: { kind: "rule", rule: "taproot_annex" },
@@ -203,7 +207,7 @@ describe("prepareNodePublicationCandidate", () => {
     const retained = retainNodePublicationSelection(candidate, {
       viewState,
       terrainMode: "count",
-      currentPublicationId: candidate.publicationId,
+      currentSnapshotIdentity: candidate.snapshotIdentity,
       selectedClassifierLabel: null,
       selectedClassifierBucketKey: null,
       selectedInspector,

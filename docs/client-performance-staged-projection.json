@@ -25,30 +25,30 @@
     "node_primary": {
       "source_id": "perf-node-01",
       "classifier_id": "transaction_properties",
-      "primary_node_bytes": 2413371,
-      "primary_comparison_source_bytes": 2436301,
-      "cold_progressive_complete_bytes": 5303824,
+      "primary_node_bytes": 2413387,
+      "primary_comparison_source_bytes": 2438843,
+      "cold_progressive_complete_bytes": 5312854,
       "wall_clock_ms": 25135
     },
     "node_complete": {
       "source_id": "perf-node-01",
       "classifier_id": "transaction_properties",
-      "primary_node_bytes": 2413371,
-      "primary_comparison_source_bytes": 2436301,
-      "cold_progressive_complete_bytes": 5303824,
-      "wall_clock_ms": 47261
+      "primary_node_bytes": 2413387,
+      "primary_comparison_source_bytes": 2438843,
+      "cold_progressive_complete_bytes": 5312854,
+      "wall_clock_ms": 47318
     },
     "comparison_primary": {
       "classifier_id": "transaction_properties",
-      "primary_comparison_bytes": 4872313,
-      "cold_progressive_complete_bytes": 10588449,
-      "wall_clock_ms": 44555
+      "primary_comparison_bytes": 4877288,
+      "cold_progressive_complete_bytes": 10606466,
+      "wall_clock_ms": 44586
     },
     "comparison_complete": {
       "classifier_id": "transaction_properties",
-      "primary_comparison_bytes": 4872313,
-      "cold_progressive_complete_bytes": 10588449,
-      "wall_clock_ms": 84402
+      "primary_comparison_bytes": 4877288,
+      "cold_progressive_complete_bytes": 10606466,
+      "wall_clock_ms": 84515
     }
   },
   "sources": [
@@ -57,7 +57,7 @@
       "transaction_count": 70000,
       "manifest": {
         "identity_bytes": 8662,
-        "gzip_bytes": 2547
+        "gzip_bytes": 2550
       },
       "stages": [
         {
@@ -70,60 +70,60 @@
           "kind": "membership",
           "classifier_id": null,
           "identity_bytes": 3808054,
-          "gzip_bytes": 2329540
+          "gzip_bytes": 2332983
         },
         {
           "kind": "structure",
           "classifier_id": null,
           "identity_bytes": 927622,
-          "gzip_bytes": 484135
+          "gzip_bytes": 486082
         },
         {
           "kind": "classifier",
           "classifier_id": "transaction_properties",
           "identity_bytes": 97964,
-          "gzip_bytes": 45496
+          "gzip_bytes": 45509
         },
         {
           "kind": "classifier",
           "classifier_id": "transaction_shape",
           "identity_bytes": 94403,
-          "gzip_bytes": 27431
+          "gzip_bytes": 27775
         },
         {
           "kind": "classifier",
           "classifier_id": "data_protocols",
           "identity_bytes": 94430,
-          "gzip_bytes": 23870
+          "gzip_bytes": 24621
         },
         {
           "kind": "classifier",
           "classifier_id": "knots_bip110",
           "identity_bytes": 188255,
-          "gzip_bytes": 22930
+          "gzip_bytes": 25456
         }
       ],
-      "static_complete_bytes": 5301277,
+      "static_complete_bytes": 5310304,
       "selected": {
         "transaction_properties": {
-          "primary_node_bytes": 2413371,
-          "primary_comparison_source_bytes": 2436301,
-          "cold_progressive_complete_bytes": 5303824
+          "primary_node_bytes": 2413387,
+          "primary_comparison_source_bytes": 2438843,
+          "cold_progressive_complete_bytes": 5312854
         },
         "transaction_shape": {
-          "primary_node_bytes": 2395306,
-          "primary_comparison_source_bytes": 2418236,
-          "cold_progressive_complete_bytes": 5303824
+          "primary_node_bytes": 2395653,
+          "primary_comparison_source_bytes": 2421109,
+          "cold_progressive_complete_bytes": 5312854
         },
         "data_protocols": {
-          "primary_node_bytes": 2391745,
-          "primary_comparison_source_bytes": 2414675,
-          "cold_progressive_complete_bytes": 5303824
+          "primary_node_bytes": 2392499,
+          "primary_comparison_source_bytes": 2417955,
+          "cold_progressive_complete_bytes": 5312854
         },
         "knots_bip110": {
-          "primary_node_bytes": 2390805,
-          "primary_comparison_source_bytes": 2390805,
-          "cold_progressive_complete_bytes": 5303824
+          "primary_node_bytes": 2393334,
+          "primary_comparison_source_bytes": 2393334,
+          "cold_progressive_complete_bytes": 5312854
         }
       }
     },
@@ -132,7 +132,7 @@
       "transaction_count": 70000,
       "manifest": {
         "identity_bytes": 8662,
-        "gzip_bytes": 2546
+        "gzip_bytes": 2547
       },
       "stages": [
         {
@@ -145,60 +145,60 @@
           "kind": "membership",
           "classifier_id": null,
           "identity_bytes": 3721886,
-          "gzip_bytes": 2310411
+          "gzip_bytes": 2314025
         },
         {
           "kind": "structure",
           "classifier_id": null,
           "identity_bytes": 926054,
-          "gzip_bytes": 484130
+          "gzip_bytes": 486001
         },
         {
           "kind": "classifier",
           "classifier_id": "transaction_properties",
           "identity_bytes": 97964,
-          "gzip_bytes": 45452
+          "gzip_bytes": 45459
         },
         {
           "kind": "classifier",
           "classifier_id": "transaction_shape",
           "identity_bytes": 94403,
-          "gzip_bytes": 27530
+          "gzip_bytes": 27860
         },
         {
           "kind": "classifier",
           "classifier_id": "data_protocols",
           "identity_bytes": 94430,
-          "gzip_bytes": 23996
+          "gzip_bytes": 24734
         },
         {
           "kind": "classifier",
           "classifier_id": "knots_bip110",
           "identity_bytes": 188255,
-          "gzip_bytes": 22789
+          "gzip_bytes": 25214
         }
       ],
-      "static_complete_bytes": 5282079,
+      "static_complete_bytes": 5291065,
       "selected": {
         "transaction_properties": {
-          "primary_node_bytes": 2413223,
-          "primary_comparison_source_bytes": 2436012,
-          "cold_progressive_complete_bytes": 5284625
+          "primary_node_bytes": 2413231,
+          "primary_comparison_source_bytes": 2438445,
+          "cold_progressive_complete_bytes": 5293612
         },
         "transaction_shape": {
-          "primary_node_bytes": 2395301,
-          "primary_comparison_source_bytes": 2418090,
-          "cold_progressive_complete_bytes": 5284625
+          "primary_node_bytes": 2395632,
+          "primary_comparison_source_bytes": 2420846,
+          "cold_progressive_complete_bytes": 5293612
         },
         "data_protocols": {
-          "primary_node_bytes": 2391767,
-          "primary_comparison_source_bytes": 2414556,
-          "cold_progressive_complete_bytes": 5284625
+          "primary_node_bytes": 2392506,
+          "primary_comparison_source_bytes": 2417720,
+          "cold_progressive_complete_bytes": 5293612
         },
         "knots_bip110": {
-          "primary_node_bytes": 2390560,
-          "primary_comparison_source_bytes": 2390560,
-          "cold_progressive_complete_bytes": 5284625
+          "primary_node_bytes": 2392986,
+          "primary_comparison_source_bytes": 2392986,
+          "cold_progressive_complete_bytes": 5293612
         }
       }
     }
@@ -206,23 +206,23 @@
   "comparison_candidates": [
     {
       "classifier_id": "transaction_properties",
-      "primary_comparison_bytes": 4872313,
-      "cold_progressive_complete_bytes": 10588449
+      "primary_comparison_bytes": 4877288,
+      "cold_progressive_complete_bytes": 10606466
     },
     {
       "classifier_id": "transaction_shape",
-      "primary_comparison_bytes": 4836326,
-      "cold_progressive_complete_bytes": 10588449
+      "primary_comparison_bytes": 4841955,
+      "cold_progressive_complete_bytes": 10606466
     },
     {
       "classifier_id": "data_protocols",
-      "primary_comparison_bytes": 4829231,
-      "cold_progressive_complete_bytes": 10588449
+      "primary_comparison_bytes": 4835675,
+      "cold_progressive_complete_bytes": 10606466
     },
     {
       "classifier_id": "knots_bip110",
-      "primary_comparison_bytes": 4781365,
-      "cold_progressive_complete_bytes": 10588449
+      "primary_comparison_bytes": 4786320,
+      "cold_progressive_complete_bytes": 10606466
     }
   ]
 }

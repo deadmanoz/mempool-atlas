@@ -12,6 +12,7 @@ const MANIFEST_PATH = join(FIXTURE_ROOT, "manifest.json");
 const MANIFEST_VERSION = 2;
 const PERFORMANCE_SOURCE_COUNT = 2;
 const PERFORMANCE_TRANSACTION_COUNT = 70_000;
+const GZIP_LEVEL = 6;
 
 const MIME_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -65,7 +66,7 @@ const encodedBody = (bytes, contentType, cacheControl, contentId = null) => {
   const etag = `W/"${contentId ?? createHash("sha256").update(bytes).digest("hex")}"`;
   return Object.freeze({
     identity: bytes,
-    gzip: gzipSync(bytes, { level: 9 }),
+    gzip: gzipSync(bytes, { level: GZIP_LEVEL }),
     contentType,
     cacheControl,
     contentId,

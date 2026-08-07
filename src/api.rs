@@ -293,7 +293,7 @@ impl ApiError {
     fn v2_unavailable() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            message: "current v2 publication is not available".to_owned(),
+            message: "Current v2 publication unavailable".to_owned(),
             v2_unavailable: true,
         }
     }
@@ -392,6 +392,8 @@ impl IntoResponse for ApiError {
                         problem_type: "v2_unavailable",
                         title: self.message,
                         status: 503,
+                        detail:
+                            "Atlas has not published a current complete snapshot for this source.",
                     })
                     .expect("v2 unavailable response is serializable"),
                 ),
@@ -415,6 +417,7 @@ struct V2UnavailableResponse {
     problem_type: &'static str,
     title: String,
     status: u16,
+    detail: &'static str,
 }
 
 #[cfg(test)]
@@ -611,8 +614,9 @@ mod tests {
             response,
             json!({
                 "type": "v2_unavailable",
-                "title": "current v2 publication is not available",
-                "status": 503
+                "title": "Current v2 publication unavailable",
+                "status": 503,
+                "detail": "Atlas has not published a current complete snapshot for this source."
             })
         );
 
@@ -653,6 +657,11 @@ mod tests {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
             assert_eq!(body["type"], "v2_unavailable", "{path}");
             assert_eq!(body["status"], 503, "{path}");
+            assert_eq!(
+                body["detail"],
+                "Atlas has not published a current complete snapshot for this source.",
+                "{path}"
+            );
         }
     }
 

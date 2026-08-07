@@ -11,6 +11,8 @@ import {
   filterTransactions,
   type MempoolFilters,
 } from "./filters";
+import * as firstPublication from "./first-publication-failure";
+import { pinSelectedInBoundedSample } from "./bounded-sample";
 import {
   classificationPresentation,
   transactionDetailFailurePresentation,
@@ -224,7 +226,7 @@ const snapshotLifecycle = new RequestLifecycle();
 let configuredSources: SourceSummary[] = [];
 let selectedSourceId: string | null = null;
 let currentSnapshot: MempoolSnapshot | null = null;
-let currentPublicationId: string | null = null;
+let currentSnapshotIdentity: string | null = null;
 let currentClassification: ClassificationProgress | null = null;
 let filteredTransactions: MempoolTransaction[] = [];
 let selectedLens: Lens = "overview";
@@ -925,7 +927,11 @@ const loadTransactionDetail = async (
     if (sequence !== detailSequence) {
       return;
     }
-    if (error instanceof AtlasRequestError && error.status === 503) {
+    if (
+      error instanceof AtlasRequestError &&
+      error.status === 503 &&
+      error.problemType === null
+    ) {
       const selectedResultAvailable =
         classificationResult(transaction, selectedClassifierId) !== null;
       if (!selectedClassifierIsBip110()) {
@@ -1055,16 +1061,23 @@ const renderSampleTable = (): void => {
   }
   const population = currentInspectorPopulation();
   const largest = population?.transactions.slice(0, 8) ?? [];
-  const selected =
-    population === null || selectedTransactionId === null
+  const { entries: sample, pinsSelected } = pinSelectedInBoundedSample(
+    largest,
+    selectedTransactionId === null
       ? undefined
-      : population.transactions.find(
-          ({ txid }) => txid === selectedTransactionId,
-        );
-  const pinsSelected =
-    selected !== undefined &&
-    !largest.some(({ txid }) => txid === selected.txid);
-  const sample = pinsSelected ? [selected, ...largest.slice(0, 7)] : largest;
+      : currentTransaction(selectedTransactionId),
+    8,
+    (transaction) =>
+      population !== null &&
+      (selectedLens !== "terrain" && selectedClassifierLabel !== null
+        ? (classificationResult(
+            transaction,
+            selectedClassifierId,
+          )?.labels.includes(selectedClassifierLabel) ?? false)
+        : population.transactions.some(
+            ({ txid }) => txid === transaction.txid,
+          )),
+  );
   sampleSummary.textContent =
     population === null || population.count === 0
       ? "No matches"
@@ -1981,7 +1994,7 @@ const renderResponse = async (
     () => ({
       viewState: nodeViewState,
       terrainMode,
-      currentPublicationId,
+      currentSnapshotIdentity,
       selectedClassifierLabel,
       selectedClassifierBucketKey,
       selectedInspector,
@@ -2001,7 +2014,7 @@ const renderResponse = async (
   minimumVsize.disabled = !complete;
   resetFilters.disabled = !complete;
   currentSnapshot = snapshot;
-  currentPublicationId = candidate.publicationId;
+  currentSnapshotIdentity = candidate.snapshotIdentity;
   currentClassification = candidate.classification;
   selectedClassifierId = candidate.selectedClassifierId;
   selectedClassifierLabel = candidate.selectedClassifierLabel;
@@ -2189,31 +2202,47 @@ const loadSnapshot = async (): Promise<void> => {
     if (!snapshotLifecycle.isCurrent(ticket)) {
       return;
     }
-    pageStatus.dataset.state = "error";
+    let source = configuredSources.find(
+      ({ source_id: source }) => source === requestedSourceId,
+    );
+    const refreshed = await firstPublication.refreshSources(
+      error,
+      currentSnapshot !== null,
+      ticket.signal,
+    );
+    if (refreshed !== undefined) {
+      if (!snapshotLifecycle.isCurrent(ticket)) return;
+      if (refreshed === null) {
+        source = undefined;
+      } else {
+        configuredSources = refreshed.sources;
+        source = refreshed.sources.find(
+          ({ source_id: sourceId }) => sourceId === requestedSourceId,
+        );
+      }
+    }
+    const firstFailure =
+      currentSnapshot === null
+        ? firstPublication.presentation(error, source)
+        : null;
+    pageStatus.dataset.state = firstFailure?.state ?? "error";
     const message =
       error instanceof Error ? error.message : "Unable to load snapshot";
     const partialAvailable =
       currentSnapshot !== null && !snapshotIsComplete(currentSnapshot);
     statusTitle.textContent =
-      currentSnapshot === null
-        ? "Atlas website unavailable"
-        : partialAvailable
-          ? "Snapshot partly available"
-          : "Refresh failed · showing the prior snapshot";
+      firstFailure?.title ??
+      (partialAvailable
+        ? "Snapshot partly available"
+        : "Refresh failed · showing the prior snapshot");
     statusDetail.textContent =
-      currentSnapshot === null
-        ? message
-        : partialAvailable
-          ? `The selected classifier and transaction search remain available. Membership-dependent features did not finish loading: ${message}`
-          : `The prior complete snapshot remains usable. Refresh failed: ${message}`;
-    if (currentSnapshot === null) {
-      const source = configuredSources.find(
-        ({ source_id: source }) => source === requestedSourceId,
-      );
-      if (source !== undefined) {
-        sourceSummaryView.renderMetadata(source, false);
-      }
-    } else {
+      firstFailure?.detail ??
+      (partialAvailable
+        ? `The selected classifier and transaction search remain available. Membership-dependent features did not finish loading: ${message}`
+        : `The prior complete snapshot remains usable. Refresh failed: ${message}`);
+    if (currentSnapshot === null && source !== undefined) {
+      sourceSummaryView.renderMetadata(source, false);
+    } else if (currentSnapshot !== null) {
       sourceSummaryView.setBusy(false);
     }
     setAtlasLoadPhase(
@@ -2272,7 +2301,7 @@ const prepareForSourceLoad = (source: SourceSummary): void => {
     txid: null,
   };
   currentSnapshot = null;
-  currentPublicationId = null;
+  currentSnapshotIdentity = null;
   currentClassification = null;
   filteredTransactions = [];
   selectedClassifierLabel = null;

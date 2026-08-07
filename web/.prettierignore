@@ -1,6 +1,5 @@
 coverage/
 dist/
-dist-perf/
 .perf-fixtures/
 .perf-results/
 node_modules/

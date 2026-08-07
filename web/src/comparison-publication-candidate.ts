@@ -35,8 +35,9 @@ export interface PreparedComparisonCommitCandidate {
   detail: AtlasCandidateReadyDetail;
 }
 
-const publicationKey = ({ publication }: LoadedSourcePublication): string =>
-  `${publication.source_id}:${publication.observed_at_ms}:${publication.classification_revision}`;
+const publicationKey = ({
+  snapshot_identity,
+}: LoadedSourcePublication): string => snapshot_identity;
 
 export const prepareComparisonPublication = async (
   left: LoadedSourcePublication,

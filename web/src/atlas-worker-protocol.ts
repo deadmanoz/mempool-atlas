@@ -3,6 +3,7 @@ import type {
   ClassificationResultState,
   StagedSnapshotManifest,
 } from "./types";
+import type { AtlasProblem } from "./atlas-problem";
 
 export interface PackedUnsignedColumnTransfer {
   width: number;
@@ -126,6 +127,7 @@ export interface WorkerErrorResponse {
   type: "error";
   requestId: number;
   status: number | null;
+  problem: AtlasProblem | null;
   message: string;
   retryable: boolean;
 }

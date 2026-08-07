@@ -79,6 +79,22 @@ require_cloudflare_cache_bypass() {
     esac
 }
 
+require_cloudflare_cache_handling() {
+    local path=$1
+    local context=$2
+    local cache_status
+    require_header cf-ray "$path" >/dev/null
+    cache_status=$(require_header cf-cache-status "$path")
+    case "$cache_status" in
+        HIT|MISS|REVALIDATED|EXPIRED) ;;
+        *)
+            printf '%s was not handled by Cloudflare cache: %s\n' \
+                "$context" "$cache_status" >&2
+            exit 1
+            ;;
+    esac
+}
+
 curl --silent --show-error --fail-with-body --max-time 30 \
     --dump-header "$temp_dir/sources.headers" \
     --output "$temp_dir/sources.json" \
@@ -131,16 +147,8 @@ case "$cache_control" in
         ;;
 esac
 
-require_header cf-ray "$temp_dir/manifest.headers" >/dev/null
 require_header content-encoding "$temp_dir/manifest.headers" >/dev/null
-cache_status=$(require_header cf-cache-status "$temp_dir/manifest.headers")
-case "$cache_status" in
-    HIT|MISS|REVALIDATED|EXPIRED) ;;
-    *)
-        printf 'manifest was not handled by Cloudflare cache: %s\n' "$cache_status" >&2
-        exit 1
-        ;;
-esac
+require_cloudflare_cache_handling "$temp_dir/manifest.headers" "manifest"
 
 query_status=$(curl --silent --show-error --max-time 30 \
     --dump-header "$temp_dir/query.headers" \
@@ -218,15 +226,8 @@ while IFS=$'\t' read -r kind classifier_id content_id uncompressed_bytes; do
         exit 1
     }
     require_header content-encoding "$temp_dir/stage-$stage_number.headers" >/dev/null
-    require_header cf-ray "$temp_dir/stage-$stage_number.headers" >/dev/null
-    stage_cache_status=$(require_header cf-cache-status "$temp_dir/stage-$stage_number.headers")
-    case "$stage_cache_status" in
-        HIT|MISS|REVALIDATED|EXPIRED) ;;
-        *)
-            printf 'stage was not handled by Cloudflare cache: %s\n' "$stage_cache_status" >&2
-            exit 1
-            ;;
-    esac
+    require_cloudflare_cache_handling \
+        "$temp_dir/stage-$stage_number.headers" "stage $stage_url"
     curl --silent --show-error --max-time 30 \
         --header "If-None-Match: $stage_etag" \
         --dump-header "$temp_dir/stage-$stage_number-conditional.headers" \
@@ -236,10 +237,9 @@ while IFS=$'\t' read -r kind classifier_id content_id uncompressed_bytes; do
         printf 'conditional stage request did not return 304: %s\n' "$stage_url" >&2
         exit 1
     }
-    [[ $(require_header cf-cache-status "$temp_dir/stage-$stage_number-conditional.headers") == REVALIDATED ]] || {
-        printf 'conditional stage request was not synchronously revalidated: %s\n' "$stage_url" >&2
-        exit 1
-    }
+    require_cloudflare_cache_handling \
+        "$temp_dir/stage-$stage_number-conditional.headers" \
+        "conditional stage $stage_url"
     [[ ! -s "$temp_dir/stage-$stage_number-conditional.body" ]] || {
         printf '304 stage response unexpectedly contained a body: %s\n' "$stage_url" >&2
         exit 1
@@ -265,10 +265,8 @@ if [[ $(status_code "$temp_dir/conditional.headers") != 304 ]]; then
     printf 'conditional manifest request did not return 304\n' >&2
     exit 1
 fi
-[[ $(require_header cf-cache-status "$temp_dir/conditional.headers") == REVALIDATED ]] || {
-    printf 'conditional manifest request was not synchronously revalidated\n' >&2
-    exit 1
-}
+require_cloudflare_cache_handling \
+    "$temp_dir/conditional.headers" "conditional manifest"
 if [[ -s "$temp_dir/conditional.body" ]]; then
     printf '304 manifest response unexpectedly contained a body\n' >&2
     exit 1

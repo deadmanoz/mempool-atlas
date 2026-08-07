@@ -25,6 +25,7 @@ test-release:
     ./scripts/test-release-head.sh
 
 test-rust:
+    cargo test
     cargo test --features perf-fixtures
 
 test-web:
@@ -68,6 +69,12 @@ functional-fixtures:
 perf-fixtures: functional-fixtures
     cargo run --release --features perf-fixtures --bin export-perf-fixture -- --profile performance
 
+# Refresh the compact cross-language digest fixture from Rust-owned model data.
+publication-digest-fixture:
+    cargo run --release --features perf-fixtures --bin export-perf-fixture -- --profile performance --output-root target/publication-digest-fixture --transaction-count 3 --source-count 1
+    mkdir -p tests/fixtures
+    cp target/publication-digest-fixture/performance/snapshots/perf-node-01/manifest.json tests/fixtures/publication-digest-v2.json
+
 # Record exact identity/gzip projections and enforce the v2 staged byte gates.
 stage-projection: perf-fixtures
     node web/perf/project-stages.mjs
@@ -89,5 +96,5 @@ smoke-public base_url source_id:
 clean:
     cargo clean
     npm --prefix web run clean
-    rm -rf web/.perf-fixtures web/dist-perf
+    rm -rf web/.perf-fixtures
     rm -rf web/.perf-results

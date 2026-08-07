@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -11,11 +13,7 @@ import {
   validatePolicyResult,
 } from "./atlas-worker";
 import type { WorkerQuorumTiming } from "./atlas-worker-protocol";
-import type {
-  ClassifierDescriptor,
-  StageDescriptor,
-  StagedSnapshotManifest,
-} from "./types";
+import type { StageDescriptor, StagedSnapshotManifest } from "./types";
 
 const encoder = new TextEncoder();
 
@@ -223,348 +221,18 @@ const fixture = async (
   };
 };
 
-const goldenLabels = (
-  ...values: ReadonlyArray<readonly [string, string, string]>
-) => values.map(([key, label, description]) => ({ key, label, description }));
-
-const goldenClassifierCatalog = (): ClassifierDescriptor[] => [
-  {
-    id: "transaction_properties",
-    version: "1",
-    title: "Transaction properties",
-    methodology: "exact",
-    semantics: "multi_label",
-    required_facts: ["raw_transaction", "input_script_pubkeys"],
-    labels: goldenLabels(
-      ["version_1", "Version 1", "Serialized transaction version 1."],
-      ["version_2", "Version 2", "Serialized transaction version 2."],
-      ["version_3", "Version 3", "Serialized transaction version 3."],
-      [
-        "version_other",
-        "Other version",
-        "A transaction version other than 1, 2, or 3.",
-      ],
-      [
-        "signals_rbf",
-        "Signals RBF",
-        "At least one input explicitly signals BIP-125 replaceability.",
-      ],
-      ["has_witness", "Has witness", "At least one input has witness data."],
-      [
-        "has_taproot_annex",
-        "Taproot annex",
-        "A P2TR input has a structural annex candidate.",
-      ],
-      ["p2pk", "P2PK", "A known input or output uses pay-to-public-key."],
-      [
-        "bare_multisig",
-        "Bare multisig",
-        "A known input or output uses bare multisig.",
-      ],
-      [
-        "p2pkh",
-        "P2PKH",
-        "A known input or output uses pay-to-public-key-hash.",
-      ],
-      ["p2sh", "P2SH", "A known input or output uses pay-to-script-hash."],
-      [
-        "p2wpkh",
-        "P2WPKH",
-        "A known input or output uses native witness public-key-hash.",
-      ],
-      [
-        "p2wsh",
-        "P2WSH",
-        "A known input or output uses native witness script-hash.",
-      ],
-      ["p2tr", "P2TR", "A known input or output uses Taproot."],
-      ["p2a", "P2A", "A known input or output uses pay-to-anchor."],
-      [
-        "unknown_witness_program",
-        "Other witness program",
-        "A known input or output uses another syntactically valid witness program.",
-      ],
-      ["op_return", "OP_RETURN", "An output uses OP_RETURN."],
-      [
-        "unknown_script",
-        "Other script",
-        "A known input or output script is outside the recognized families.",
-      ],
+const publicationDigestGoldenManifest = (): StagedSnapshotManifest =>
+  parseManifest(
+    JSON.parse(
+      readFileSync(
+        new URL(
+          "../../tests/fixtures/publication-digest-v2.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
     ),
-  },
-  {
-    id: "transaction_shape",
-    version: "2",
-    title: "Transaction shape",
-    methodology: "heuristic",
-    semantics: "multi_label",
-    required_facts: ["raw_transaction", "input_script_pubkeys"],
-    labels: goldenLabels(
-      [
-        "possible_coinjoin",
-        "Possible CoinJoin",
-        "A conservative equal-output, no-script-reuse heuristic.",
-      ],
-      [
-        "consolidation",
-        "Consolidation",
-        "At least five times as many inputs as outputs.",
-      ],
-      [
-        "batch_payout",
-        "Batch payout",
-        "At least five times as many outputs as inputs.",
-      ],
-      [
-        "other_shape",
-        "Other shape",
-        "Every registered transaction-shape heuristic was terminal and none matched.",
-      ],
-    ),
-  },
-  {
-    id: "data_protocols",
-    version: "2",
-    title: "Data protocols",
-    methodology: "fingerprint",
-    semantics: "multi_label",
-    required_facts: ["raw_transaction"],
-    labels: goldenLabels(
-      [
-        "inscription",
-        "Inscription",
-        "An Ordinals inscription-envelope fingerprint.",
-      ],
-      [
-        "brc20",
-        "BRC-20",
-        "A JSON-like BRC-20 marker inside an inscription envelope.",
-      ],
-      ["runes", "Runes", "An OP_RETURN OP_13 runestone marker."],
-      [
-        "stamps",
-        "Stamps",
-        "A bare-multisig carrier whose deobfuscated payload holds a Stamps marker.",
-      ],
-      [
-        "counterparty",
-        "Counterparty",
-        "A deobfuscated CNTRPRTY envelope in an OP_RETURN or bare-multisig carrier.",
-      ],
-      [
-        "omni",
-        "Omni",
-        "An OP_RETURN payload beginning with the Omni Class C marker.",
-      ],
-      [
-        "other_op_return",
-        "Other OP_RETURN",
-        "An OP_RETURN carrier with no registered OP_RETURN protocol fingerprint.",
-      ],
-      [
-        "no_detected_protocol",
-        "No detected protocol",
-        "No registered data-protocol fingerprint fired.",
-      ],
-    ),
-  },
-  {
-    id: "knots_bip110",
-    version: "1",
-    title: "Knots BIP-110 compatibility",
-    methodology: "policy",
-    semantics: "rule_set",
-    required_facts: ["raw_transaction", "input_script_pubkeys"],
-    labels: goldenLabels(
-      [
-        "compatible",
-        "Compatible",
-        "No BIP-110 policy violation or missing fact was found.",
-      ],
-      [
-        "violating",
-        "Would violate",
-        "At least one BIP-110 policy violation was proven.",
-      ],
-      [
-        "indeterminate",
-        "Indeterminate",
-        "No violation was proven and at least one required fact is missing.",
-      ],
-    ),
-  },
-];
-
-const crossLanguageGoldenManifest = (): StagedSnapshotManifest => {
-  const populationId =
-    "999971f80e02890e195a9ad5c6b5f404d0c14236118ba67176f506cf1282d774";
-  const classificationSetId =
-    "b985157f7f5c72831eb66b67ae5da2d099cbe96204b39b37b40f7acad759c7f5";
-  const chainTip = { height: 900_000, hash: "aa".repeat(32) };
-  return {
-    schema_version: 2,
-    source: {
-      source_id: "alpha",
-      source_label: "Alpha",
-      availability: "ready",
-      poll_interval_seconds: 300,
-      last_poll_started_at_ms: 1_700_000_000_000,
-      snapshot_observed_at_ms: 1_700_000_000_025,
-      chain_tip: chainTip,
-      transaction_count: 3,
-      total_vsize: 306,
-      classification: {
-        state: "classifying",
-        revision: 7,
-        classified_count: 2,
-        unclassified_count: 1,
-      },
-      last_error: null,
-    },
-    source_id: "alpha",
-    source_label: "Alpha",
-    collection_started_at_ms: 1_700_000_000_000,
-    collection_completed_at_ms: 1_700_000_000_025,
-    collection_duration_ms: 25,
-    observed_at_ms: 1_700_000_000_025,
-    classification_revision: 7,
-    chain_tip: chainTip,
-    transaction_count: 3,
-    total_vsize: 306,
-    classifier_catalog: goldenClassifierCatalog(),
-    classification_summaries: [
-      {
-        classifier_id: "transaction_properties",
-        complete_count: 2,
-        partial_count: 0,
-        unclassified_count: 1,
-        label_counts: {
-          bare_multisig: 0,
-          has_taproot_annex: 0,
-          has_witness: 0,
-          op_return: 0,
-          p2a: 0,
-          p2pk: 0,
-          p2pkh: 0,
-          p2sh: 0,
-          p2tr: 0,
-          p2wpkh: 2,
-          p2wsh: 0,
-          signals_rbf: 0,
-          unknown_script: 0,
-          unknown_witness_program: 0,
-          version_1: 0,
-          version_2: 2,
-          version_3: 0,
-          version_other: 0,
-        },
-      },
-      {
-        classifier_id: "transaction_shape",
-        complete_count: 0,
-        partial_count: 2,
-        unclassified_count: 1,
-        label_counts: {
-          batch_payout: 0,
-          consolidation: 0,
-          other_shape: 2,
-          possible_coinjoin: 0,
-        },
-      },
-      {
-        classifier_id: "data_protocols",
-        complete_count: 2,
-        partial_count: 0,
-        unclassified_count: 1,
-        label_counts: {
-          brc20: 0,
-          counterparty: 0,
-          inscription: 0,
-          no_detected_protocol: 2,
-          omni: 0,
-          other_op_return: 0,
-          runes: 0,
-          stamps: 0,
-        },
-      },
-      {
-        classifier_id: "knots_bip110",
-        complete_count: 0,
-        partial_count: 2,
-        unclassified_count: 1,
-        label_counts: { compatible: 0, indeterminate: 0, violating: 2 },
-      },
-    ],
-    bip110_summary: {
-      evaluator_id: "rdts-rules",
-      evaluator_version: "1.0.0",
-      scope: "knots_mempool_policy",
-      compatible_count: 0,
-      violating_count: 2,
-      indeterminate_count: 0,
-      unclassified_count: 1,
-    },
-    row_count: 3,
-    population_id: populationId,
-    classification_set_id: classificationSetId,
-    publication_id:
-      "8ff35103f129bbe65e68dbd0e41bb285741a4854883a2e2c1e3fafb5aaf2f3b6",
-    stages: [
-      {
-        kind: "population",
-        content_id: populationId,
-        uncompressed_bytes: 269,
-        row_count: 3,
-        dependency_ids: [],
-      },
-      {
-        kind: "membership",
-        content_id:
-          "a3b55188031742132f84c78dd5f4a1accf8f7c2a3fd23d5c39088c9a42dc8ed5",
-        uncompressed_bytes: 898,
-        row_count: 3,
-        dependency_ids: [populationId],
-      },
-      {
-        kind: "structure",
-        content_id:
-          "4a6cca64c67d144b0e0a3168629da119b826961414942dc8cfab2d7fdbe7dabd",
-        uncompressed_bytes: 698,
-        row_count: 3,
-        dependency_ids: [populationId, classificationSetId],
-      },
-      ...[
-        [
-          "transaction_properties",
-          "0f585fe6035c6114f375e5b1e9d2563c9ec29304e889ad70383e64b6e2daa458",
-          435,
-        ],
-        [
-          "transaction_shape",
-          "39143c29f21996bc8cbc10e8db13d0fe9aed7f43a893d8b254d9657e010b4f76",
-          471,
-        ],
-        [
-          "data_protocols",
-          "58ab50bb672ef4bcefa102d37384b50357825df7b377e6e2b6a14d1c36c6bc77",
-          447,
-        ],
-        [
-          "knots_bip110",
-          "e16d4b69e4e9f870779ea60585fc16b216c4d05d1d815200570f5c25863fb139",
-          681,
-        ],
-      ].map(([classifier_id, content_id, uncompressed_bytes]) => ({
-        kind: "classifier" as const,
-        classifier_id: classifier_id as string,
-        content_id: content_id as string,
-        uncompressed_bytes: uncompressed_bytes as number,
-        row_count: 3,
-        dependency_ids: [populationId],
-      })),
-    ],
-  };
-};
+  );
 
 const response = (bytes: Uint8Array, status = 200): Response =>
   new Response(Uint8Array.from(bytes).buffer, {
@@ -591,14 +259,14 @@ describe("v2 manifest validation", () => {
     );
   });
 
-  it("matches the Rust publication-root golden vector", async () => {
-    const manifest = crossLanguageGoldenManifest();
+  it("matches the Rust publication digest fixture", async () => {
+    const manifest = publicationDigestGoldenManifest();
 
     await expect(classificationSetId(manifest)).resolves.toBe(
-      "b985157f7f5c72831eb66b67ae5da2d099cbe96204b39b37b40f7acad759c7f5",
+      manifest.classification_set_id,
     );
     await expect(publicationId(manifest)).resolves.toBe(
-      "8ff35103f129bbe65e68dbd0e41bb285741a4854883a2e2c1e3fafb5aaf2f3b6",
+      manifest.publication_id,
     );
   });
 
@@ -718,6 +386,36 @@ describe("v2 manifest validation", () => {
 });
 
 describe("v2 coherent publication loading", () => {
+  it("preserves a structured manifest problem without an HTTP message prefix", async () => {
+    const problem = {
+      type: "v2_unavailable",
+      title: "Current v2 publication unavailable",
+      status: 503,
+      detail:
+        "Atlas has not published a current complete snapshot for this source.",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        response(new TextEncoder().encode(JSON.stringify(problem)), 503),
+      ),
+    );
+
+    await expect(
+      loadPackedPublication(
+        "core",
+        "knots_bip110",
+        new AbortController().signal,
+        vi.fn(),
+        vi.fn(),
+      ),
+    ).rejects.toMatchObject({
+      message: problem.title,
+      problem,
+      status: 503,
+    });
+  });
+
   it("reports worker decode, validation, and packing timing for both quorums", async () => {
     const current = await fixture();
     const requests: string[] = [];

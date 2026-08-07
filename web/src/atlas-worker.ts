@@ -13,6 +13,9 @@ import type {
   WorkerQuorumTiming,
   WorkerStageTiming,
 } from "./atlas-worker-protocol";
+import { atlasFailureBody } from "./atlas-problem";
+import type { AtlasProblem } from "./atlas-problem";
+import { SupersededStageError, WorkerHttpError } from "./atlas-worker-errors";
 import type {
   Bip110Assessment,
   ClassifierDescriptor,
@@ -1077,17 +1080,6 @@ const classifierStage = (
   };
 };
 
-class SupersededStageError extends Error {}
-
-class WorkerHttpError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
 const wait = (milliseconds: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -1171,12 +1163,17 @@ const fetchBytes = async (
       signal,
       headers: { Accept: "application/json" },
     });
-    if (response.status === 409) throw new SupersededStageError();
+    if (response.status === 409) {
+      await response.body?.cancel();
+      throw new SupersededStageError();
+    }
     if (response.status === 429) {
       if (attempt < 3) {
+        await response.body?.cancel();
         await wait(retryDelay(response, attempt), signal);
         continue;
       }
+      await response.body?.cancel();
       throw new WorkerHttpError(
         429,
         "Atlas rate limit retries exhausted after 4 attempts",
@@ -1184,6 +1181,7 @@ const fetchBytes = async (
     }
     if (!response.ok) {
       let detail = "";
+      let problem: AtlasProblem | null = null;
       try {
         const errorBytes = await readBoundedResponse(
           response,
@@ -1191,17 +1189,11 @@ const fetchBytes = async (
           null,
         );
         const body: unknown = JSON.parse(new TextDecoder().decode(errorBytes));
-        if (isRecord(body)) {
-          const message = body.title ?? body.error;
-          if (typeof message === "string") detail = `: ${message}`;
-        }
+        ({ detail, problem } = atlasFailureBody(body, response.status));
       } catch {
         // Status and route remain enough to diagnose a malformed error body.
       }
-      throw new WorkerHttpError(
-        response.status,
-        `Atlas request failed (${response.status})${detail}`,
-      );
+      throw new WorkerHttpError(response.status, detail, problem);
     }
     return readBoundedResponse(response, maximumBytes, exactBytes);
   }
@@ -1952,6 +1944,7 @@ const load = async (
       type: "error",
       requestId: request.requestId,
       status: error instanceof WorkerHttpError ? error.status : null,
+      problem: error instanceof WorkerHttpError ? error.problem : null,
       message:
         error instanceof Error
           ? error.message

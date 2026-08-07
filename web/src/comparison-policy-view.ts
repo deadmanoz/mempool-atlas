@@ -160,13 +160,19 @@ interface SliceAccumulator {
   statusTotals: ComparisonPolicyStatusTotals;
   ruleTotals: ComparisonPolicyRuleTotals;
   signatures: Map<ViolationSignatureKey, SignatureAccumulator>;
-  samples: Map<string, ComparedTransaction[]>;
+  samples: Map<string, SampleRow[]>;
 }
 
 interface SliceState {
   slice: ComparisonPolicySlice;
   signatureTotals: Map<ViolationSignatureKey, ComparisonPolicyTotals>;
-  samples: Map<string, ComparedTransaction[]>;
+  samples: Map<string, SampleRow[]>;
+}
+
+interface SampleRow {
+  index: number;
+  txid: string;
+  vsize: number;
 }
 
 const SLICE_SPECS: readonly SliceSpec[] = [
@@ -218,6 +224,7 @@ const addTransaction = (
   accumulator: SliceAccumulator,
   transaction: MempoolTransaction,
   entry: ComparedTransaction,
+  index: number,
 ): void => {
   const sampleKeys = ["all", `status:${policyStatus(transaction)}`];
   addToTotals(accumulator.population, transaction);
@@ -245,7 +252,11 @@ const addTransaction = (
   }
   for (const key of sampleKeys) {
     const sample = accumulator.samples.get(key) ?? [];
-    addToBoundedSample(sample, entry, accumulator.spec.side);
+    addToBoundedSample(sample, {
+      index,
+      txid: entry.txid,
+      vsize: transaction.vsize,
+    });
     accumulator.samples.set(key, sample);
   }
 };
@@ -358,32 +369,18 @@ const filterKey = (filter: ComparisonPolicyFilter): string => {
   return `signature:${filter.signature}`;
 };
 
-const compareSampleEntries = (
-  left: ComparedTransaction,
-  right: ComparedTransaction,
-  side: ComparisonSide,
-): number => {
-  const leftVsize = sourceEntry(left, side)?.vsize ?? 0;
-  const rightVsize = sourceEntry(right, side)?.vsize ?? 0;
-  return rightVsize - leftVsize || left.txid.localeCompare(right.txid);
-};
+const compareSampleRows = (left: SampleRow, right: SampleRow): number =>
+  right.vsize - left.vsize || left.txid.localeCompare(right.txid);
 
-const addToBoundedSample = (
-  sample: ComparedTransaction[],
-  entry: ComparedTransaction,
-  side: ComparisonSide,
-): void => {
+const addToBoundedSample = (sample: SampleRow[], row: SampleRow): void => {
   let index = 0;
-  while (
-    index < sample.length &&
-    compareSampleEntries(sample[index]!, entry, side) <= 0
-  ) {
+  while (index < sample.length && compareSampleRows(sample[index]!, row) <= 0) {
     index += 1;
   }
   if (index >= COMPARISON_POLICY_SAMPLE_LIMIT) {
     return;
   }
-  sample.splice(index, 0, entry);
+  sample.splice(index, 0, row);
   if (sample.length > COMPARISON_POLICY_SAMPLE_LIMIT) {
     sample.pop();
   }
@@ -423,32 +420,36 @@ const accumulateComparison = (
     commonRightSpec,
   );
   const rightAccumulator = requiredAccumulator(accumulators, rightSpec);
-  for (const entry of comparison.left_only) {
+  comparison.left_only.forEach((entry, index) => {
     addTransaction(
       leftAccumulator,
       requiredTransaction(entry, leftSpec),
       entry,
+      index,
     );
-  }
-  for (const entry of comparison.common) {
+  });
+  comparison.common.forEach((entry, index) => {
     addTransaction(
       commonLeftAccumulator,
       requiredTransaction(entry, commonLeftSpec),
       entry,
+      index,
     );
     addTransaction(
       commonRightAccumulator,
       requiredTransaction(entry, commonRightSpec),
       entry,
+      index,
     );
-  }
-  for (const entry of comparison.right_only) {
+  });
+  comparison.right_only.forEach((entry, index) => {
     addTransaction(
       rightAccumulator,
       requiredTransaction(entry, rightSpec),
       entry,
+      index,
     );
-  }
+  });
   return accumulators;
 };
 
@@ -473,38 +474,42 @@ const accumulateComparisonCooperatively = async (
   const rightAccumulator = requiredAccumulator(accumulators, rightSpec);
   await forEachCooperatively(
     comparison.left_only,
-    (entry) => {
+    (entry, index) => {
       addTransaction(
         leftAccumulator,
         requiredTransaction(entry, leftSpec),
         entry,
+        index,
       );
     },
     options,
   );
   await forEachCooperatively(
     comparison.common,
-    (entry) => {
+    (entry, index) => {
       addTransaction(
         commonLeftAccumulator,
         requiredTransaction(entry, commonLeftSpec),
         entry,
+        index,
       );
       addTransaction(
         commonRightAccumulator,
         requiredTransaction(entry, commonRightSpec),
         entry,
+        index,
       );
     },
     options,
   );
   await forEachCooperatively(
     comparison.right_only,
-    (entry) => {
+    (entry, index) => {
       addTransaction(
         rightAccumulator,
         requiredTransaction(entry, rightSpec),
         entry,
+        index,
       );
     },
     options,
@@ -518,7 +523,7 @@ export class ComparisonPolicyView {
   private readonly populations = new Map<string, ComparisonPolicyPopulation>();
 
   constructor(
-    comparison: CurrentComparison,
+    private readonly comparison: CurrentComparison,
     accumulators = accumulateComparison(comparison),
   ) {
     for (const spec of SLICE_SPECS) {
@@ -578,7 +583,14 @@ export class ComparisonPolicyView {
       this.populations.set(key, population);
       return population;
     }
-    const sample = state.samples.get(filterKey(filter)) ?? [];
+    const entries = this.comparison[region];
+    const sample = (state.samples.get(filterKey(filter)) ?? []).map((row) => {
+      const entry = entries[row.index];
+      if (entry === undefined) {
+        throw new Error(`Comparison policy sample row ${row.index} is missing`);
+      }
+      return entry;
+    });
     const population = { count: totals.count, vsize: totals.vsize, sample };
     this.populations.set(key, population);
     return population;

@@ -125,8 +125,10 @@ const errorBodies = Object.freeze({
   unavailable: Buffer.from(
     JSON.stringify({
       type: "v2_unavailable",
-      title: "Current v2 publication is unavailable",
+      title: "Current v2 publication unavailable",
       status: 503,
+      detail:
+        "Atlas has not published a current complete snapshot for this source.",
     }),
   ),
 });

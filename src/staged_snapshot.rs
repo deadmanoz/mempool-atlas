@@ -1493,69 +1493,6 @@ mod tests {
     }
 
     #[test]
-    fn publication_root_matches_cross_language_golden_vector() {
-        let (source, snapshot) = fixture();
-        let bundle = encode_staged_snapshot(&source, &snapshot).expect("golden encoding");
-
-        assert_eq!(snapshot.source_id, "alpha");
-        assert_eq!(snapshot.observed_at_ms, 1_700_000_000_025);
-        assert_eq!(snapshot.classification_revision, 7);
-        assert_eq!(snapshot.transaction_count, 3);
-        assert_eq!(source.last_poll_started_at_ms, Some(1_700_000_000_000));
-        assert_eq!(
-            bundle.manifest.value.population_id,
-            "999971f80e02890e195a9ad5c6b5f404d0c14236118ba67176f506cf1282d774"
-        );
-        assert_eq!(
-            bundle.manifest.value.classification_set_id,
-            "b985157f7f5c72831eb66b67ae5da2d099cbe96204b39b37b40f7acad759c7f5"
-        );
-        assert_eq!(
-            bundle
-                .manifest
-                .value
-                .stages
-                .iter()
-                .map(|stage| (stage.content_id.as_str(), stage.uncompressed_bytes))
-                .collect::<Vec<_>>(),
-            vec![
-                (
-                    "999971f80e02890e195a9ad5c6b5f404d0c14236118ba67176f506cf1282d774",
-                    269,
-                ),
-                (
-                    "a3b55188031742132f84c78dd5f4a1accf8f7c2a3fd23d5c39088c9a42dc8ed5",
-                    898,
-                ),
-                (
-                    "4a6cca64c67d144b0e0a3168629da119b826961414942dc8cfab2d7fdbe7dabd",
-                    698,
-                ),
-                (
-                    "0f585fe6035c6114f375e5b1e9d2563c9ec29304e889ad70383e64b6e2daa458",
-                    435,
-                ),
-                (
-                    "39143c29f21996bc8cbc10e8db13d0fe9aed7f43a893d8b254d9657e010b4f76",
-                    471,
-                ),
-                (
-                    "58ab50bb672ef4bcefa102d37384b50357825df7b377e6e2b6a14d1c36c6bc77",
-                    447,
-                ),
-                (
-                    "e16d4b69e4e9f870779ea60585fc16b216c4d05d1d815200570f5c25863fb139",
-                    681,
-                ),
-            ]
-        );
-        assert_eq!(
-            bundle.manifest.value.publication_id,
-            "8ff35103f129bbe65e68dbd0e41bb285741a4854883a2e2c1e3fafb5aaf2f3b6"
-        );
-    }
-
-    #[test]
     fn retained_membership_buffers_are_reused_without_copying() {
         let (source, snapshot) = fixture();
         let first = encode_staged_snapshot(&source, &snapshot).expect("first encoding");

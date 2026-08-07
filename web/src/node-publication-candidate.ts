@@ -37,7 +37,7 @@ import type { NodeViewState } from "./view-state";
 
 export interface NodePublicationCandidate {
   source: SourceSummary;
-  publicationId: string;
+  snapshotIdentity: string;
   snapshot: MempoolSnapshot;
   classification: ClassificationProgress;
   complete: boolean;
@@ -52,7 +52,7 @@ export interface NodePublicationCandidate {
 export interface NodePublicationInput {
   viewState: NodeViewState;
   terrainMode: TerrainMode;
-  currentPublicationId: string | null;
+  currentSnapshotIdentity: string | null;
   selectedClassifierLabel: string | null;
   selectedClassifierBucketKey: ClassifierBucketKey | null;
   selectedInspector: TerrainSelection;
@@ -85,7 +85,7 @@ export const nodePublicationCandidateReadyDetail = (
   candidate: NodePublicationCandidate,
 ): AtlasCandidateReadyDetail => ({
   surface: "node",
-  candidateKey: `${candidate.snapshot.source_id}:${candidate.snapshot.observed_at_ms}:${candidate.snapshot.classification_revision}`,
+  candidateKey: candidate.snapshotIdentity,
   sourceIds: [candidate.source.source_id],
 });
 
@@ -157,7 +157,7 @@ export const prepareNodePublicationCandidate = async (
 
   return {
     source,
-    publicationId: response.publication_id,
+    snapshotIdentity: response.snapshot_identity,
     snapshot,
     classification,
     complete,
@@ -183,7 +183,7 @@ export const retainNodePublicationSelection = (
   input: NodePublicationInput,
 ): NodePublicationCandidate => {
   if (
-    input.currentPublicationId !== candidate.publicationId ||
+    input.currentSnapshotIdentity !== candidate.snapshotIdentity ||
     input.viewState.classifier !== candidate.selectedClassifierId
   ) {
     return candidate;
@@ -242,7 +242,8 @@ export const prepareNodePublicationCommit = async (
     const canCommit = (): boolean =>
       currentInput().viewState === input.viewState &&
       currentInput().terrainMode === input.terrainMode &&
-      currentInput().currentPublicationId === input.currentPublicationId &&
+      currentInput().currentSnapshotIdentity ===
+        input.currentSnapshotIdentity &&
       currentInput().selectedClassifierLabel ===
         input.selectedClassifierLabel &&
       currentInput().selectedClassifierBucketKey ===

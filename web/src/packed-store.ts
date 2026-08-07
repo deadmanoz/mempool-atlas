@@ -10,6 +10,7 @@ import type {
   MempoolSnapshot,
   MempoolTransaction,
   LoadedSourcePublication,
+  StagedSnapshotManifest,
   TransactionStructure,
 } from "./types";
 
@@ -519,6 +520,37 @@ const transactionStores = new WeakMap<
   PackedLookup
 >();
 
+/**
+ * Identity of the complete snapshot/classification projection, excluding
+ * source lifecycle and presentation metadata that can change independently.
+ */
+export const snapshotIdentity = (manifest: StagedSnapshotManifest): string =>
+  JSON.stringify([
+    manifest.source_id,
+    manifest.collection_started_at_ms,
+    manifest.collection_completed_at_ms,
+    manifest.collection_duration_ms,
+    manifest.observed_at_ms,
+    manifest.classification_revision,
+    manifest.chain_tip,
+    manifest.transaction_count,
+    manifest.total_vsize,
+    manifest.row_count,
+    manifest.classifier_catalog,
+    manifest.classification_summaries,
+    manifest.bip110_summary,
+    manifest.population_id,
+    manifest.classification_set_id,
+    manifest.stages.map((stage) => [
+      stage.kind,
+      stage.classifier_id ?? null,
+      stage.content_id,
+      stage.uncompressed_bytes,
+      stage.row_count,
+      stage.dependency_ids,
+    ]),
+  ]);
+
 export const createLoadedSourcePublication = (
   publication: PackedPublicationTransfer,
 ): LoadedSourcePublication => {
@@ -526,6 +558,7 @@ export const createLoadedSourcePublication = (
   return {
     source: publication.manifest.source,
     publication_id: publication.manifest.publication_id,
+    snapshot_identity: snapshotIdentity(publication.manifest),
     publication: store.snapshot,
   };
 };
@@ -537,6 +570,7 @@ export const createPrimarySourcePublication = (
   return {
     source: publication.manifest.source,
     publication_id: publication.manifest.publication_id,
+    snapshot_identity: snapshotIdentity(publication.manifest),
     publication: store.snapshot,
   };
 };

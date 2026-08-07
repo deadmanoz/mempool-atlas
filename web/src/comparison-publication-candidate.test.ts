@@ -13,6 +13,7 @@ const publication = (sourceId: string, values: number[]) => {
     source: loaded.source,
     publication_id:
       `${sourceId.charCodeAt(0).toString(16).padStart(2, "0")}`.repeat(32),
+    snapshot_identity: `snapshot-${sourceId}`,
     publication: loaded.snapshot,
   };
 };
@@ -35,8 +36,7 @@ describe("comparison publication candidate", () => {
       candidate.policyView.rows.map(({ populationCount }) => populationCount),
     ).toEqual([1, 2, 2, 1]);
     expect(candidate.sourceIds).toEqual(["left", "right"]);
-    expect(candidate.candidateKey).toContain("left:");
-    expect(candidate.candidateKey).toContain("right:");
+    expect(candidate.candidateKey).toBe("snapshot-left|snapshot-right");
   });
 
   it("does not begin preparation for a superseded request", async () => {

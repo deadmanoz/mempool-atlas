@@ -16,6 +16,7 @@ const OUTPUT_PATH = resolve(
 const THROUGHPUT_BYTES_PER_SECOND = 159_461.45607954692;
 const PERFORMANCE_SOURCE_COUNT = 2;
 const PERFORMANCE_TRANSACTION_COUNT = 70_000;
+const GZIP_LEVEL = 6;
 const GATES = Object.freeze({
   node_primary_bytes: 3_189_229,
   node_complete_target_bytes: 6_059_535,
@@ -55,7 +56,7 @@ const measuredBody = (descriptor) => {
   }
   return Object.freeze({
     identity_bytes: bytes.byteLength,
-    gzip_bytes: gzipSync(bytes, { level: 9 }).byteLength,
+    gzip_bytes: gzipSync(bytes, { level: GZIP_LEVEL }).byteLength,
   });
 };
 

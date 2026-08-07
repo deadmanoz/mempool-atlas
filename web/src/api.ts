@@ -24,17 +24,30 @@ import {
   createLoadedSourcePublication,
   createPrimarySourcePublication,
 } from "./packed-store";
+import { atlasFailureBody, type AtlasProblem } from "./atlas-problem";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
 export class AtlasRequestError extends Error {
   readonly status: number;
+  readonly problem: AtlasProblem | null;
 
-  constructor(status: number, detail: string) {
-    super(`Atlas request failed (${status})${detail}`);
+  constructor(
+    status: number,
+    detail = "",
+    problem: AtlasProblem | null = null,
+  ) {
+    super(
+      `Atlas request failed (${status})${detail === "" ? "" : `: ${detail}`}`,
+    );
     this.name = "AtlasRequestError";
     this.status = status;
+    this.problem = problem;
+  }
+
+  get problemType(): string | null {
+    return this.problem?.type ?? null;
   }
 }
 
@@ -559,15 +572,14 @@ const fetchJson = async (
   const response = await fetch(path, options);
   if (!response.ok) {
     let detail = "";
+    let problem: AtlasProblem | null = null;
     try {
       const body: unknown = await response.json();
-      if (isRecord(body) && typeof body.error === "string") {
-        detail = `: ${body.error}`;
-      }
+      ({ detail, problem } = atlasFailureBody(body, response.status));
     } catch {
       // The HTTP status remains useful when the body is not JSON.
     }
-    throw new AtlasRequestError(response.status, detail);
+    throw new AtlasRequestError(response.status, detail, problem);
   }
   return response.json();
 };
@@ -680,7 +692,11 @@ const worker = (): Worker => {
           pending,
           response.status === null
             ? new TypeError(response.message)
-            : new AtlasRequestError(response.status, `: ${response.message}`),
+            : new AtlasRequestError(
+                response.status,
+                response.message,
+                response.problem,
+              ),
         );
         return;
       }

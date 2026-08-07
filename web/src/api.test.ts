@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  AtlasRequestError,
   fetchSources,
   fetchTransactionDetail,
   parseSourceSummary,
@@ -566,13 +565,25 @@ describe("request paths", () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 503,
-      json: async () => ({ title: "Unavailable" }),
+      json: async () => ({
+        type: "v2_unavailable",
+        title: "Current v2 publication unavailable",
+        status: 503,
+        detail:
+          "Atlas has not published a current complete snapshot for this source.",
+      }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(fetchTransactionDetail("core", TXID)).rejects.toBeInstanceOf(
-      AtlasRequestError,
+    const rejected = fetchTransactionDetail("core", TXID).catch(
+      (error: unknown) => error,
     );
+    await expect(rejected).resolves.toMatchObject({
+      message: "Atlas request failed (503): Current v2 publication unavailable",
+      name: "AtlasRequestError",
+      problemType: "v2_unavailable",
+      status: 503,
+    });
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/v2/sources/core/transactions/${TXID}`,
       { headers: { Accept: "application/json" } },
@@ -616,6 +627,56 @@ describe("transactionDetailMatchesSnapshot", () => {
 });
 
 describe("publication worker lifecycle", () => {
+  it("preserves a worker problem without duplicating the HTTP prefix", async () => {
+    class FakeWorker {
+      static instance: FakeWorker;
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+
+      constructor() {
+        FakeWorker.instance = this;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(data: unknown): void {
+        this.listeners
+          .get("message")
+          ?.forEach((listener) => listener({ data }));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    const request = fetchSourcePublication("core");
+
+    FakeWorker.instance.emit({
+      type: "error",
+      requestId: 1,
+      status: 503,
+      problem: {
+        type: "v2_unavailable",
+        title: "Current v2 publication unavailable",
+        status: 503,
+        detail:
+          "Atlas has not published a current complete snapshot for this source.",
+      },
+      message: "Current v2 publication unavailable",
+      retryable: false,
+    });
+
+    const rejected = request.catch((error: unknown) => error);
+    await expect(rejected).resolves.toMatchObject({
+      message: "Atlas request failed (503): Current v2 publication unavailable",
+      problemType: "v2_unavailable",
+      status: 503,
+    });
+  });
+
   it("does not deliver the complete publication before primary paint finishes", async () => {
     class FakeWorker {
       static instance: FakeWorker;

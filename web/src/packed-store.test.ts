@@ -14,6 +14,7 @@ import {
   packedSnapshotRowCount,
   packedSnapshotRowVsize,
   packedSnapshotTransaction,
+  snapshotIdentity,
   snapshotIsComplete,
 } from "./packed-store";
 import {
@@ -167,6 +168,34 @@ const publication = (): PackedPublicationTransfer => ({
 });
 
 describe("PackedPublicationStore", () => {
+  it("identifies snapshot content independently of source lifecycle metadata", () => {
+    const current = publication().manifest;
+    const lifecycleChange = structuredClone(current);
+    lifecycleChange.publication_id = "99".repeat(32);
+    lifecycleChange.source = {
+      ...lifecycleChange.source,
+      availability: "stale",
+      last_poll_started_at_ms: 110,
+      last_error: "next poll failed",
+    };
+
+    expect(snapshotIdentity(lifecycleChange)).toBe(snapshotIdentity(current));
+
+    const snapshotChange = structuredClone(current);
+    snapshotChange.stages = [
+      {
+        kind: "population",
+        content_id: "88".repeat(32),
+        uncompressed_bytes: 64,
+        row_count: 2,
+        dependency_ids: [],
+      },
+    ];
+    expect(snapshotIdentity(snapshotChange)).not.toBe(
+      snapshotIdentity(current),
+    );
+  });
+
   it("decodes safe seven-byte unsigned columns without BigInt materialization", () => {
     const current = publication();
     current.membership.feeSats = signedColumn(

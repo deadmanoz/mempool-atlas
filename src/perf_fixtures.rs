@@ -1118,6 +1118,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn committed_publication_digest_fixture_matches_rust_export() {
+        let (sources, _) = performance_sources(PERFORMANCE_REFERENCE_TIME_MS, 3, 1)
+            .expect("publication digest fixture source");
+        let source = sources.first().expect("publication digest fixture source");
+        let bundle = encode_staged_snapshot(&source.summary, &source.snapshot)
+            .expect("publication digest fixture encoding");
+
+        assert_eq!(
+            bundle.manifest.bytes.as_ref(),
+            include_bytes!("../tests/fixtures/publication-digest-v2.json")
+        );
+    }
+
+    #[test]
     fn synthetic_distribution_curves_are_fixed_and_bounded() {
         let samples = [0, 1 << 30, 1 << 31, 3 << 30, u32::MAX];
         let vsize_values = samples.map(vsize_fraction);
