@@ -25,7 +25,6 @@ const DIGEST = /^[0-9a-f]{64}$/;
 const SOURCE_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const CLASSIFIER_ID = /^[a-z][a-z0-9_]*$/;
 const MAX_SUPERSESSION_RESTARTS = 3;
-const SUPERSESSION_WINDOW_MS = 10_000;
 const MAX_SUPPORTED_ROWS = 200_000;
 const MAX_STAGE_BYTES = 64 * 1024 * 1024;
 const MAX_PUBLICATION_BYTES = 192 * 1024 * 1024;
@@ -1711,7 +1710,6 @@ export const loadPackedPublication = async (
   onCompleteTiming: (timing: WorkerQuorumTiming) => void = () => undefined,
 ): Promise<PackedPublicationTransfer> => {
   let restarts = 0;
-  let firstSupersessionAt: number | null = null;
   const stageCache = new Map<string, CachedStage>();
   let primaryCommitted = false;
   let primaryPopulationId: string | null = null;
@@ -1721,11 +1719,7 @@ export const loadPackedPublication = async (
   let populationRebaseStartedAt: number | null = null;
   const recordSupersessionRestart = (): void => {
     restarts += 1;
-    firstSupersessionAt ??= performance.now();
-    if (
-      restarts > MAX_SUPERSESSION_RESTARTS ||
-      performance.now() - firstSupersessionAt > SUPERSESSION_WINDOW_MS
-    ) {
+    if (restarts > MAX_SUPERSESSION_RESTARTS) {
       throw new WorkerHttpError(
         409,
         "Source changed while loading; retry when it settles",

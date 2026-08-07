@@ -4,7 +4,9 @@ import {
   AtlasRequestError,
   fetchSources,
   fetchTransactionDetail,
+  parseSourceSummary,
   parseSourcesResponse,
+  parseTransactionDetailResponse,
   transactionDetailMatchesSnapshot,
 } from "./api";
 import type {
@@ -14,6 +16,7 @@ import type {
 } from "./types";
 
 const TXID = "00".repeat(32);
+const BLOCK_HASH = "01".repeat(32);
 
 const waitingSource = () => ({
   source_id: "core",
@@ -27,6 +30,140 @@ const waitingSource = () => ({
   total_vsize: null,
   classification: null,
   last_error: null,
+});
+
+const readySource = () => ({
+  ...waitingSource(),
+  availability: "ready",
+  last_poll_started_at_ms: 1_700_000_000_000,
+  snapshot_observed_at_ms: 1_700_000_001_000,
+  chain_tip: { height: 900_000, hash: BLOCK_HASH },
+  transaction_count: 1,
+  total_vsize: 141,
+  classification: {
+    state: "complete",
+    revision: 3,
+    classified_count: 1,
+    unclassified_count: 0,
+  },
+});
+
+const compactClassifications = () => [
+  {
+    classifier_id: "transaction_properties",
+    state: "complete" as const,
+    primary_label: null,
+    labels: ["version_2", "p2wpkh"],
+    missing_facts: [],
+    evidence: null,
+  },
+  {
+    classifier_id: "transaction_shape",
+    state: "complete" as const,
+    primary_label: "other_shape",
+    labels: ["other_shape"],
+    missing_facts: [],
+    evidence: null,
+  },
+  {
+    classifier_id: "data_protocols",
+    state: "complete" as const,
+    primary_label: "no_detected_protocol",
+    labels: ["no_detected_protocol"],
+    missing_facts: [],
+    evidence: null,
+  },
+  {
+    classifier_id: "knots_bip110",
+    state: "complete" as const,
+    primary_label: "violating",
+    labels: ["violating"],
+    missing_facts: [],
+    evidence: null,
+  },
+];
+
+const transactionDetail = (): TransactionDetailResponse => ({
+  source_id: "core",
+  snapshot_observed_at_ms: 1_700_000_001_000,
+  classification_revision: 3,
+  txid: TXID,
+  wtxid: TXID,
+  classifications: compactClassifications().map((result) => ({
+    ...result,
+    evidence: { fixture: true },
+  })),
+  assessment: {
+    status: "violating",
+    primary_rule: "element_size",
+    violated_rules: ["element_size"],
+    unknown_rules: [],
+  },
+  rules: [
+    {
+      rule: "output_size",
+      number: 1,
+      verdict: "pass",
+      evidence_count: 0,
+      evidence: [],
+      missing_count: 0,
+      missing: [],
+    },
+    {
+      rule: "element_size",
+      number: 2,
+      verdict: "violate",
+      evidence_count: 3,
+      evidence: [{ location: "witness[0]" }],
+      missing_count: 0,
+      missing: [],
+    },
+    {
+      rule: "undefined_version",
+      number: 3,
+      verdict: "pass",
+      evidence_count: 0,
+      evidence: [],
+      missing_count: 0,
+      missing: [],
+    },
+    {
+      rule: "taproot_annex",
+      number: 4,
+      verdict: "pass",
+      evidence_count: 0,
+      evidence: [],
+      missing_count: 0,
+      missing: [],
+    },
+    {
+      rule: "control_block_size",
+      number: 5,
+      verdict: "pass",
+      evidence_count: 0,
+      evidence: [],
+      missing_count: 0,
+      missing: [],
+    },
+    {
+      rule: "op_success",
+      number: 6,
+      verdict: "pass",
+      evidence_count: 0,
+      evidence: [],
+      missing_count: 0,
+      missing: [],
+    },
+    {
+      rule: "tapscript_op_if",
+      number: 7,
+      verdict: "pass",
+      evidence_count: 0,
+      evidence: [],
+      missing_count: 0,
+      missing: [],
+    },
+  ],
 });
 
 const emptyUnsigned = () => ({ width: 1, values: new ArrayBuffer(0) });
@@ -125,13 +262,257 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("parseSourceSummary", () => {
+  it("accepts coherent waiting, ready, stale, and error states", () => {
+    const waiting = waitingSource();
+    const ready = readySource();
+    const stale = {
+      ...readySource(),
+      availability: "stale",
+      last_error: "node unavailable",
+    };
+    const error = {
+      ...waitingSource(),
+      availability: "error",
+      last_error: "initial poll failed",
+    };
+
+    expect(parseSourceSummary(waiting)).toBe(waiting);
+    expect(parseSourceSummary(ready)).toBe(ready);
+    expect(parseSourceSummary(stale)).toBe(stale);
+    expect(parseSourceSummary(error)).toBe(error);
+  });
+
+  it("rejects partial snapshot metadata and classification count drift", () => {
+    expect(() =>
+      parseSourceSummary({ ...waitingSource(), transaction_count: 1 }),
+    ).toThrow("partial snapshot");
+
+    expect(() =>
+      parseSourceSummary({
+        ...readySource(),
+        classification: {
+          state: "complete",
+          revision: 3,
+          classified_count: 0,
+          unclassified_count: 0,
+        },
+      }),
+    ).toThrow("classification does not match its snapshot metadata");
+  });
+
+  it("rejects classification without a snapshot and availability mismatches", () => {
+    expect(() =>
+      parseSourceSummary({
+        ...waitingSource(),
+        classification: {
+          state: "classifying",
+          revision: 1,
+          classified_count: 0,
+          unclassified_count: 0,
+        },
+      }),
+    ).toThrow("without a snapshot unexpectedly contains classification");
+
+    expect(() =>
+      parseSourceSummary({
+        ...readySource(),
+        availability: "waiting",
+      }),
+    ).toThrow("Unavailable source unexpectedly contains a snapshot");
+
+    expect(() =>
+      parseSourceSummary({
+        ...waitingSource(),
+        availability: "ready",
+      }),
+    ).toThrow("Available source is missing its snapshot");
+  });
+
+  it("requires errors only on failed source states", () => {
+    expect(() =>
+      parseSourceSummary({
+        ...readySource(),
+        last_error: "unexpected error",
+      }),
+    ).toThrow("Healthy source unexpectedly contains an error");
+
+    expect(() =>
+      parseSourceSummary({
+        ...readySource(),
+        availability: "stale",
+      }),
+    ).toThrow("Failed source is missing its error");
+  });
+
+  it("rejects URL dot segments, extra fields, and a zero poll interval", () => {
+    for (const sourceId of [".", ".."]) {
+      expect(() =>
+        parseSourceSummary({ ...waitingSource(), source_id: sourceId }),
+      ).toThrow("Invalid source summary");
+    }
+    expect(() =>
+      parseSourceSummary({ ...waitingSource(), unexpected: true }),
+    ).toThrow("Invalid source summary");
+    expect(() =>
+      parseSourceSummary({ ...waitingSource(), poll_interval_seconds: 0 }),
+    ).toThrow("Invalid source summary");
+  });
+});
+
+describe("parseTransactionDetailResponse", () => {
+  it("accepts the canonical seven-rule detail", () => {
+    const value = transactionDetail();
+
+    expect(parseTransactionDetailResponse(value)).toBe(value);
+  });
+
+  it("rejects rule order and internally inconsistent verdicts", () => {
+    const wrongOrder = transactionDetail();
+    wrongOrder.rules[0] = {
+      ...wrongOrder.rules[0]!,
+      rule: "element_size",
+    };
+    expect(() => parseTransactionDetailResponse(wrongOrder)).toThrow(
+      "Invalid rule assessment at index 0",
+    );
+
+    const wrongVerdict = transactionDetail();
+    wrongVerdict.rules[1] = {
+      ...wrongVerdict.rules[1]!,
+      verdict: "pass",
+    };
+    expect(() => parseTransactionDetailResponse(wrongVerdict)).toThrow(
+      "Inconsistent rule verdict at index 1",
+    );
+  });
+
+  it("accepts a rule that is both proven and unresolved", () => {
+    const value = transactionDetail();
+    if (value.assessment === null) {
+      throw new Error("Fixture unexpectedly lacks an assessment");
+    }
+    value.assessment.primary_rule = null;
+    value.assessment.unknown_rules = ["element_size"];
+    const policy = value.classifications.find(
+      ({ classifier_id }) => classifier_id === "knots_bip110",
+    )!;
+    policy.state = "partial";
+    policy.missing_facts = ["policy_facts"];
+    value.rules[1]!.missing_count = 2;
+    value.rules[1]!.missing = [{ location: "witness[1]" }];
+
+    expect(parseTransactionDetailResponse(value)).toBe(value);
+  });
+
+  it("accepts a detailed partial classifier result without labels", () => {
+    const value = transactionDetail();
+    const shape = value.classifications.find(
+      ({ classifier_id }) => classifier_id === "transaction_shape",
+    )!;
+    shape.state = "partial";
+    shape.primary_label = null;
+    shape.labels = [];
+    shape.missing_facts = ["input_script_pubkeys"];
+
+    expect(parseTransactionDetailResponse(value)).toBe(value);
+  });
+
+  it("requires exact counts with at most one bounded exemplar", () => {
+    const tooMany = transactionDetail();
+    tooMany.rules[1]!.evidence = [
+      { location: "witness[0]" },
+      { location: "witness[1]" },
+    ];
+    expect(() => parseTransactionDetailResponse(tooMany)).toThrow(
+      "Invalid rule assessment at index 1",
+    );
+
+    const missingExemplar = transactionDetail();
+    missingExemplar.rules[1]!.evidence = [];
+    expect(() => parseTransactionDetailResponse(missingExemplar)).toThrow(
+      "Invalid rule assessment at index 1",
+    );
+  });
+
+  it("requires the canonical rule verdicts to match the assessment", () => {
+    const value = transactionDetail();
+    value.rules[1] = {
+      ...value.rules[1]!,
+      verdict: "pass",
+      evidence_count: 0,
+      evidence: [],
+    };
+
+    expect(() => parseTransactionDetailResponse(value)).toThrow(
+      "Transaction detail rules do not match assessment",
+    );
+  });
+
+  it("requires an assessment and matching policy classification", () => {
+    const unclassified = transactionDetail() as unknown as Record<
+      string,
+      unknown
+    >;
+    unclassified.assessment = null;
+    expect(() => parseTransactionDetailResponse(unclassified)).toThrow(
+      "Classified transaction detail is missing its assessment",
+    );
+
+    const mismatchedPolicy = transactionDetail();
+    const policy = mismatchedPolicy.classifications.find(
+      ({ classifier_id }) => classifier_id === "knots_bip110",
+    )!;
+    policy.primary_label = "compatible";
+    policy.labels = ["compatible"];
+    expect(() => parseTransactionDetailResponse(mismatchedPolicy)).toThrow(
+      "classifiers do not match policy assessment",
+    );
+  });
+
+  it("rejects duplicate classifiers and missing identity fields", () => {
+    const duplicateClassifier = transactionDetail();
+    duplicateClassifier.classifications = [
+      ...duplicateClassifier.classifications,
+      duplicateClassifier.classifications[0]!,
+    ];
+    expect(() => parseTransactionDetailResponse(duplicateClassifier)).toThrow(
+      "Invalid detailed classification at index 4",
+    );
+
+    const missingRevision = transactionDetail() as unknown as Record<
+      string,
+      unknown
+    >;
+    delete missingRevision.classification_revision;
+    expect(() => parseTransactionDetailResponse(missingRevision)).toThrow(
+      "Invalid transaction detail response",
+    );
+  });
+});
+
 describe("parseSourcesResponse", () => {
   it("accepts the strict v2 source-discovery body", () => {
     const value = { atlas_version: "1.0.0", sources: [waitingSource()] };
     expect(parseSourcesResponse(value)).toBe(value);
   });
 
-  it("rejects repeated source IDs and partial snapshot metadata", () => {
+  it("accepts a SemVer prerelease with build metadata", () => {
+    const value = {
+      atlas_version: "2.0.0-rc.1+perf.7",
+      sources: [readySource()],
+    };
+
+    expect(parseSourcesResponse(value)).toBe(value);
+  });
+
+  it("rejects invalid versions, repeated IDs, and invalid source summaries", () => {
+    expect(() =>
+      parseSourcesResponse({
+        atlas_version: "latest",
+        sources: [waitingSource()],
+      }),
+    ).toThrow("Invalid sources response");
     expect(() =>
       parseSourcesResponse({
         atlas_version: "1.0.0",
@@ -144,6 +525,22 @@ describe("parseSourcesResponse", () => {
         sources: [{ ...waitingSource(), transaction_count: 1 }],
       }),
     ).toThrow("partial snapshot");
+    expect(() =>
+      parseSourcesResponse({
+        atlas_version: "1.0.0",
+        sources: [{ ...waitingSource(), source_id: ".." }],
+      }),
+    ).toThrow("Invalid source summary");
+  });
+
+  it("rejects unknown top-level fields", () => {
+    expect(() =>
+      parseSourcesResponse({
+        atlas_version: "1.0.0",
+        sources: [waitingSource()],
+        legacy: true,
+      }),
+    ).toThrow("Invalid sources response");
   });
 });
 

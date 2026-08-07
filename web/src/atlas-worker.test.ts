@@ -574,6 +574,7 @@ const response = (bytes: Uint8Array, status = 200): Response =>
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -785,10 +786,12 @@ describe("v2 coherent publication loading", () => {
     ).toBe(false);
   });
 
-  it("restarts exactly three superseded candidates and reuses surviving sibling stages", async () => {
+  it("restarts three delayed superseded candidates and reuses surviving sibling stages", async () => {
     const current = await fixture();
     let conflicts = 0;
+    let elapsed = 0;
     const requests: string[] = [];
+    vi.spyOn(performance, "now").mockImplementation(() => elapsed);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -797,6 +800,7 @@ describe("v2 coherent publication loading", () => {
         if (path.endsWith("/mempool")) return response(current.manifestBytes);
         if (path.includes("/stages/membership/") && conflicts < 3) {
           conflicts += 1;
+          elapsed += 11_000;
           return response(json({ error: "superseded" }), 409);
         }
         if (path.includes("/stages/structure/")) {

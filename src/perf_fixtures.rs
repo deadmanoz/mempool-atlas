@@ -26,6 +26,7 @@ const FUNCTIONAL_DETAIL_LIMIT_PER_SOURCE: usize = 8;
 const FUNCTIONAL_SOURCE_COUNT: usize = 3;
 const MAX_PERFORMANCE_SOURCES: usize = 4;
 const PERFORMANCE_REFERENCE_TIME_MS: u64 = 1_786_000_000_000;
+const Q32_SCALE: u64 = 1_u64 << 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum FixtureProfile {
@@ -125,58 +126,58 @@ pub struct FixtureManifest {
 struct TransactionProfile {
     weight: f64,
     labels: &'static [&'static str],
-    minimum_vsize: f64,
-    maximum_vsize: f64,
+    minimum_vsize: u64,
+    maximum_vsize: u64,
 }
 
 const TRANSACTION_PROFILES: [TransactionProfile; 8] = [
     TransactionProfile {
         weight: 0.34,
         labels: &["version_2", "has_witness", "p2wpkh"],
-        minimum_vsize: 110.0,
-        maximum_vsize: 400.0,
+        minimum_vsize: 110,
+        maximum_vsize: 400,
     },
     TransactionProfile {
         weight: 0.18,
         labels: &["version_2", "has_witness", "p2wsh"],
-        minimum_vsize: 150.0,
-        maximum_vsize: 900.0,
+        minimum_vsize: 150,
+        maximum_vsize: 900,
     },
     TransactionProfile {
         weight: 0.22,
         labels: &["version_2", "has_witness", "p2tr", "signals_rbf"],
-        minimum_vsize: 111.0,
-        maximum_vsize: 650.0,
+        minimum_vsize: 111,
+        maximum_vsize: 650,
     },
     TransactionProfile {
         weight: 0.10,
         labels: &["version_1", "p2pkh"],
-        minimum_vsize: 190.0,
-        maximum_vsize: 1_200.0,
+        minimum_vsize: 190,
+        maximum_vsize: 1_200,
     },
     TransactionProfile {
         weight: 0.05,
         labels: &["version_2", "p2sh"],
-        minimum_vsize: 220.0,
-        maximum_vsize: 2_500.0,
+        minimum_vsize: 220,
+        maximum_vsize: 2_500,
     },
     TransactionProfile {
         weight: 0.06,
         labels: &["version_2", "has_witness", "p2wpkh", "p2tr"],
-        minimum_vsize: 140.0,
-        maximum_vsize: 3_000.0,
+        minimum_vsize: 140,
+        maximum_vsize: 3_000,
     },
     TransactionProfile {
         weight: 0.03,
         labels: &["version_2", "has_witness", "p2tr", "op_return"],
-        minimum_vsize: 130.0,
-        maximum_vsize: 40_000.0,
+        minimum_vsize: 130,
+        maximum_vsize: 40_000,
     },
     TransactionProfile {
         weight: 0.02,
         labels: &["version_2", "p2a"],
-        minimum_vsize: 65.0,
-        maximum_vsize: 120.0,
+        minimum_vsize: 65,
+        maximum_vsize: 120,
     },
 ];
 
@@ -195,17 +196,56 @@ impl FixtureRng {
         Self { state: seed }
     }
 
-    fn next(&mut self) -> f64 {
+    fn next_u32(&mut self) -> u32 {
         self.state = self.state.wrapping_add(0x6d2b_79f5);
         let mut value = self.state;
         value = (value ^ (value >> 15)).wrapping_mul(1 | value);
         value = value.wrapping_add((value ^ (value >> 7)).wrapping_mul(61 | value)) ^ value;
-        f64::from(value ^ (value >> 14)) / 4_294_967_296.0
+        value ^ (value >> 14)
+    }
+
+    fn next(&mut self) -> f64 {
+        f64::from(self.next_u32()) / 4_294_967_296.0
     }
 
     fn integer(&mut self, upper_exclusive: u64) -> u64 {
         (self.next() * upper_exclusive as f64).floor() as u64
     }
+}
+
+fn q32_square(value: u32) -> u64 {
+    let value = u64::from(value);
+    value * value / Q32_SCALE
+}
+
+fn scale_q32_rounded(value: u64, upper: u64) -> u64 {
+    debug_assert!(value < Q32_SCALE);
+    ((u128::from(value) * u128::from(upper) + u128::from(Q32_SCALE / 2)) / u128::from(Q32_SCALE))
+        as u64
+}
+
+/// Closely approximates x^2.2 without platform-specific libm behavior.
+fn vsize_fraction(value: u32) -> u64 {
+    let squared = q32_square(value);
+    let value = u64::from(value);
+    let cubed = squared * value / Q32_SCALE;
+    (4 * squared + cubed) / 5
+}
+
+/// Closely approximates x^1.6 without platform-specific libm behavior.
+fn age_fraction(value: u32) -> u64 {
+    let squared = q32_square(value);
+    let value = u64::from(value);
+    (2 * value + 3 * squared) / 5
+}
+
+/// Produces a bounded log-uniform value from 10,000 to just under 655,360,000.
+fn synthetic_output_sats(value: u32) -> u64 {
+    let scaled = u64::from(value) * 16;
+    let exponent = scaled / Q32_SCALE;
+    let fraction = scaled % Q32_SCALE;
+    let base = 10_000_u64 << exponent;
+    base + scale_q32_rounded(fraction, base)
 }
 
 pub fn export(options: ExportOptions) -> Result<FixtureManifest> {
@@ -682,14 +722,16 @@ fn make_entry(
     differing_wtxid_probability: f64,
 ) -> Result<MempoolEntry> {
     let profile = pick_profile(rng);
-    let vsize = ((profile.minimum_vsize
-        + (profile.maximum_vsize - profile.minimum_vsize) * rng.next().powf(2.2))
-    .round() as u64)
-        .max(65);
+    let vsize = (profile.minimum_vsize
+        + scale_q32_rounded(
+            vsize_fraction(rng.next_u32()),
+            profile.maximum_vsize - profile.minimum_vsize,
+        ))
+    .max(65);
     let fee_sats = (vsize as f64 * fee_rate(rng)).round() as u64;
     let fee_sats = fee_sats.max(vsize);
     let entered_at_ms =
-        observed_at_ms.saturating_sub((rng.next().powf(1.6) * 172_800_000.0).round() as u64);
+        observed_at_ms.saturating_sub(scale_q32_rounded(age_fraction(rng.next_u32()), 172_800_000));
     let has_relatives = rng.next() < 0.18;
     let ancestor_extra = if has_relatives {
         (rng.next() * 3.0).round() as u64
@@ -990,7 +1032,7 @@ fn transaction_structure(
         "omni" => 8 + rng.integer(60),
         _ => 0,
     };
-    let output_sats = (10_000.0 * (rng.next() * 11.0).exp()).round() as u64;
+    let output_sats = synthetic_output_sats(rng.next_u32());
     let witness_bytes = if has_witness {
         (vsize as f64 * (0.5 + rng.next() * 1.2)).round() as u64
     } else {
@@ -1074,6 +1116,25 @@ fn hex64(rng: &mut FixtureRng) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthetic_distribution_curves_are_fixed_and_bounded() {
+        let samples = [0, 1 << 30, 1 << 31, 3 << 30, u32::MAX];
+        let vsize_values = samples.map(vsize_fraction);
+        let age_values = samples.map(age_fraction);
+
+        assert_eq!(vsize_values[0], 0);
+        assert_eq!(age_values[0], 0);
+        assert_eq!(vsize_values[2], 966_367_641);
+        assert_eq!(age_values[2], 1_503_238_553);
+        assert!(vsize_values.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(age_values.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(vsize_values[4] < Q32_SCALE);
+        assert!(age_values[4] < Q32_SCALE);
+        assert_eq!(synthetic_output_sats(0), 10_000);
+        assert_eq!(synthetic_output_sats(1 << 31), 2_560_000);
+        assert!(synthetic_output_sats(u32::MAX) < 655_360_000);
+    }
 
     fn temporary_output_root(test_name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

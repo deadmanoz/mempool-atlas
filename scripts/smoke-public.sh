@@ -8,6 +8,12 @@ fi
 
 base_url=${1%/}
 source_id=$2
+for required_tool in awk cp curl grep head jq mktemp openssl rm xxd; do
+    command -v "$required_tool" >/dev/null 2>&1 || {
+        printf 'public smoke tests require %s on PATH\n' "$required_tool" >&2
+        exit 2
+    }
+done
 case "$base_url" in
     https://*) ;;
     *)
@@ -26,11 +32,16 @@ header_value() {
     local name=$1
     local path=$2
     awk -v wanted="$name" '
-        BEGIN { IGNORECASE = 1 }
-        $0 ~ "^" wanted ":" {
-            sub(/^[^:]+:[[:space:]]*/, "")
-            sub(/\r$/, "")
-            value = $0
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            separator = index(line, ":")
+            if (separator == 0) next
+            header = substr(line, 1, separator - 1)
+            if (tolower(header) == tolower(wanted)) {
+                value = substr(line, separator + 1)
+                sub(/^[[:space:]]*/, "", value)
+            }
         }
         END { print value }
     ' "$path"
@@ -88,12 +99,16 @@ if ! grep -Eq '"atlas_version"[[:space:]]*:[[:space:]]*"(0|[1-9][0-9]*)\.(0|[1-9
     exit 1
 fi
 
-health_status=$(curl --silent --show-error --max-time 30 \
-    --output /dev/null --write-out '%{http_code}' "$base_url/healthz")
-if [[ "$health_status" != 404 ]]; then
-    printf 'public /healthz returned %s instead of 404\n' "$health_status" >&2
-    exit 1
-fi
+for operational_path in healthz readyz; do
+    operational_status=$(curl --silent --show-error --max-time 30 \
+        --output /dev/null --write-out '%{http_code}' \
+        "$base_url/$operational_path")
+    if [[ "$operational_status" != 404 ]]; then
+        printf 'public /%s returned %s instead of 404\n' \
+            "$operational_path" "$operational_status" >&2
+        exit 1
+    fi
+done
 
 manifest_url="$base_url/api/v2/sources/$source_id/mempool"
 curl --silent --show-error --fail-with-body --max-time 120 --compressed \
@@ -145,6 +160,7 @@ jq -e --arg source_id "$source_id" '
     .transaction_count as $rows |
     .schema_version == 2 and
     .source_id == $source_id and
+    (.transaction_count | type == "number" and . >= 0 and floor == .) and
     (.publication_id | test("^[0-9a-f]{64}$")) and
     (.population_id | test("^[0-9a-f]{64}$")) and
     (.classification_set_id | test("^[0-9a-f]{64}$")) and
@@ -258,25 +274,28 @@ if [[ -s "$temp_dir/conditional.body" ]]; then
     exit 1
 fi
 
-first_txid=$(jq -r '.txids_base64' "$temp_dir/population.json" |
-    openssl base64 -d -A | dd bs=32 count=1 2>/dev/null | xxd -p -c 64)
-[[ "$first_txid" =~ ^[0-9a-f]{64}$ ]] || {
-    printf 'population did not decode to a canonical first txid\n' >&2
-    exit 1
-}
-detail_url="$base_url/api/v2/sources/$source_id/transactions/$first_txid"
-curl --silent --show-error --fail-with-body --max-time 30 \
-    --dump-header "$temp_dir/detail.headers" \
-    --output "$temp_dir/detail.json" \
-    "$detail_url"
-[[ $(status_code "$temp_dir/detail.headers") == 200 ]] || {
-    printf 'transaction detail did not return 200\n' >&2
-    exit 1
-}
-[[ $(require_header cache-control "$temp_dir/detail.headers") == no-store ]] || {
-    printf 'transaction detail must remain non-cacheable\n' >&2
-    exit 1
-}
-require_cloudflare_cache_bypass "$temp_dir/detail.headers" "transaction detail"
+if jq -e '.transaction_count > 0' "$temp_dir/manifest.json" >/dev/null; then
+    jq -r '.txids_base64' "$temp_dir/population.json" |
+        openssl base64 -d -A >"$temp_dir/txids.bin"
+    first_txid=$(head -c 32 "$temp_dir/txids.bin" | xxd -p -c 64)
+    [[ "$first_txid" =~ ^[0-9a-f]{64}$ ]] || {
+        printf 'population did not decode to a canonical first txid\n' >&2
+        exit 1
+    }
+    detail_url="$base_url/api/v2/sources/$source_id/transactions/$first_txid"
+    curl --silent --show-error --fail-with-body --max-time 30 \
+        --dump-header "$temp_dir/detail.headers" \
+        --output "$temp_dir/detail.json" \
+        "$detail_url"
+    [[ $(status_code "$temp_dir/detail.headers") == 200 ]] || {
+        printf 'transaction detail did not return 200\n' >&2
+        exit 1
+    }
+    [[ $(require_header cache-control "$temp_dir/detail.headers") == no-store ]] || {
+        printf 'transaction detail must remain non-cacheable\n' >&2
+        exit 1
+    }
+    require_cloudflare_cache_bypass "$temp_dir/detail.headers" "transaction detail"
+fi
 
 printf 'public v2-only Cloudflare smoke checks passed for %s\n' "$manifest_url"

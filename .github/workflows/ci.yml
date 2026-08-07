@@ -25,7 +25,7 @@ jobs:
           components: clippy, rustfmt
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
@@ -56,7 +56,7 @@ jobs:
             ${{ runner.os }}-cargo-e2e-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: npm
           cache-dependency-path: web/package-lock.json
       - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
@@ -77,7 +77,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.88.0
-      - run: cargo check --locked
+      - run: cargo check --locked --all-features
 
   audit:
     runs-on: ubuntu-latest

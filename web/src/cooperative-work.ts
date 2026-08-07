@@ -4,7 +4,48 @@ export interface CooperativeWorkOptions {
   signal?: AbortSignal;
 }
 
+export interface CombinedAbortSignal {
+  signal: AbortSignal;
+  dispose: () => void;
+}
+
 export const DEFAULT_COOPERATIVE_BATCH_SIZE = 750;
+
+export const combineAbortSignals = (
+  signals: readonly AbortSignal[],
+): CombinedAbortSignal => {
+  if (signals.length === 0) {
+    throw new RangeError("At least one abort signal is required");
+  }
+  if (signals.length === 1) {
+    return { signal: signals[0]!, dispose: () => undefined };
+  }
+
+  const controller = new AbortController();
+  const listeners: Array<readonly [AbortSignal, () => void]> = [];
+  const dispose = (): void => {
+    for (const [signal, listener] of listeners) {
+      signal.removeEventListener("abort", listener);
+    }
+    listeners.length = 0;
+  };
+
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      dispose();
+      break;
+    }
+    const listener = (): void => {
+      controller.abort(signal.reason);
+      dispose();
+    };
+    listeners.push([signal, listener]);
+    signal.addEventListener("abort", listener, { once: true });
+  }
+
+  return { signal: controller.signal, dispose };
+};
 
 const messageChannelResolvers: Array<() => void> = [];
 const messageChannel =

@@ -1,6 +1,45 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { forEachCooperatively } from "./cooperative-work";
+import { combineAbortSignals, forEachCooperatively } from "./cooperative-work";
+
+describe("combineAbortSignals", () => {
+  it("propagates an already-aborted signal and its reason", () => {
+    const first = new AbortController();
+    const second = new AbortController();
+    const reason = new Error("cancelled before composition");
+    second.abort(reason);
+
+    const combined = combineAbortSignals([first.signal, second.signal]);
+
+    expect(combined.signal.aborted).toBe(true);
+    expect(combined.signal.reason).toBe(reason);
+    combined.dispose();
+  });
+
+  it("propagates a later abort and ignores signals after disposal", () => {
+    const first = new AbortController();
+    const second = new AbortController();
+    const combined = combineAbortSignals([first.signal, second.signal]);
+    const reason = new Error("cancelled after composition");
+
+    second.abort(reason);
+
+    expect(combined.signal.aborted).toBe(true);
+    expect(combined.signal.reason).toBe(reason);
+
+    const disposed = combineAbortSignals([
+      first.signal,
+      new AbortController().signal,
+    ]);
+    disposed.dispose();
+    first.abort();
+    expect(disposed.signal.aborted).toBe(false);
+  });
+
+  it("rejects an empty signal set", () => {
+    expect(() => combineAbortSignals([])).toThrow("At least one abort signal");
+  });
+});
 
 describe("forEachCooperatively", () => {
   it("visits values in order and yields between bounded batches", async () => {

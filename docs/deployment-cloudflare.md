@@ -143,10 +143,12 @@ For the manifest and stage rules:
 
 Atlas returns `Cache-Control: public, no-cache, must-revalidate` and a weak
 `ETag` for current manifests and content-addressed stages. An unchanged
-`If-None-Match` request returns `304` without the JSON body. A superseded stage
-identifier returns non-cacheable `409`, an unknown stage identifier returns
-non-cacheable `404`, and a malformed identifier or stage kind returns
-non-cacheable `400`, all before validator handling. Before the first
+`If-None-Match` request returns `304` without the JSON body. A well-formed
+content identifier absent from the current publication returns non-cacheable
+`409`. An identifier that belongs to a different current stage, or a request
+for a stage kind or classifier that is not present, returns non-cacheable
+`404`. A malformed identifier or stage kind returns non-cacheable `400`, all
+before validator handling. Before the first
 publication, the manifest returns
 non-cacheable `503 application/problem+json` and no validator.
 
@@ -166,7 +168,7 @@ that permits only `GET` and `HEAD` for the public Atlas hostname.
 Use the rate-limit rule capacity available to the zone plan. When the account
 has only one shared rule, add an Atlas hostname arm to that rule rather than
 prescribing unavailable per-route rules. The production arm matches
-`atlas.deadmanoz.xyz` with paths beginning `/api/v2/`, allows 50 requests per
+`atlas.example.com` with paths beginning `/api/v2/`, allows 50 requests per
 IP per 10 seconds, and blocks for 10 seconds when exceeded.
 
 A normal node view requests one manifest and progressively requests its stages.
@@ -225,7 +227,8 @@ launch budgets pass under the intended host and Cloudflare plan.
 ## Public smoke test
 
 Run the smoke test only after at least one source has a ready snapshot and the
-Cloudflare rules are active:
+Cloudflare rules are active. The host running it must provide `awk`, `cp`,
+`curl`, `grep`, `head`, `jq`, `mktemp`, `openssl`, `rm`, and `xxd` on `PATH`:
 
 ```bash
 just smoke-public https://atlas.example.com node-a
@@ -234,7 +237,8 @@ just smoke-public https://atlas.example.com node-a
 It verifies the source discovery status, cache policy, and required semantic
 Atlas version, plus hidden public health paths, Cloudflare routing,
 compression, every declared stage, manifest and stage validators, transaction
-detail, and conditional `304` behavior. Rate-limit actions and direct-origin
+detail when the publication is non-empty, and conditional `304` behavior.
+Rate-limit actions and direct-origin
 isolation require separate staging and firewall checks.
 
 ## Release switch

@@ -271,18 +271,14 @@ export const createComparisonDistributionsView = (
   ): Promise<PreparedComparisonDistributions> => {
     signal?.throwIfAborted();
     const renderScope = scope;
+    const renderSignal = signal ?? new AbortController().signal;
     const models = {} as Record<ComparisonSide, SnapshotDistributionModel>;
     for (const side of COMPARISON_SIDES) {
-      const controller = new AbortController();
-      const modelSignal =
-        signal === undefined
-          ? controller.signal
-          : AbortSignal.any([controller.signal, signal]);
       models[side] = await buildSideModel(
         current,
         side,
         renderScope,
-        modelSignal,
+        renderSignal,
       );
     }
     signal?.throwIfAborted();

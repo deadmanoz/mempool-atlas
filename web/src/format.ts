@@ -1,3 +1,5 @@
+import { formatMembershipAge } from "./membership-table";
+
 export const countFormat = new Intl.NumberFormat();
 export const decimalFormat = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 2,
@@ -78,4 +80,3 @@ export const formatSats = (value: number): string => {
       : `${countFormat.format(whole)}${decimalSeparator}${digits}`;
   return `${sign}${exact} BTC`;
 };
-import { formatMembershipAge } from "./membership-table";

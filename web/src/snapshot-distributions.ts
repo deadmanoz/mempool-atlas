@@ -6,6 +6,7 @@ import {
 import type { CompositionBar } from "./composition";
 import { precomputeClassifierBuckets } from "./classifier-terrain";
 import {
+  combineAbortSignals,
   forEachCooperatively,
   type CooperativeWorkOptions,
 } from "./cooperative-work";
@@ -370,12 +371,20 @@ export class SnapshotDistributionCache {
     if (controller === null) {
       return Promise.reject(new Error("Distribution cache has no owner"));
     }
-    const signal =
+    const combinedSignal =
       externalSignal === undefined
-        ? controller.signal
-        : AbortSignal.any([controller.signal, externalSignal]);
+        ? null
+        : combineAbortSignals([controller.signal, externalSignal]);
+    const signal = combinedSignal?.signal ?? controller.signal;
     const trackPending = externalSignal === undefined;
-    const pending = build(signal)
+    let buildPromise: Promise<SnapshotDistributionModel>;
+    try {
+      buildPromise = build(signal);
+    } catch (error) {
+      combinedSignal?.dispose();
+      return Promise.reject(error);
+    }
+    const pending = buildPromise
       .then((model) => {
         signal.throwIfAborted();
         if (this.owner === owner && this.ownerEpoch === epoch) {
@@ -384,6 +393,7 @@ export class SnapshotDistributionCache {
         return model;
       })
       .finally(() => {
+        combinedSignal?.dispose();
         if (trackPending && this.pending.get(variant) === pending) {
           this.pending.delete(variant);
         }

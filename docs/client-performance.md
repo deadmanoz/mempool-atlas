@@ -75,6 +75,13 @@ run reports its measured feasibility but never loosens these ceilings.
 | Comparison primary interactive | 50 seconds | 5,740,612 bytes |
 | Comparison complete feature ready | 94 seconds | 12,119,070 bytes |
 
+The complete-byte values in this table are pre-authorized targets. Exceeding a
+target sets `requires_pre_authorized_rederivation` and requires the transfer
+budget to be derived and approved again. It is not an automatic allowance to
+spend the remaining margin. The separate hard maxima are 6,537,919 bytes for a
+complete node publication and 13,075,839 bytes for a complete comparison.
+Crossing either hard maximum fails `just stage-projection`.
+
 Node primary readiness requires the manifest, population, and selected
 classifier lane. The complete population must support exact search, selection,
 canonical URL state, active-lane terrain, filters, and keyboard navigation.
@@ -104,13 +111,13 @@ current wire format measures:
 
 | Release gate | Exact worst case | Ceiling | Result |
 | --- | ---: | ---: | --- |
-| Node primary | 2,413,226 bytes | 3,189,229 bytes | pass |
-| Node complete | 5,301,898 bytes | 6,059,535 bytes | pass |
-| Comparison primary | 4,871,928 bytes | 5,740,612 bytes | pass |
-| Comparison complete | 10,584,316 bytes | 12,119,070 bytes | pass |
+| Node primary | 2,413,371 bytes | 3,189,229 bytes | pass |
+| Node complete | 5,303,824 bytes | 6,059,535 bytes | pass |
+| Comparison primary | 4,872,313 bytes | 5,740,612 bytes | pass |
+| Comparison complete | 10,588,449 bytes | 12,119,070 bytes | pass |
 
-At the pinned throughput, the corresponding transfer projections are 25.134,
-47.249, 44.553, and 84.376 seconds. These projections reserve the remainder of
+At the pinned throughput, the corresponding transfer projections are 25.135,
+47.261, 44.555, and 84.402 seconds. These projections reserve the remainder of
 each wall-clock gate for request overhead, worker decode and validation,
 derivation, packed-model construction, and rendering. `just perf-web` verifies
 the end-to-end browser outcome rather than treating the byte projection as a

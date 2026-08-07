@@ -182,13 +182,14 @@ value in the shared header, so the visible version describes the running Atlas
 process rather than an independently versioned static package.
 
 Each manifest and stage receives a weak `ETag`. A manifest validator changes
-when membership, classification, lifecycle, or failure metadata changes. Stage
-validators are their SHA-256 content identifiers and change only with their
-exact bodies. Conditional reads of current representations return `304`
-without sending a body. A superseded stage identifier returns non-cacheable
-`409`, an unknown stage identifier returns non-cacheable `404`, and malformed
-identifiers or stage kinds return non-cacheable `400`, all before conditional
-validation. Source discovery,
+when membership, classification, lifecycle, poll-start, or failure metadata
+changes. Stage validators are their SHA-256 content identifiers and change only
+with their exact bodies. Conditional reads of current representations return
+`304` without sending a body. A well-formed content identifier absent from the
+current publication returns non-cacheable `409`. An identifier that belongs to
+a different current stage, or a request for a stage kind or classifier that is
+not present, returns non-cacheable `404`. Malformed identifiers or stage kinds
+return non-cacheable `400`, all before conditional validation. Source discovery,
 transaction detail, failures, and responses before the first publication remain
 non-cacheable. Clients that advertise gzip support receive compressed JSON.
 
