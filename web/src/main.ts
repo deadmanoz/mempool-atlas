@@ -51,6 +51,7 @@ import {
   type ClassifierTerrainLayout,
 } from "./classifier-terrain";
 import { renderSwimViewCooperatively } from "./swim-view";
+import { setMembershipControlsComplete } from "./membership-controls";
 import {
   countFormat,
   decimalFormat,
@@ -1806,13 +1807,11 @@ const commitFilteredTransactions = (
 };
 
 const applyFilters = async (): Promise<boolean> => {
-  filterController?.abort();
-  filterController = null;
-  if (currentSnapshot === null) {
-    filteredTransactions = [];
-    filterSummary.textContent = "No snapshot loaded.";
+  if (currentSnapshot === null || !snapshotIsComplete(currentSnapshot)) {
     return false;
   }
+  filterController?.abort();
+  filterController = null;
   const snapshot = currentSnapshot;
   const filters = readFilters();
   const controller = new AbortController();
@@ -2009,12 +2008,7 @@ const renderResponse = async (
   selectedClassifierId = candidate.selectedClassifierId;
   selectedClassifierLabel = candidate.selectedClassifierLabel;
   selectedClassifierBucketKey = candidate.selectedClassifierBucketKey;
-  feeAgeTab.disabled = !complete;
-  classificationLensSelect.disabled = !complete;
-  minimumFeeRate.disabled = !complete;
-  maximumAge.disabled = !complete;
-  minimumVsize.disabled = !complete;
-  resetFilters.disabled = !complete;
+  setMembershipControlsComplete(complete);
   resetTerrainLayouts();
   terrainStage.hidden = snapshot.transaction_count === 0;
   terrainEmpty.hidden = snapshot.transaction_count !== 0;
@@ -2297,6 +2291,7 @@ const prepareForSourceLoad = (source: SourceSummary): void => {
     txid: null,
   };
   currentSnapshot = null;
+  setMembershipControlsComplete(false);
   currentSnapshotIdentity = null;
   currentClassification = null;
   filteredTransactions = [];

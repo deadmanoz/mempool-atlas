@@ -23,6 +23,7 @@ const STAGE_CACHE_CONTROL =
 const FIXTURE_PORT_TEXT = process.env.ATLAS_FIXTURE_PORT ?? "3101";
 const EMULATE_CLOUDFLARE_HEADERS =
   process.env.ATLAS_FIXTURE_CLOUDFLARE_HEADERS === "1";
+const OMIT_HEADER = process.env.ATLAS_FIXTURE_OMIT_HEADER ?? "";
 const FIXTURE_DETAIL_STATUS_TEXT =
   process.env.ATLAS_FIXTURE_DETAIL_STATUS ?? "200";
 
@@ -37,6 +38,10 @@ if (FIXTURE_PORT > 65535) {
 }
 if (!/^(200|404|503|503-unavailable)$/.test(FIXTURE_DETAIL_STATUS_TEXT)) {
   writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_DETAIL_STATUS\n");
+  process.exit(2);
+}
+if (!/^(|cache-control|cf-cache-status|vary)$/.test(OMIT_HEADER)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_OMIT_HEADER\n");
   process.exit(2);
 }
 const FIXTURE_DETAIL_STATUS =
@@ -241,6 +246,13 @@ const cloudflareHeaders = (cacheStatus) =>
       }
     : {};
 
+const fixtureHeaders = (headers) =>
+  Object.fromEntries(
+    Object.entries(headers).filter(
+      ([name]) => name.toLowerCase() !== OMIT_HEADER,
+    ),
+  );
+
 const send = (
   request,
   response,
@@ -249,13 +261,16 @@ const send = (
   headers = {},
   cacheStatus = "BYPASS",
 ) => {
-  response.writeHead(status, {
-    "cache-control": "no-store",
-    "content-length": String(bytes.byteLength),
-    "content-type": "application/json",
-    ...cloudflareHeaders(cacheStatus),
-    ...headers,
-  });
+  response.writeHead(
+    status,
+    fixtureHeaders({
+      "cache-control": "no-store",
+      "content-length": String(bytes.byteLength),
+      "content-type": "application/json",
+      ...cloudflareHeaders(cacheStatus),
+      ...headers,
+    }),
+  );
   response.end(request.method === "HEAD" ? undefined : bytes);
 };
 
@@ -331,15 +346,19 @@ const server = createServer((request, response) => {
   const headers = {
     "cache-control": body.cacheControl,
     "content-type": body.contentType,
+    vary: "Accept-Encoding",
     "x-atlas-content-id": body.contentId,
     "x-atlas-uncompressed-length": String(bytes.byteLength),
     ...(body.cacheable ? { etag } : {}),
   };
   if (body.cacheable && request.headers["if-none-match"] === etag) {
-    response.writeHead(304, {
-      ...cloudflareHeaders("REVALIDATED"),
-      ...headers,
-    });
+    response.writeHead(
+      304,
+      fixtureHeaders({
+        ...cloudflareHeaders("REVALIDATED"),
+        ...headers,
+      }),
+    );
     response.end();
     return;
   }

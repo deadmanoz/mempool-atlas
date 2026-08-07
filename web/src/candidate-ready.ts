@@ -4,7 +4,8 @@ export interface AtlasCandidateReadyDetail {
   sourceIds: string[];
 }
 
-export interface AtlasNodePublicationAttemptDetail {
+export interface AtlasPublicationAttemptDetail {
+  surface: "node" | "comparison";
   attempt: number;
   complete: boolean;
 }
@@ -14,8 +15,8 @@ declare global {
     __atlasCandidateReadyHook?: (
       detail: AtlasCandidateReadyDetail,
     ) => void | Promise<void>;
-    __atlasNodePublicationAttemptHook?: (
-      detail: AtlasNodePublicationAttemptDetail,
+    __atlasPublicationAttemptHook?: (
+      detail: AtlasPublicationAttemptDetail,
     ) => void | Promise<void>;
   }
 }
@@ -67,13 +68,13 @@ export const awaitAtlasCandidateRelease = async (
   await awaitHook(hookResult, signal);
 };
 
-export const awaitAtlasNodePublicationAttemptRelease = async (
-  detail: AtlasNodePublicationAttemptDetail,
+export const awaitAtlasPublicationAttemptRelease = async (
+  detail: AtlasPublicationAttemptDetail,
   signal: AbortSignal,
 ): Promise<void> => {
   signal.throwIfAborted();
   if (typeof window === "undefined") return;
-  const hook = window.__atlasNodePublicationAttemptHook;
+  const hook = window.__atlasPublicationAttemptHook;
   if (hook === undefined) return;
   await awaitHook(
     Promise.resolve().then(() => hook(detail)),

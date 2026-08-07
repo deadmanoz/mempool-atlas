@@ -73,7 +73,8 @@ Use `just` targets whenever one exists:
   It enables `perf-fixtures` for the Rust suite so both cross-language
   publication-digest goldens run; a bare `cargo test` omits those checks.
 - `just test-web-e2e` runs Playwright viewport coverage against the fixture
-  Atlas API, after a one-time `just test-web-e2e-install`.
+  Atlas API, after a one-time `just test-web-e2e-install`. It preflights ports
+  3101 and 5174 and never reuses an existing fixture or preview server.
 - `just functional-fixtures` exports the small Rust-owned functional profile.
 - `just perf-fixtures` also exports the 70,000-transaction performance profile.
 - `just publication-digest-fixture` regenerates both checked-in Rust/browser

@@ -50,6 +50,7 @@ import {
   commitPreparedComparisonDistributions,
   prepareComparisonCommitCandidate,
 } from "./comparison-publication-candidate";
+import { renderPrimaryComparisonPublication } from "./comparison-primary-publication";
 import {
   comparisonRegionEntries,
   lookupComparisonTransaction,
@@ -1557,15 +1558,19 @@ const loadComparison = async (
     ) {
       return;
     }
+    const left = leftPrimary;
+    const right = rightPrimary;
     primaryCommitted = true;
     if (!retainActiveComparison) {
-      await commitComparisonPublications(
-        leftPrimary,
-        rightPrimary,
-        false,
-        ticket.signal,
-        () => currentSelectionMatches(ticket),
-        false,
+      await renderPrimaryComparisonPublication(() =>
+        commitComparisonPublications(
+          left,
+          right,
+          false,
+          ticket.signal,
+          () => currentSelectionMatches(ticket),
+          false,
+        ),
       );
     }
   };

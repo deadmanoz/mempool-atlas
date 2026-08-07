@@ -550,11 +550,9 @@ impl PublicationBudget {
     }
 
     fn next_body_limit(&self) -> usize {
-        self.limits.max_stage_bytes.min(
-            self.limits
-                .max_publication_bytes
-                .saturating_sub(self.encoded_bytes),
-        )
+        // Bound each allocation while leaving cumulative classification to
+        // `charge`, which has the complete encoded body length.
+        self.limits.max_stage_bytes
     }
 
     fn charge(&mut self, body: &str, bytes: usize) -> Result<(), StagedSnapshotError> {
@@ -1498,6 +1496,34 @@ mod tests {
         assert!(matches!(
             total_error,
             StagedSnapshotError::EncodedPublicationTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn fresh_stages_report_cumulative_publication_limit() {
+        let (source, snapshot) = fixture();
+        let baseline = encode_staged_snapshot(&source, &snapshot).expect("baseline");
+        let population_bytes = baseline.population.bytes.len();
+        let membership_bytes = baseline.membership.bytes.len();
+        let cumulative_bytes = population_bytes + membership_bytes;
+
+        let error = encode_staged_snapshot_with_limits(
+            &source,
+            &snapshot,
+            None,
+            StagedSnapshotLimits {
+                max_stage_bytes: population_bytes.max(membership_bytes),
+                max_publication_bytes: cumulative_bytes - 1,
+            },
+        )
+        .expect_err("fresh stages must exceed the cumulative publication limit");
+
+        assert!(matches!(
+            error,
+            StagedSnapshotError::EncodedPublicationTooLarge {
+                actual,
+                maximum,
+            } if actual == cumulative_bytes && maximum == cumulative_bytes - 1
         ));
     }
 

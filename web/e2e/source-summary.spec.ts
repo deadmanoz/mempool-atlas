@@ -18,7 +18,7 @@ interface CandidateGate {
   wait(): Promise<void>;
 }
 
-interface NodePublicationAttemptGate {
+interface PublicationAttemptGate {
   release(): Promise<void>;
   waitForAttempt(count: number): Promise<void>;
 }
@@ -35,11 +35,13 @@ type CandidateGateWindow = Window &
     __atlasCandidateReadyHook?: () => void | Promise<void>;
   };
 
-type NodePublicationAttemptGateWindow = Window &
+type PublicationAttemptGateWindow = Window &
   typeof globalThis & {
-    __atlasNodePublicationAttemptSeen?: number;
-    __atlasNodePublicationAttemptRelease?: () => void;
-    __atlasNodePublicationAttemptHook?: (detail: {
+    __atlasPublicationAttemptSeen?: number;
+    __atlasPublicationAttemptRelease?: () => void;
+    __atlasComparisonCandidateMetricOffset?: number;
+    __atlasPublicationAttemptHook?: (detail: {
+      surface: "node" | "comparison";
       complete: boolean;
     }) => void | Promise<void>;
   };
@@ -300,38 +302,39 @@ const installCandidateGate = async (page: Page): Promise<CandidateGate> => {
   };
 };
 
-const installNodePublicationAttemptGate = async (
+const installPublicationAttemptGate = async (
   page: Page,
-): Promise<NodePublicationAttemptGate> => {
-  await page.addInitScript(() => {
-    const target = window as NodePublicationAttemptGateWindow;
-    target.__atlasNodePublicationAttemptSeen = 0;
-    target.__atlasNodePublicationAttemptHook = async ({ complete }) => {
-      if (complete) return;
-      target.__atlasNodePublicationAttemptSeen =
-        (target.__atlasNodePublicationAttemptSeen ?? 0) + 1;
+  surface: "node" | "comparison",
+): Promise<PublicationAttemptGate> => {
+  await page.addInitScript((targetSurface) => {
+    const target = window as PublicationAttemptGateWindow;
+    target.__atlasPublicationAttemptSeen = 0;
+    target.__atlasPublicationAttemptHook = async ({ surface, complete }) => {
+      if (surface !== targetSurface || complete) return;
+      target.__atlasPublicationAttemptSeen =
+        (target.__atlasPublicationAttemptSeen ?? 0) + 1;
       await new Promise<void>((resolve) => {
-        target.__atlasNodePublicationAttemptRelease = resolve;
+        target.__atlasPublicationAttemptRelease = resolve;
       });
     };
-  });
+  }, surface);
   return {
     waitForAttempt: async (count) => {
       await expect
         .poll(() =>
           page.evaluate(
             () =>
-              (window as NodePublicationAttemptGateWindow)
-                .__atlasNodePublicationAttemptSeen ?? 0,
+              (window as PublicationAttemptGateWindow)
+                .__atlasPublicationAttemptSeen ?? 0,
           ),
         )
         .toBe(count);
     },
     release: () =>
       page.evaluate(() => {
-        const target = window as NodePublicationAttemptGateWindow;
-        const release = target.__atlasNodePublicationAttemptRelease;
-        delete target.__atlasNodePublicationAttemptRelease;
+        const target = window as PublicationAttemptGateWindow;
+        const release = target.__atlasPublicationAttemptRelease;
+        delete target.__atlasPublicationAttemptRelease;
         release?.();
       }),
   };
@@ -670,7 +673,7 @@ test.describe("progressive v2 publications", () => {
   test("finishes loading after primary metric churn exhausts its commit budget", async ({
     page,
   }) => {
-    const gate = await installNodePublicationAttemptGate(page);
+    const gate = await installPublicationAttemptGate(page, "node");
     const pageErrors: Error[] = [];
     page.on("pageerror", (error) => pageErrors.push(error));
     await page.goto("/");
@@ -696,6 +699,54 @@ test.describe("progressive v2 publications", () => {
     );
     await expect(status).toHaveAttribute("data-state", /ready|stale/);
     await expect(page.getByText("Atlas website unavailable")).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("finishes comparison loading after primary canvas metric churn exhausts its commit budget", async ({
+    page,
+  }) => {
+    const gate = await installPublicationAttemptGate(page, "comparison");
+    await page.addInitScript(() => {
+      const target = window as PublicationAttemptGateWindow;
+      target.__atlasComparisonCandidateMetricOffset = 0;
+      const getBounds = HTMLCanvasElement.prototype.getBoundingClientRect;
+      HTMLCanvasElement.prototype.getBoundingClientRect = function () {
+        const bounds = getBounds.call(this);
+        if (this.id !== "comparison-canvas") return bounds;
+        return new DOMRect(
+          bounds.x,
+          bounds.y,
+          bounds.width + (target.__atlasComparisonCandidateMetricOffset ?? 0),
+          bounds.height,
+        );
+      };
+    });
+    const pageErrors: Error[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error));
+    await page.goto("/compare/");
+
+    for (let index = 0; index < 4; index += 1) {
+      await gate.waitForAttempt(index + 1);
+      await page.evaluate(
+        (offset) => {
+          (
+            window as PublicationAttemptGateWindow
+          ).__atlasComparisonCandidateMetricOffset = offset;
+        },
+        (index + 1) * 24,
+      );
+      await gate.release();
+    }
+
+    const status = page.locator("#comparison-status");
+    await expect(status).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    await expect(status).toHaveAttribute("data-state", /ready|stale/);
+    await expect(page.locator("#comparison-status-title")).not.toContainText(
+      "Comparison unavailable",
+    );
     expect(pageErrors).toEqual([]);
   });
 
@@ -760,6 +811,73 @@ test.describe("progressive v2 publications", () => {
       await expect(metricToggle).toHaveAttribute("aria-pressed", "true");
       await expect(page.locator("#distribution-grid")).toBeVisible();
       await expect(selectedControl).toBeFocused();
+      expect(pageErrors).toEqual([]);
+    } finally {
+      gate.release();
+    }
+  });
+
+  test("keeps membership filters disabled and inert during a source-switch primary view", async ({
+    page,
+  }) => {
+    const pageErrors: Error[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error));
+    await page.goto("/?source=vps-core-01");
+    const status = page.locator("#page-status");
+    await expect(status).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    await page.locator("#fee-age-tab").click();
+    await page.locator("#minimum-fee-rate").fill("7.5");
+    await page.locator("#maximum-age").selectOption("3600000");
+    await page.locator("#minimum-vsize").fill("300");
+
+    const gate = await installCompletionStageGate(page);
+    try {
+      await page.locator("#source-select").selectOption("vps-knots-01");
+      await gate.waitForRequests(2);
+      await expect(status).toHaveAttribute(
+        "data-readiness",
+        "primary-interactive",
+      );
+      const membershipControls = page.locator(
+        "#fee-age-tab, #classification-lens-select, #minimum-fee-rate, #maximum-age, #minimum-vsize, #apply-filters, #reset-filters",
+      );
+      for (const control of await membershipControls.all()) {
+        await expect(control).toBeDisabled();
+      }
+      await expect(page.locator("#minimum-fee-rate")).toHaveValue("7.5");
+      await expect(page.locator("#maximum-age")).toHaveValue("3600000");
+      await expect(page.locator("#minimum-vsize")).toHaveValue("300");
+
+      const retainedStatus = await page.locator("#status-title").textContent();
+      const retainedSummary = await page
+        .locator("#filter-summary")
+        .textContent();
+      await page.locator("#filters").evaluate((form) => {
+        (form as HTMLFormElement).requestSubmit();
+      });
+      await expect(page.locator("#status-title")).toHaveText(
+        retainedStatus ?? "",
+      );
+      await expect(page.locator("#filter-summary")).toHaveText(
+        retainedSummary ?? "",
+      );
+      expect(pageErrors).toEqual([]);
+
+      gate.release();
+      await expect(status).toHaveAttribute(
+        "data-readiness",
+        "complete-feature-ready",
+      );
+      for (const control of await membershipControls.all()) {
+        await expect(control).toBeEnabled();
+      }
+      await expect(page.locator("#minimum-fee-rate")).toHaveValue("7.5");
+      await expect(page.locator("#maximum-age")).toHaveValue("3600000");
+      await expect(page.locator("#minimum-vsize")).toHaveValue("300");
+      await expect(page.locator("#filter-summary")).toContainText("Showing");
       expect(pageErrors).toEqual([]);
     } finally {
       gate.release();

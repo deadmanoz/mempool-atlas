@@ -8,6 +8,11 @@ if [[ "$script_dir" == "$script_path" ]]; then
 fi
 repo_root=$(cd "$script_dir/.." && pwd)
 
+command -v jq >/dev/null 2>&1 || {
+    printf 'v2 smoke stage parser tests require jq on PATH\n' >&2
+    exit 2
+}
+
 # shellcheck source=lib/v2-manifest-stages.sh
 source "$script_dir/lib/v2-manifest-stages.sh"
 

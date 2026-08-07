@@ -4,6 +4,7 @@ import {
 } from "./comparison-policy-view";
 import {
   awaitAtlasCandidateRelease,
+  awaitAtlasPublicationAttemptRelease,
   type AtlasCandidateReadyDetail,
 } from "./candidate-ready";
 import type {
@@ -107,6 +108,10 @@ export const prepareComparisonCommitCandidate = async (
       canvasView.canCommitCandidate(canvas) &&
       (distributions === null ||
         distributionsView.canCommit(distributions, publication.comparison));
+    await awaitAtlasPublicationAttemptRelease(
+      { surface: "comparison", attempt, complete },
+      signal,
+    );
     signal.throwIfAborted();
     if (!isCurrent()) {
       throw new DOMException("Comparison request was superseded", "AbortError");

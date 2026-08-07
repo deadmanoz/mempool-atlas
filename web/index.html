@@ -143,6 +143,7 @@
             </button>
             <button
               id="fee-age-tab"
+              disabled
               role="tab"
               tabindex="-1"
               aria-selected="false"
@@ -159,6 +160,7 @@
           <select
             id="classification-lens-select"
             aria-label="Transaction classifier"
+            disabled
           ></select>
         </label>
 
@@ -309,13 +311,14 @@
                     min="0"
                     step="0.1"
                     value="0"
+                    disabled
                   />
                   <small>sat/vB</small>
                 </span>
               </label>
               <label>
                 <span>Newest transactions</span>
-                <select id="maximum-age">
+                <select id="maximum-age" disabled>
                   <option value="all">Any age</option>
                   <option value="600000">Last 10 minutes</option>
                   <option value="3600000">Last hour</option>
@@ -333,13 +336,21 @@
                     min="0"
                     step="1"
                     value="0"
+                    disabled
                   />
                   <small>vB</small>
                 </span>
               </label>
               <div class="filter-actions">
-                <button class="primary-action" type="submit">Apply</button>
-                <button id="reset-filters" type="button">Reset</button>
+                <button
+                  id="apply-filters"
+                  class="primary-action"
+                  type="submit"
+                  disabled
+                >
+                  Apply
+                </button>
+                <button id="reset-filters" type="button" disabled>Reset</button>
               </div>
             </form>
 

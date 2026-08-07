@@ -4,7 +4,7 @@ import {
 } from "./classification-view";
 import {
   awaitAtlasCandidateRelease,
-  awaitAtlasNodePublicationAttemptRelease,
+  awaitAtlasPublicationAttemptRelease,
   type AtlasCandidateReadyDetail,
 } from "./candidate-ready";
 import { bip110RulePopulationSummary } from "./bip110-rule-index";
@@ -282,8 +282,8 @@ export const prepareNodePublicationCommit = async (
           ))
       );
     };
-    await awaitAtlasNodePublicationAttemptRelease(
-      { attempt, complete },
+    await awaitAtlasPublicationAttemptRelease(
+      { surface: "node", attempt, complete },
       signal,
     );
     signal.throwIfAborted();

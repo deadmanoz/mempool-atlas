@@ -8,6 +8,14 @@ if [[ "$script_dir" == "$script_path" ]]; then
 fi
 repo_root=$(cd "$script_dir/.." && pwd)
 
+for required_tool in grep jq mktemp node rm sleep; do
+    command -v "$required_tool" >/dev/null 2>&1 || {
+        printf 'offline public smoke tests require %s on PATH; install it and retry\n' \
+            "$required_tool" >&2
+        exit 2
+    }
+done
+
 fixture_manifest="$repo_root/web/.perf-fixtures/functional/manifest.json"
 fixture_server="$repo_root/web/dev/fixture-server.mjs"
 smoke_script="$repo_root/scripts/smoke-public.sh"
@@ -39,13 +47,15 @@ stop_fixture_server() {
 start_fixture_server() {
     local cloudflare_headers=$1
     local detail_status=$2
-    local log_path="$test_tmp_dir/server-$cloudflare_headers-$detail_status.log"
+    local omit_header=${3:-}
+    local log_path="$test_tmp_dir/server-$cloudflare_headers-$detail_status-${omit_header:-none}.log"
     local line=
     local attempt=0
 
     ATLAS_FIXTURE_PORT=0 \
         ATLAS_FIXTURE_CLOUDFLARE_HEADERS="$cloudflare_headers" \
         ATLAS_FIXTURE_DETAIL_STATUS="$detail_status" \
+        ATLAS_FIXTURE_OMIT_HEADER="$omit_header" \
         node "$fixture_server" >"$log_path" 2>&1 &
     server_pid=$!
 
@@ -67,6 +77,36 @@ start_fixture_server() {
         attempt=$((attempt + 1))
     done
     fail "fixture server did not become ready: $(<"$log_path")"
+}
+
+require_message_once() {
+    local context=$1
+    local expected=$2
+    local path=$3
+    local count
+    local line_count
+    count=$(grep -F -c "$expected" "$path" || true)
+    [[ "$count" == 1 ]] ||
+        fail "$context: expected one '$expected' error, found $count"
+    line_count=$(grep -c '^' "$path" || true)
+    [[ "$line_count" == 1 ]] ||
+        fail "$context: expected only the precise missing-header error"
+}
+
+expect_missing_header_failure() {
+    local header=$1
+    local cloudflare_headers=$2
+    local stderr_path="$test_tmp_dir/missing-$header.stderr"
+
+    start_fixture_server "$cloudflare_headers" 200 "$header"
+    if "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
+        >"$test_tmp_dir/missing-$header.stdout" \
+        2>"$stderr_path"; then
+        fail "smoke script accepted a response without $header"
+    fi
+    require_message_once \
+        "missing $header" "missing $header header in" "$stderr_path"
+    stop_fixture_server
 }
 
 [[ -r "$fixture_manifest" ]] ||
@@ -120,6 +160,15 @@ grep -F 'public v2-only Cloudflare smoke checks passed' \
     "$test_tmp_dir/no-cloudflare.stdout" >/dev/null ||
     fail "smoke script did not report success without Cloudflare headers"
 stop_fixture_server
+
+# A missing required header must stop at the exact header contract. In
+# particular, command substitutions inside comparisons must not continue into
+# a second, generic cache-policy failure.
+expect_missing_header_failure cache-control 0
+expect_missing_header_failure cf-cache-status 1
+
+# Every conditionally compressed stage must advertise the representation key.
+expect_missing_header_failure vary 0
 
 # Repeat with lower-case, CRLF-terminated HTTP headers and synthetic edge cache
 # statuses so the portable parser and both cache-status policies execute too.

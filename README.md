@@ -129,7 +129,9 @@ Run `just web-fixtures` in one terminal and `just web-dev` in another. The
 command first exports three deterministic synthetic sources from the Rust
 domain model, then serves their pre-encoded API bodies on
 <http://127.0.0.1:3101>. `just test-web-e2e` regenerates the same small profile
-automatically.
+automatically and always starts a fresh fixture server. Stop `just web-fixtures`
+before running E2E; the preflight reports occupied fixture and preview ports
+without reusing their existing processes.
 
 `just perf-web` builds the production website and measures it against a
 separate 70,000-transaction, two-source profile under recorded desktop and

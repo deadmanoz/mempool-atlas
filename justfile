@@ -41,6 +41,8 @@ test-web:
 # Browser-level viewport coverage. Playwright starts the fixture Atlas API and
 # Vite itself; run `just test-web-e2e-install` once to fetch the browser.
 test-web-e2e:
+    node scripts/check-web-e2e-ports.mjs
+    node --test scripts/check-web-e2e-ports.test.mjs
     just functional-fixtures
     npm --prefix web run test:e2e
 

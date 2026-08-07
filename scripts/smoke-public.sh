@@ -94,9 +94,24 @@ require_header() {
     value=$(header_value "$name" "$path")
     if [[ -z "$value" ]]; then
         printf 'missing %s header in %s\n' "$name" "$path" >&2
-        exit 1
+        return 1
     fi
     printf '%s' "$value"
+}
+
+header_contains_token() {
+    local value=$1
+    local wanted=$2
+    awk -v value="$value" -v wanted="$wanted" '
+        BEGIN {
+            count = split(value, tokens, ",")
+            for (token_index = 1; token_index <= count; token_index += 1) {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", tokens[token_index])
+                if (tolower(tokens[token_index]) == tolower(wanted)) exit 0
+            }
+            exit 1
+        }
+    '
 }
 
 require_cloudflare_cache_bypass() {
@@ -150,7 +165,8 @@ if [[ $(status_code "$temp_dir/sources.headers") != 200 ]]; then
     printf 'source discovery did not return 200\n' >&2
     exit 1
 fi
-if [[ $(require_header cache-control "$temp_dir/sources.headers") != no-store ]]; then
+source_cache_control=$(require_header cache-control "$temp_dir/sources.headers")
+if [[ "$source_cache_control" != no-store ]]; then
     printf 'source discovery must remain non-cacheable\n' >&2
     exit 1
 fi
@@ -204,7 +220,8 @@ query_status=$(curl --silent --show-error --max-time 30 \
     printf 'manifest query probe returned %s instead of 400\n' "$query_status" >&2
     exit 1
 }
-[[ $(require_header cache-control "$temp_dir/query.headers") == no-store ]] || {
+query_cache_control=$(require_header cache-control "$temp_dir/query.headers")
+[[ "$query_cache_control" == no-store ]] || {
     printf 'manifest query rejection must remain non-cacheable\n' >&2
     exit 1
 }
@@ -219,7 +236,8 @@ bare_query_status=$(curl --silent --show-error --max-time 30 \
         "$bare_query_status" >&2
     exit 1
 }
-[[ $(require_header cache-control "$temp_dir/bare-query.headers") == no-store ]] || {
+bare_query_cache_control=$(require_header cache-control "$temp_dir/bare-query.headers")
+[[ "$bare_query_cache_control" == no-store ]] || {
     printf 'bare manifest query rejection must remain non-cacheable\n' >&2
     exit 1
 }
@@ -272,15 +290,25 @@ while IFS= read -r -d '' kind &&
         printf 'stage ETag does not bind its content ID: %s\n' "$stage_etag" >&2
         exit 1
     }
-    [[ $(require_header x-atlas-content-id "$temp_dir/stage-$stage_number.headers") == "$content_id" ]] || {
+    stage_content_id=$(require_header \
+        x-atlas-content-id "$temp_dir/stage-$stage_number.headers")
+    [[ "$stage_content_id" == "$content_id" ]] || {
         printf 'stage content header does not match its descriptor: %s\n' "$stage_url" >&2
         exit 1
     }
-    [[ $(require_header x-atlas-uncompressed-length "$temp_dir/stage-$stage_number.headers") == "$uncompressed_bytes" ]] || {
+    stage_uncompressed_length=$(require_header \
+        x-atlas-uncompressed-length "$temp_dir/stage-$stage_number.headers")
+    [[ "$stage_uncompressed_length" == "$uncompressed_bytes" ]] || {
         printf 'stage length header does not match its descriptor: %s\n' "$stage_url" >&2
         exit 1
     }
     require_header content-encoding "$temp_dir/stage-$stage_number.headers" >/dev/null
+    stage_vary=$(require_header vary "$temp_dir/stage-$stage_number.headers")
+    header_contains_token "$stage_vary" accept-encoding || {
+        printf 'stage Vary header does not include Accept-Encoding: %s\n' \
+            "$stage_url" >&2
+        exit 1
+    }
     require_cloudflare_cache_handling \
         "$temp_dir/stage-$stage_number.headers" "stage $stage_url"
     curl --silent --show-error --max-time 30 \
@@ -381,7 +409,8 @@ if jq -e '.transaction_count > 0' "$temp_dir/manifest.json" >/dev/null; then
             exit 1
             ;;
     esac
-    [[ $(require_header cache-control "$temp_dir/detail.headers") == no-store ]] || {
+    detail_cache_control=$(require_header cache-control "$temp_dir/detail.headers")
+    [[ "$detail_cache_control" == no-store ]] || {
         printf 'transaction detail must remain non-cacheable\n' >&2
         exit 1
     }
