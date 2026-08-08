@@ -36,6 +36,8 @@ if (process.env.ATLAS_E2E_PORTS_PREFLIGHTED !== "1") {
   if (preflight.status !== 0) {
     throw new Error(preflight.stderr.trim() || "web E2E port preflight failed");
   }
+  // Playwright and its child processes inherit this mutated environment, so
+  // subsequent config loads do not repeat the parent-owned port preflight.
   process.env.ATLAS_E2E_PORTS_PREFLIGHTED = "1";
 }
 
