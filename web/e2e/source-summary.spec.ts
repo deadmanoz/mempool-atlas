@@ -544,6 +544,56 @@ test.describe("early source metadata", () => {
     );
   });
 
+  test("replaces pending panel copy when a switched source has no first publication", async ({
+    page,
+  }) => {
+    const pageErrors: Error[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error));
+    await page.goto("/?source=vps-core-01");
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    await page.route(
+      /\/api\/v2\/sources\/vps-knots-01\/mempool(?:\?.*)?$/,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/problem+json",
+          json: {
+            type: "v2_unavailable",
+            title: "Current v2 publication unavailable",
+            status: 503,
+            detail: "The selected source has no current v2 publication.",
+          },
+        });
+      },
+    );
+
+    await page.locator("#source-select").selectOption("vps-knots-01");
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-state",
+      "error",
+    );
+    await expect(page.locator("#status-title")).toHaveText(
+      "Atlas website unavailable",
+    );
+    const detail = (await page.locator("#status-detail").textContent()) ?? "";
+    expect(detail).not.toContain("Loading");
+    for (const selector of [
+      "#terrain-empty",
+      "#fee-age-empty",
+      "#distribution-empty",
+    ]) {
+      await expect(page.locator(selector)).toHaveText(detail);
+    }
+    await expect(page.locator("#source-summary")).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+    expect(pageErrors).toEqual([]);
+  });
+
   test("clears the busy summary when first-publication rediscovery fails", async ({
     page,
   }) => {
@@ -670,6 +720,60 @@ test.describe("early source metadata", () => {
 });
 
 test.describe("progressive v2 publications", () => {
+  test("keeps an absent exact transaction search safe while membership loads", async ({
+    page,
+  }) => {
+    const gate = await installCompletionStageGate(page);
+    const pageErrors: Error[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error));
+    const absentTxid = "0".repeat(64);
+    try {
+      await page.goto("/?source=vps-core-01");
+      await gate.waitForRequests(2);
+      const status = page.locator("#page-status");
+      await expect(status).toHaveAttribute(
+        "data-readiness",
+        "primary-interactive",
+      );
+      await page.locator("#transaction-search-input").fill(absentTxid);
+      await page.locator("#transaction-search").evaluate((form) => {
+        (form as HTMLFormElement).requestSubmit();
+      });
+
+      await expect(page.locator("#transaction-search-status")).toHaveAttribute(
+        "data-state",
+        "absent",
+      );
+      await expect(page.locator("#detail-status")).toHaveText(
+        "Not present in this snapshot",
+      );
+      await expect(page.locator("#sample-summary")).toHaveText(
+        "Samples load with membership data.",
+      );
+      await expect
+        .poll(() => new URL(page.url()).searchParams.get("txid"))
+        .toBe(absentTxid);
+      expect(pageErrors).toEqual([]);
+
+      gate.release();
+      await expect(status).toHaveAttribute(
+        "data-readiness",
+        "complete-feature-ready",
+      );
+      await expect(status).toHaveAttribute("data-state", /ready|stale/);
+      await expect(page.locator("#transaction-search-status")).toHaveAttribute(
+        "data-state",
+        "absent",
+      );
+      await expect
+        .poll(() => new URL(page.url()).searchParams.get("txid"))
+        .toBe(absentTxid);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      gate.release();
+    }
+  });
+
   test("finishes loading after primary metric churn exhausts its commit budget", async ({
     page,
   }) => {
@@ -832,6 +936,11 @@ test.describe("progressive v2 publications", () => {
     await page.locator("#minimum-fee-rate").fill("7.5");
     await page.locator("#maximum-age").selectOption("3600000");
     await page.locator("#minimum-vsize").fill("300");
+    await expect(page.locator("#fee-age-tab")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.locator("#fee-age-view")).toBeVisible();
 
     const gate = await installCompletionStageGate(page);
     try {
@@ -847,6 +956,16 @@ test.describe("progressive v2 publications", () => {
       for (const control of await membershipControls.all()) {
         await expect(control).toBeDisabled();
       }
+      await expect(page.locator("#overview-tab")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      await expect(page.locator("#fee-age-tab")).toHaveAttribute(
+        "aria-selected",
+        "false",
+      );
+      await expect(page.locator("#overview-view")).toBeVisible();
+      await expect(page.locator("#fee-age-view")).toBeHidden();
       await expect(page.locator("#minimum-fee-rate")).toHaveValue("7.5");
       await expect(page.locator("#maximum-age")).toHaveValue("3600000");
       await expect(page.locator("#minimum-vsize")).toHaveValue("300");
@@ -874,6 +993,16 @@ test.describe("progressive v2 publications", () => {
       for (const control of await membershipControls.all()) {
         await expect(control).toBeEnabled();
       }
+      await expect(page.locator("#overview-tab")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      await expect(page.locator("#fee-age-tab")).toHaveAttribute(
+        "aria-selected",
+        "false",
+      );
+      await expect(page.locator("#overview-view")).toBeVisible();
+      await expect(page.locator("#fee-age-view")).toBeHidden();
       await expect(page.locator("#minimum-fee-rate")).toHaveValue("7.5");
       await expect(page.locator("#maximum-age")).toHaveValue("3600000");
       await expect(page.locator("#minimum-vsize")).toHaveValue("300");

@@ -715,7 +715,7 @@ const showAbsentTransaction = (txid: string): void => {
     "Atlas did not observe this transaction in the selected node's current mempool snapshot.";
   detailTransaction.append(message);
   detailRules.replaceChildren();
-  renderSampleTable();
+  renderInspectorSamples();
   scheduleTerrainRender();
   replaceViewUrl();
 };
@@ -2221,6 +2221,9 @@ const loadSnapshot = async (): Promise<void> => {
         ? `The selected classifier and transaction search remain available. Membership-dependent features did not finish loading: ${message}`
         : `The prior complete snapshot remains usable. Refresh failed: ${message}`);
     if (currentSnapshot === null) {
+      terrainEmpty.textContent = statusDetail.textContent;
+      feeAgeEmpty.textContent = statusDetail.textContent;
+      snapshotDistributionsView.reset(statusDetail.textContent);
       if (source === undefined) {
         sourceSummaryView.renderDiscoveryFailure();
       } else {
@@ -2297,6 +2300,7 @@ const prepareForSourceLoad = (source: SourceSummary): void => {
   filteredTransactions = [];
   selectedClassifierLabel = null;
   selectedClassifierBucketKey = null;
+  if (selectedLens === "fee-age") selectLens("overview");
   resetTerrainLayouts();
   terrainStage.hidden = true;
   feeAgeStage.hidden = true;

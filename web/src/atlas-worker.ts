@@ -23,6 +23,7 @@ import {
   sha256,
   validateManifestRoots,
 } from "./publication-digest";
+import { parseSourceSummary } from "./source-summary";
 import type {
   Bip110Assessment,
   ClassifierDescriptor,
@@ -198,6 +199,7 @@ const parseManifest = (value: unknown): StagedSnapshotManifest => {
   ) {
     throw new TypeError("Invalid v2 snapshot manifest");
   }
+  const source = parseSourceSummary(value.source);
   const sourceId = string(value.source_id, "manifest source ID");
   const sourceLabel = string(value.source_label, "manifest source label");
   if (!SOURCE_ID.test(sourceId)) {
@@ -310,18 +312,15 @@ const parseManifest = (value: unknown): StagedSnapshotManifest => {
   ) {
     throw new TypeError("Manifest contains an invalid dependency graph");
   }
-  if (
-    value.source.availability !== "ready" &&
-    value.source.availability !== "stale"
-  ) {
+  if (source.availability !== "ready" && source.availability !== "stale") {
     throw new TypeError("Published manifest has no available snapshot");
   }
   if (
-    value.source.source_id !== sourceId ||
-    value.source.source_label !== sourceLabel ||
-    value.source.snapshot_observed_at_ms !== value.observed_at_ms ||
-    value.source.transaction_count !== transactionCount ||
-    value.source.total_vsize !== value.total_vsize
+    source.source_id !== sourceId ||
+    source.source_label !== sourceLabel ||
+    source.snapshot_observed_at_ms !== value.observed_at_ms ||
+    source.transaction_count !== transactionCount ||
+    source.total_vsize !== value.total_vsize
   ) {
     throw new TypeError("Manifest source summary does not match its snapshot");
   }
@@ -349,8 +348,8 @@ const parseManifest = (value: unknown): StagedSnapshotManifest => {
   integer(value.chain_tip.height, "chain height");
   digest(value.chain_tip.hash, "chain hash");
   integer(value.total_vsize, "total vsize");
-  const sourceChainTip = value.source.chain_tip;
-  const sourceClassification = value.source.classification;
+  const sourceChainTip = source.chain_tip;
+  const sourceClassification = source.classification;
   const bip110Summary = value.bip110_summary;
   if (
     !isRecord(sourceChainTip) ||
@@ -447,6 +446,7 @@ const parseManifest = (value: unknown): StagedSnapshotManifest => {
   });
   return {
     ...(value as unknown as StagedSnapshotManifest),
+    source,
     classifier_catalog: catalog,
     stages: descriptors,
     population_id: populationId,

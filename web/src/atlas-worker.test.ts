@@ -364,6 +364,68 @@ describe("v2 manifest validation", () => {
     );
   });
 
+  it.each([
+    {
+      name: "an extra source key",
+      mutate: (source: Record<string, unknown>) => {
+        source.unexpected = true;
+      },
+      message: "Invalid source summary",
+    },
+    {
+      name: "a zero poll interval",
+      mutate: (source: Record<string, unknown>) => {
+        source.poll_interval_seconds = 0;
+      },
+      message: "Invalid source summary",
+    },
+    {
+      name: "a stale source without an error",
+      mutate: (source: Record<string, unknown>) => {
+        source.availability = "stale";
+        source.last_error = null;
+      },
+      message: "Failed source is missing its error",
+    },
+    {
+      name: "a ready source with an error",
+      mutate: (source: Record<string, unknown>) => {
+        source.last_error = "unexpected error";
+      },
+      message: "Healthy source unexpectedly contains an error",
+    },
+  ])(
+    "rejects manifest source summary with $name",
+    async ({ mutate, message }) => {
+      const current = await fixture();
+      const manifest = JSON.parse(
+        new TextDecoder().decode(current.manifestBytes),
+      ) as { source: Record<string, unknown> };
+      mutate(manifest.source);
+
+      expect(() => parseManifest(manifest)).toThrow(message);
+    },
+  );
+
+  it("retains the manifest-specific available-snapshot requirement", async () => {
+    const current = await fixture();
+    const manifest = JSON.parse(
+      new TextDecoder().decode(current.manifestBytes),
+    ) as { source: Record<string, unknown> };
+    Object.assign(manifest.source, {
+      availability: "waiting",
+      snapshot_observed_at_ms: null,
+      chain_tip: null,
+      transaction_count: null,
+      total_vsize: null,
+      classification: null,
+    });
+
+    expect(() => parseManifest(manifest)).toThrow(
+      "Published manifest has no available snapshot",
+    );
+  });
+
   it("requires internally coherent collection timing", async () => {
     const current = await fixture();
     const manifest = (): Record<string, unknown> =>

@@ -146,6 +146,7 @@ describe("executeComparisonViewTransition", () => {
       renderTransactionNavigator: 0,
       updateQuery: 0,
       scheduleCanvasRender: 0,
+      handleCanvasRenderFailure: 0,
       loadTransactionDetail: 0,
     };
     const count =
@@ -161,7 +162,11 @@ describe("executeComparisonViewTransition", () => {
         syncTransactionSelection: count("syncTransactionSelection"),
         renderTransactionNavigator: count("renderTransactionNavigator"),
         updateQuery: count("updateQuery"),
-        scheduleCanvasRender: count("scheduleCanvasRender"),
+        scheduleCanvasRender: () => {
+          count("scheduleCanvasRender")();
+          return Promise.resolve("rendered");
+        },
+        handleCanvasRenderFailure: count("handleCanvasRenderFailure"),
         loadTransactionDetail: count("loadTransactionDetail"),
       },
     };
@@ -186,6 +191,7 @@ describe("executeComparisonViewTransition", () => {
       renderTransactionNavigator: 0,
       updateQuery: 0,
       scheduleCanvasRender: 0,
+      handleCanvasRenderFailure: 0,
       loadTransactionDetail: 0,
     });
   });
@@ -208,7 +214,53 @@ describe("executeComparisonViewTransition", () => {
       renderTransactionNavigator: 1,
       updateQuery: 1,
       scheduleCanvasRender: 1,
+      handleCanvasRenderFailure: 0,
       loadTransactionDetail: 1,
     });
+  });
+
+  it("routes an asynchronous canvas fault into the failure effect", async () => {
+    const { counters, effects } = effectCounters();
+    const failure = new Error("Canvas context lost");
+    effects.scheduleCanvasRender = () => {
+      counters.scheduleCanvasRender += 1;
+      return Promise.reject(failure);
+    };
+    let observed: unknown;
+    effects.handleCanvasRenderFailure = (error) => {
+      counters.handleCanvasRenderFailure += 1;
+      observed = error;
+    };
+
+    executeComparisonViewTransition(
+      comparison,
+      state({ txid: txid(1) }),
+      state({ txid: txid(2) }),
+      effects,
+    );
+    await Promise.resolve();
+
+    expect(observed).toBe(failure);
+    expect(counters.scheduleCanvasRender).toBe(1);
+    expect(counters.handleCanvasRenderFailure).toBe(1);
+  });
+
+  it("does not treat a superseded render result as a failure", async () => {
+    const { counters, effects } = effectCounters();
+    effects.scheduleCanvasRender = () => {
+      counters.scheduleCanvasRender += 1;
+      return Promise.resolve("superseded");
+    };
+
+    executeComparisonViewTransition(
+      comparison,
+      state({ txid: txid(1) }),
+      state({ txid: txid(2) }),
+      effects,
+    );
+    await Promise.resolve();
+
+    expect(counters.scheduleCanvasRender).toBe(1);
+    expect(counters.handleCanvasRenderFailure).toBe(0);
   });
 });

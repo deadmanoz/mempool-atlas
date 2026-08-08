@@ -27,6 +27,10 @@ browser performance matrix. Treat a Node patch update as a reviewed evidence
 change: update the CI runtime and projection pin together, regenerate the
 checked-in projection, and review its byte and gate diff.
 
+On a cold tree, `just test` builds both the optimized fixture-export profile
+used by public-contract smoke tests and the ordinary development/test trees.
+Seeing both Rust build paths compile during the first run is expected.
+
 Rust code must remain compatible with the declared 1.88 MSRV. Check it with:
 
 ```sh

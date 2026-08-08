@@ -312,6 +312,62 @@ async fn publication_limit_failure_retains_the_current_bundle_and_domain_state()
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_preparation_failure_is_attributed_to_atlas() {
+    let probe = Arc::new(MembershipProbe::default());
+    let (address, server) = start_membership_fixture("core", Arc::clone(&probe), false).await;
+    let poll_interval = Duration::from_secs(60);
+    let runtime = Arc::new(
+        SourceRuntime::new("core".to_owned(), "Bitcoin Core".to_owned(), poll_interval)
+            .expect("source runtime"),
+    );
+    runtime
+        .record_membership(membership_publication(0, true, observation(20)))
+        .await
+        .expect("record initial snapshot");
+    runtime.limit_next_publication(StagedSnapshotLimits {
+        max_stage_bytes: 1,
+        max_publication_bytes: 1,
+    });
+    let url = format!("http://{address}/");
+    let source = AtlasSource::new(
+        Arc::clone(&runtime),
+        RpcClient::new(&url, "atlas", "secret", 100).expect("membership RPC client"),
+        ClassificationPipeline::new(
+            &url,
+            "atlas".to_owned(),
+            "secret".to_owned(),
+            ClassificationLimits::new(1, 1, 1024 * 1024).expect("classification limits"),
+        )
+        .expect("classification client"),
+    );
+    let atlas = AtlasRuntime::new(vec![source], poll_interval).expect("Atlas runtime");
+
+    atlas.poll_round(1).await;
+
+    assert_eq!(probe.source_order.lock().await.as_slice(), ["core"]);
+    let summary = runtime.summary().await;
+    assert_eq!(summary.availability, SourceAvailability::Stale);
+    assert_eq!(summary.snapshot_observed_at_ms, Some(20));
+    assert_eq!(
+        summary.last_error.as_deref(),
+        Some("Atlas publication preparation failed")
+    );
+    let manifest = runtime
+        .current_manifest_payload()
+        .await
+        .expect("failure manifest");
+    let manifest = serde_json::from_slice::<Value>(&manifest.body).expect("manifest JSON");
+    assert_eq!(manifest["source"]["availability"], "stale");
+    assert_eq!(
+        manifest["source"]["last_error"],
+        "Atlas publication preparation failed"
+    );
+    assert_eq!(manifest["source"]["snapshot_observed_at_ms"], 20);
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn classification_publication_failure_pauses_without_staling_membership() {
     let runtime = runtime();

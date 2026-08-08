@@ -211,9 +211,7 @@ impl AtlasRuntime {
                         Err(error) => {
                             if let Err(state_error) = source
                                 .runtime
-                                .record_failure(
-                                    "current v2 publication could not be prepared".to_owned(),
-                                )
+                                .record_failure("Atlas publication preparation failed".to_owned())
                                 .await
                             {
                                 warn!(

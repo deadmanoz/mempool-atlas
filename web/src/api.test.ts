@@ -343,6 +343,20 @@ describe("parseSourceSummary", () => {
         availability: "stale",
       }),
     ).toThrow("Failed source is missing its error");
+
+    expect(() =>
+      parseSourceSummary({
+        ...waitingSource(),
+        availability: "error",
+      }),
+    ).toThrow("Failed source is missing its error");
+
+    expect(() =>
+      parseSourceSummary({
+        ...waitingSource(),
+        last_error: "unexpected error",
+      }),
+    ).toThrow("Healthy source unexpectedly contains an error");
   });
 
   it("rejects URL dot segments, extra fields, and a zero poll interval", () => {

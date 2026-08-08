@@ -31,6 +31,8 @@ lenses, and serves source-local node and comparison views.
   browser fixture bodies. Production builds do not enable `perf-fixtures`.
 - `src/bip110/` is the private pure seven-rule evaluator.
 - `web/` contains the node viewer and browser-derived comparison page.
+- `web/src/source-summary.ts` owns the strict source-summary wire validator
+  shared by discovery parsing and staged-manifest parsing.
 - `web/src/atlas-worker.ts` owns staged publication fetch, bounded decoding,
   semantic validation, cache and retry behavior, and the worker message surface.
 - `web/src/publication-digest.ts` owns canonical classification-set and
@@ -46,7 +48,8 @@ lenses, and serves source-local node and comparison views.
   node and comparison distribution DOM subtrees.
 - `web/src/comparison-policy-view.ts` owns source-local policy aggregates and
   bounded samples. `web/src/comparison-view-transition.ts` classifies
-  interactive state changes before the controller applies effects.
+  interactive state changes before the controller applies effects, including
+  observed asynchronous canvas scheduling.
 - `web/src/node-sample-selection.ts` resolves constant-time eligibility when a
   selected transaction is pinned into a bounded node sample.
 - `web/src/styles.css` owns shared shell, header, toolbar, terrain, and chart
@@ -55,8 +58,9 @@ lenses, and serves source-local node and comparison views.
 - `web/e2e/` holds Playwright viewport, early-metadata, and layout-shift
   coverage driven by the fixture Atlas API in `web/dev/fixture-server.mjs`.
 - `web/perf/` holds the production-build performance server, Playwright
-  measurement harness, and result merger. Generated profiles and results live
-  under gitignored `web/.perf-fixtures/` and `web/.perf-results/`.
+  measurement harness, and result merger. `release-result-validator.mjs` owns
+  typed release-gate inputs and feasibility derivation. Generated profiles and
+  results live under gitignored `web/.perf-fixtures/` and `web/.perf-results/`.
 - `docs/architecture.md` is the current system reference.
 - `docs/classification.md` is the behavioral specification for classifier
   contracts, rules, thresholds, and limitations.

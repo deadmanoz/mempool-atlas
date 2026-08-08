@@ -902,6 +902,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_stage_supports_gzip_transfer_and_cache_contract() {
+        let source = runtime();
+        source
+            .record_success(classified_observation())
+            .await
+            .expect("publish observation");
+        let application = application(source);
+        let (_, manifest) = get_json(application.clone(), "/api/v2/sources/core/mempool").await;
+        let descriptor = manifest["stages"]
+            .as_array()
+            .expect("stages")
+            .iter()
+            .find(|descriptor| descriptor["kind"] == "population")
+            .expect("population descriptor");
+        let content_id = descriptor["content_id"]
+            .as_str()
+            .expect("population content ID");
+        let uncompressed_bytes = descriptor["uncompressed_bytes"]
+            .as_u64()
+            .expect("population byte length");
+        let path = format!("/api/v2/sources/core/mempool/stages/population/{content_id}");
+
+        let response = application
+            .oneshot(
+                Request::get(path)
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
+        assert!(
+            response
+                .headers()
+                .get_all(header::VARY)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(|value| value.split(','))
+                .any(|value| value.trim().eq_ignore_ascii_case("accept-encoding"))
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            STAGE_CACHE_CONTROL
+        );
+        assert_eq!(response.headers()[X_ATLAS_CONTENT_ID], content_id);
+        assert_eq!(
+            response.headers()[X_ATLAS_UNCOMPRESSED_LENGTH],
+            uncompressed_bytes.to_string()
+        );
+        assert!(
+            response.headers()[header::ETAG]
+                .to_str()
+                .expect("ETag")
+                .starts_with("W/\"atlas-v2-stage-population-")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(body.get(..2), Some([0x1f, 0x8b].as_slice()));
+    }
+
+    #[tokio::test]
     async fn source_failure_replaces_only_the_manifest_validator_and_metadata() {
         let source = runtime();
         source

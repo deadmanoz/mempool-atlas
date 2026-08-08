@@ -15,6 +15,7 @@ import {
   PINNED_THROUGHPUT_BYTES_PER_SECOND,
   RELEASE_GATES,
 } from "./release-gates.mjs";
+import { validateStableReleaseResult } from "./release-result-validator.mjs";
 
 const WEB_ROOT = resolve(import.meta.dirname, "..");
 const RESULT_ROOT = join(WEB_ROOT, ".perf-results");
@@ -509,43 +510,7 @@ const stableLoadSummaries = stableLoads.map((result) => {
   ) {
     throw new Error(`${label}.responsiveness maxima do not match the samples`);
   }
-  finite(
-    result.maximum_animation_frame_callback_ms,
-    `${label}.maximum_animation_frame_callback_ms`,
-  );
-  finite(result.cls, `${label}.cls`);
-  if (
-    result.readiness_contract?.complete_models_committed !== true ||
-    result.readiness_contract?.deferred_density_raster_excluded !== true
-  ) {
-    throw new Error(`${label}.readiness_contract is missing or unsupported`);
-  }
-  finite(
-    result.primary_memory_sample?.page_heap?.used_size_bytes,
-    `${label}.primary_memory_sample.page_heap.used_size_bytes`,
-    { positive: true },
-  );
-  finite(
-    result.page_heap?.complete?.used_size_bytes,
-    `${label}.page_heap.complete.used_size_bytes`,
-    { positive: true },
-  );
-  finite(
-    result.primary_memory_sample?.worker_inclusive_memory?.bytes,
-    `${label}.primary_memory_sample.worker_inclusive_memory.bytes`,
-    { positive: true },
-  );
-  finite(
-    result.worker_inclusive_memory?.complete?.bytes,
-    `${label}.worker_inclusive_memory.complete.bytes`,
-    { positive: true },
-  );
-  finite(
-    result.worker_inclusive_memory?.replacement_retained?.bytes,
-    `${label}.worker_inclusive_memory.replacement_retained.bytes`,
-    { positive: true },
-  );
-  const gate = RELEASE_GATES[result.scenario];
+  const releaseValidation = validateStableReleaseResult(result);
   if (
     result.primary_memory_sample?.isolated_context !== true ||
     result.primary_memory_sample?.cross_origin_isolated !== true
@@ -581,74 +546,6 @@ const stableLoadSummaries = stableLoads.map((result) => {
       );
     }
   }
-  const checks = {
-    metadata: result.metadata_usable_ms <= RELEASE_GATES.metadata_usable_ms,
-    primary_timing:
-      result.primary_interaction_ms <= gate.primary_interaction_ms,
-    complete_timing:
-      result.complete_feature_ready_ms <= gate.complete_feature_ready_ms,
-    primary_bytes:
-      result.quorum_totals.primary.encoded_body_bytes <=
-      gate.primary_encoded_body_bytes,
-    complete_bytes:
-      result.quorum_totals.complete.encoded_body_bytes <=
-      gate.complete_encoded_body_bytes,
-    long_task:
-      result.maximum_responsiveness_long_task_ms <=
-      RELEASE_GATES.maximum_responsiveness_long_task_ms,
-    interaction_handler:
-      result.maximum_interaction_handler_ms <=
-      RELEASE_GATES.interaction_handler_ms,
-    interaction_settle:
-      result.maximum_interaction_settle_ms <=
-      RELEASE_GATES.interaction_settle_ms,
-    frame_callback:
-      result.maximum_animation_frame_callback_ms <=
-      RELEASE_GATES.maximum_animation_frame_callback_ms[result.profile],
-    cls: result.cls <= RELEASE_GATES.cls,
-    primary_page_heap:
-      result.primary_memory_sample.page_heap.used_size_bytes <=
-      gate.page_heap_bytes,
-    complete_page_heap:
-      result.page_heap.complete.used_size_bytes <= gate.page_heap_bytes,
-    primary_cross_context_memory:
-      result.primary_memory_sample.worker_inclusive_memory.bytes <=
-      gate.cross_context_bytes,
-    complete_cross_context_memory:
-      result.worker_inclusive_memory.complete.bytes <= gate.cross_context_bytes,
-    replacement_retained_memory:
-      result.worker_inclusive_memory.replacement_retained.bytes <=
-      gate.replacement_retained_bytes,
-    replacement_retained_gate_declared:
-      result.worker_inclusive_memory.replacement_retained_gate_bytes ===
-      gate.replacement_retained_bytes,
-    stable_statuses: Object.keys(
-      result.request_outcomes?.status_counts ?? {},
-    ).every((status) => status === "200"),
-  };
-  const observedThroughput = {
-    primary:
-      result.quorum_totals.primary.encoded_body_bytes /
-      (result.quorum_totals.primary.transfer_window_ms / 1_000),
-    complete:
-      result.quorum_totals.complete.encoded_body_bytes /
-      (result.quorum_totals.complete.transfer_window_ms / 1_000),
-  };
-  const freshCapacity = {
-    primary: Math.floor(
-      observedThroughput.primary * (gate.primary_transfer_budget_ms / 1_000),
-    ),
-    complete: Math.floor(
-      observedThroughput.complete * (gate.complete_transfer_budget_ms / 1_000),
-    ),
-  };
-  const freshChecks = {
-    primary:
-      result.quorum_totals.primary.encoded_body_bytes <= freshCapacity.primary,
-    complete:
-      result.quorum_totals.complete.encoded_body_bytes <=
-      freshCapacity.complete,
-  };
   return {
     profile: result.profile,
     scenario: result.scenario,
@@ -662,7 +559,8 @@ const stableLoadSummaries = stableLoads.map((result) => {
     stage_transfers: result.stage_transfers,
     worker_timings: result.worker_timings,
     quorum_totals: result.quorum_totals,
-    freshly_observed_throughput_bytes_per_second: observedThroughput,
+    freshly_observed_throughput_bytes_per_second:
+      releaseValidation.freshlyObservedThroughput,
     responsiveness: {
       maximum_responsiveness_long_task_ms:
         result.maximum_responsiveness_long_task_ms,
@@ -682,15 +580,8 @@ const stableLoadSummaries = stableLoads.map((result) => {
       worker_inclusive: result.worker_inclusive_memory,
     },
     request_outcomes: result.request_outcomes,
-    feasibility: {
-      checks,
-      all: Object.values(checks).every(Boolean),
-    },
-    freshly_derived_feasibility: {
-      compressed_capacity_bytes: freshCapacity,
-      checks: freshChecks,
-      all: Object.values(freshChecks).every(Boolean),
-    },
+    feasibility: releaseValidation.feasibility,
+    freshly_derived_feasibility: releaseValidation.freshlyDerivedFeasibility,
   };
 });
 

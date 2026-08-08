@@ -8,6 +8,7 @@ import {
   type CurrentComparison,
 } from "./comparison-model";
 import type { ComparisonViewState } from "./view-state";
+import type { ComparisonCanvasRenderStatus } from "./comparison-canvas-view";
 
 export type ComparisonViewUpdateKind = "none" | "transaction" | "population";
 
@@ -27,7 +28,8 @@ export interface ComparisonViewTransitionEffects {
   syncTransactionSelection: () => void;
   renderTransactionNavigator: () => void;
   updateQuery: () => void;
-  scheduleCanvasRender: () => void;
+  scheduleCanvasRender: () => Promise<ComparisonCanvasRenderStatus>;
+  handleCanvasRenderFailure: (error: unknown) => void;
   loadTransactionDetail: (entry: ComparedTransaction) => void;
 }
 
@@ -131,7 +133,9 @@ export const executeComparisonViewTransition = (
   }
   effects.renderTransactionNavigator();
   effects.updateQuery();
-  effects.scheduleCanvasRender();
+  void effects
+    .scheduleCanvasRender()
+    .catch((error: unknown) => effects.handleCanvasRenderFailure(error));
   if (resolved.selectedEntry !== null) {
     effects.loadTransactionDetail(resolved.selectedEntry);
   }

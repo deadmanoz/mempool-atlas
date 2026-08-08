@@ -22,6 +22,7 @@ import {
   ComparisonCanvasView,
   renderLatestComparisonCanvas,
 } from "./comparison-canvas-view";
+import { comparisonCanvasRenderFailureHandler } from "./comparison-canvas-failure";
 import {
   compactComparisonEvidence,
   comparisonAssessmentText,
@@ -1415,6 +1416,10 @@ const transitionComparisonView = (requested: ComparisonViewState): void => {
     renderTransactionNavigator,
     updateQuery,
     scheduleCanvasRender,
+    handleCanvasRenderFailure: comparisonCanvasRenderFailureHandler(
+      () => comparison === current,
+      setStatus,
+    ),
     loadTransactionDetail: (entry) => {
       void loadSelectedTransactionDetail(entry);
     },
@@ -1920,7 +1925,13 @@ transactionListbox.addEventListener("dblclick", () => {
 
 new ResizeObserver(() => {
   invalidateComparisonGeometry();
-  void scheduleCanvasRender();
+  const renderedComparison = comparison;
+  void scheduleCanvasRender().catch(
+    comparisonCanvasRenderFailureHandler(
+      () => comparison === renderedComparison,
+      setStatus,
+    ),
+  );
 }).observe(comparisonCanvas);
 
 const startupViewState = initialViewState;
