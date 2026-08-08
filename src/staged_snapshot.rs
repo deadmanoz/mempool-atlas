@@ -179,6 +179,14 @@ struct PopulationBody {
 #[derive(Deserialize)]
 struct RetainedPopulationIdentity<'a> {
     txids_base64: &'a str,
+    #[serde(borrow)]
+    vsize: RetainedUnsignedColumn<'a>,
+}
+
+#[derive(Deserialize)]
+struct RetainedUnsignedColumn<'a> {
+    width_bytes: u8,
+    values_base64: &'a str,
 }
 
 #[derive(Serialize)]
@@ -490,7 +498,7 @@ fn validate_reused_membership(
     {
         return Err(invalid("retained membership stage is inconsistent"));
     }
-    validate_reused_population_txids(population, snapshot)?;
+    validate_reused_population(population, snapshot)?;
     #[cfg(debug_assertions)]
     {
         if population.descriptor.content_id != Digest::of(&population.bytes).hex {
@@ -503,12 +511,12 @@ fn validate_reused_membership(
     Ok(())
 }
 
-fn validate_reused_population_txids(
+fn validate_reused_population(
     population: &EncodedStage,
     snapshot: &MempoolSnapshot,
 ) -> Result<(), StagedSnapshotError> {
     let identity = serde_json::from_slice::<RetainedPopulationIdentity>(&population.bytes)
-        .map_err(|_| invalid("retained population stage txids are inconsistent"))?;
+        .map_err(|_| invalid("retained population stage body is inconsistent"))?;
     let mut decoded =
         base64::read::DecoderReader::new(identity.txids_base64.as_bytes(), &BASE64_STANDARD);
     let mut retained_txid = [0_u8; 32];
@@ -529,6 +537,43 @@ fn validate_reused_population_txids(
         != 0
     {
         return Err(invalid("retained population stage has excess txids"));
+    }
+
+    let width = usize::from(identity.vsize.width_bytes);
+    if !(1..=8).contains(&width) {
+        return Err(invalid(
+            "retained population stage vsize column width is inconsistent",
+        ));
+    }
+    let mut decoded =
+        base64::read::DecoderReader::new(identity.vsize.values_base64.as_bytes(), &BASE64_STANDARD);
+    let mut retained_vsize = [0_u8; 8];
+    let mut retained_total_vsize = 0_u64;
+    for transaction in &snapshot.transactions {
+        decoded
+            .read_exact(&mut retained_vsize[..width])
+            .map_err(|_| invalid("retained population stage vsize column is inconsistent"))?;
+        let value = u64::from_le_bytes(retained_vsize);
+        if value != transaction.vsize {
+            return Err(invalid(
+                "retained population stage does not match snapshot vsize values",
+            ));
+        }
+        retained_total_vsize = retained_total_vsize
+            .checked_add(value)
+            .ok_or_else(|| invalid("retained population stage total_vsize overflows"))?;
+    }
+    if decoded
+        .read(&mut trailing)
+        .map_err(|_| invalid("retained population stage vsize column is inconsistent"))?
+        != 0
+    {
+        return Err(invalid("retained population stage has excess vsize values"));
+    }
+    if retained_total_vsize != snapshot.total_vsize {
+        return Err(invalid(
+            "retained population stage total_vsize does not match the snapshot",
+        ));
     }
     Ok(())
 }
@@ -1461,6 +1506,58 @@ mod tests {
         );
         assert_eq!(first.population.descriptor, second.population.descriptor);
         assert_eq!(first.membership.descriptor, second.membership.descriptor);
+    }
+
+    #[test]
+    fn reused_population_must_match_snapshot_vsize_values() {
+        let (source, snapshot) = fixture();
+        let baseline = encode_staged_snapshot(&source, &snapshot).expect("baseline");
+        let mut population = baseline.population.clone();
+        let mut body = body_json(&population);
+        let mut encoded = BASE64_STANDARD
+            .decode(
+                body["vsize"]["values_base64"]
+                    .as_str()
+                    .expect("vsize base64"),
+            )
+            .expect("vsize column");
+        encoded[0] = encoded[0].wrapping_add(1);
+        body["vsize"]["values_base64"] = serde_json::Value::String(BASE64_STANDARD.encode(encoded));
+        population.bytes = Bytes::from(serde_json::to_vec(&body).expect("population JSON"));
+
+        let error = encode_staged_snapshot_with_limits(
+            &source,
+            &snapshot,
+            Some((population, baseline.membership)),
+            StagedSnapshotLimits::default(),
+        )
+        .expect_err("reused population vsize must match the snapshot");
+
+        assert!(matches!(
+            error,
+            StagedSnapshotError::Invalid(message) if message.contains("vsize values")
+        ));
+    }
+
+    #[test]
+    fn reused_population_must_match_snapshot_total_vsize() {
+        let (mut source, mut snapshot) = fixture();
+        let baseline = encode_staged_snapshot(&source, &snapshot).expect("baseline");
+        snapshot.total_vsize += 1;
+        source.total_vsize = Some(snapshot.total_vsize);
+
+        let error = encode_staged_snapshot_with_limits(
+            &source,
+            &snapshot,
+            Some((baseline.population, baseline.membership)),
+            StagedSnapshotLimits::default(),
+        )
+        .expect_err("reused population total_vsize must match the snapshot");
+
+        assert!(matches!(
+            error,
+            StagedSnapshotError::Invalid(message) if message.contains("total_vsize")
+        ));
     }
 
     #[test]
