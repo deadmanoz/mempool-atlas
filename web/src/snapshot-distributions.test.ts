@@ -43,6 +43,27 @@ const dataDescriptor: ClassifierDescriptor = {
   ],
 };
 
+const carriageDescriptor: ClassifierDescriptor = {
+  id: "data_carriage_shape",
+  version: "5",
+  title: "Data carriage shapes",
+  methodology: "heuristic",
+  semantics: "multi_label",
+  required_facts: ["raw_transaction", "input_script_pubkeys"],
+  labels: [
+    {
+      key: "push_drop_witness",
+      label: "Push/drop witness carrier",
+      description: "Balanced witness carrier.",
+    },
+    {
+      key: "no_detected_carriage_shape",
+      label: "No detected carriage shape",
+      description: "No registered shape detected.",
+    },
+  ],
+};
+
 const result = (
   classifierId: string,
   labels: string[],
@@ -63,6 +84,7 @@ interface TransactionOptions {
   replaceable?: boolean;
   propertyLabels?: string[];
   dataLabels?: string[];
+  carriageLabels?: string[];
   wtxid?: string;
 }
 
@@ -76,6 +98,7 @@ const transaction = (
     replaceable = false,
     propertyLabels = ["p2pkh"],
     dataLabels = [],
+    carriageLabels = ["no_detected_carriage_shape"],
     wtxid = txid(suffix + 100),
   }: TransactionOptions,
 ): MempoolTransaction =>
@@ -103,6 +126,7 @@ const transaction = (
     classifications: [
       result(propertyDescriptor.id, propertyLabels),
       result(dataDescriptor.id, dataLabels),
+      result(carriageDescriptor.id, carriageLabels),
     ],
   });
 
@@ -123,7 +147,7 @@ const input = (
   population: readonly MempoolTransaction[] = transactions,
 ): SnapshotDistributionInput => ({
   transactions: population,
-  classifierCatalog: [propertyDescriptor, dataDescriptor],
+  classifierCatalog: [propertyDescriptor, dataDescriptor, carriageDescriptor],
   selectedClassifier: propertyDescriptor,
   observedAtMs: 1_700_000_010_000,
   metric,
@@ -175,6 +199,7 @@ describe("buildSnapshotDistributionModel", () => {
     expect(model.composition.map(({ classifierId }) => classifierId)).toEqual([
       propertyDescriptor.id,
       dataDescriptor.id,
+      carriageDescriptor.id,
     ]);
     expect(
       model.composition[0]?.segments.reduce(
@@ -229,16 +254,25 @@ describe("buildSnapshotDistributionModel", () => {
     expect(rightModel.totals.carrier).toEqual({ count: 0, vsize: 0 });
   });
 
-  it("includes recognized non-OP_RETURN carriers in carriage distributions", () => {
+  it("groups recognized-carriage spectra by carriage shape in both builders", async () => {
     const witnessCarrier = transaction(8, {
       vsize: 420,
       carrierBytes: 0,
       recognizedCarrierBytes: 1_530,
-      dataLabels: [],
+      dataLabels: ["ordinals"],
+      carriageLabels: ["push_drop_witness"],
     });
     const model = buildSnapshotDistributionModel(
       input("count", [witnessCarrier]),
     );
+    const cooperativeModel = await buildSnapshotDistributionModelCooperatively(
+      input("count", [witnessCarrier]),
+      { batchSize: 1, yieldBetweenBatches: () => Promise.resolve() },
+    );
+    const segmentLabels = (value: SnapshotDistributionModel): string[] =>
+      value.dataSpectrum.bins.flatMap(({ segments }) =>
+        segments.map(({ label }) => label),
+      );
 
     expect(model.totals.carrier).toEqual({ count: 1, vsize: 420 });
     expect(model.dataSpectrum.totalWeight).toBe(1);
@@ -248,6 +282,10 @@ describe("buildSnapshotDistributionModel", () => {
     expect(
       model.dataSpectrum.bins.flatMap(({ segments }) => segments),
     ).toHaveLength(1);
+    expect(segmentLabels(model)).toEqual(["Push/drop witness carrier"]);
+    expect(segmentLabels(cooperativeModel)).toEqual([
+      "Push/drop witness carrier",
+    ]);
   });
 
   it("retains no transaction collections or transaction objects", () => {

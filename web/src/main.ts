@@ -55,6 +55,7 @@ import {
   type ClassifierBucketKey,
   type ClassifierTerrainLayout,
 } from "./classifier-terrain";
+import { classifierEvidencePairs } from "./classifier-evidence";
 import { renderSwimViewCooperatively } from "./swim-view";
 import { setMembershipControlsComplete } from "./membership-controls";
 import { countFormat, formatVsize, percentageFormat } from "./format";
@@ -672,14 +673,21 @@ const renderTransactionDetail = (detail: TransactionDetailResponse): void => {
     detailStatus.textContent =
       result === undefined
         ? "Result unavailable"
-        : result.state === "complete"
-          ? "Complete result"
-          : "Partial result";
+        : result.state === "partial"
+          ? "Partial result"
+          : "";
+    const classifierFacts =
+      result === undefined
+        ? []
+        : classifierEvidencePairs(result, descriptor ?? null).map(
+            ([label, value]) => detailValue(label, value),
+          );
     detailTransaction.replaceChildren(
       detailValue("txid", detail.txid),
       detailValue("wtxid", detail.wtxid),
       detailValue("Classifier", descriptor?.title ?? selectedClassifierId),
       detailValue("Labels", labels.join(" · ") || "No labels"),
+      ...classifierFacts,
     );
     appendTransactionFacts(detail.txid);
     detailRules.replaceChildren();

@@ -315,9 +315,10 @@ grammar and the off-curve P2TR test; version 1 contained only the two general
 witness-resident labels. The lens still does not claim generic on-curve
 output-key carriers, hash160 carriers, file validity from a signature alone,
 short collision-prone gzip or generic JPEG magic, other witness-argument ratios
-or item sizes, field steganography, signature channels, or commitments. It also
-does not estimate carried bytes. Those require separate definitions rather
-than inheriting the OP_RETURN byte measure.
+or item sizes, field steganography, signature channels, or commitments. The
+lens does not estimate total carried bytes. The separate
+`structure.recognized_carried_bytes` fact publishes only a conservative lower
+bound justified by the recognized shapes and OP_RETURN measure.
 
 ## `knots_bip110` version 1
 
@@ -445,7 +446,7 @@ computed from the same raw transaction bytes fetched for classification:
 | `input_count`              | Number of transaction inputs                                                                                                                                                                                    |
 | `output_count`             | Number of transaction outputs                                                                                                                                                                                   |
 | `op_return_bytes`          | Sum across OP_RETURN outputs. When a tail decodes entirely to pushes, count the decoded pushed bytes; if decoding fails or any non-push opcode is present, count that output's serialized bytes after OP_RETURN |
-| `recognized_carried_bytes` | `op_return_bytes` plus the non-OP_RETURN bytes justified by the exact positive carrier fingerprints described below                                                                                             |
+| `recognized_carried_bytes` | `op_return_bytes` plus the non-OP_RETURN bytes justified by the recognized high-confidence carrier shapes described below                                                                                   |
 | `output_sats`              | Sum of all output values in satoshis                                                                                                                                                                            |
 | `witness_bytes`            | Serialized total size minus base size                                                                                                                                                                           |
 

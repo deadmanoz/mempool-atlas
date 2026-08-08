@@ -757,6 +757,63 @@ test.describe("early source metadata", () => {
 });
 
 test.describe("progressive v2 publications", () => {
+  test("shows bounded carrier evidence as readable transaction facts", async ({
+    page,
+  }) => {
+    await page.route(
+      /\/api\/v2\/sources\/[^/]+\/transactions\//,
+      async (route: Route) => {
+        const response = await route.fetch();
+        const detail = (await response.json()) as {
+          classifications?: Array<{
+            classifier_id?: string;
+            evidence?: unknown;
+          }>;
+        };
+        const protocols = detail.classifications?.find(
+          ({ classifier_id: id }) => id === "data_protocols",
+        );
+        if (protocols !== undefined) {
+          protocols.evidence = {
+            detections: [
+              {
+                label: "inscription",
+                carrier: "tapscript",
+                input: 0,
+                element: 2,
+                framing: "push_drop",
+                pushed_elements: 6,
+                pushed_bytes: 1_530,
+              },
+            ],
+          };
+        }
+        await route.fulfill({ response, json: detail });
+      },
+    );
+
+    await page.goto("/?source=vps-core-01&classifier=data_protocols");
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    await page
+      .locator('#classification-labels button[data-label="inscription"]')
+      .click();
+    const queryStage = page.locator("#classification-query-stage");
+    await expect(queryStage).toBeVisible();
+    await queryStage.focus();
+    await page.keyboard.press("Enter");
+
+    const detail = page.locator("#detail-transaction");
+    await expect(detail).toContainText("Detection 1 · Inscription");
+    await expect(detail).toContainText(
+      "Tapscript · input 0 · witness element 2 · push/drop envelope · 6 pushed elements · 1,530 pushed bytes",
+    );
+    await expect(detail).not.toContainText('{"');
+    await expect(page.locator("#detail-status")).toHaveText("");
+  });
+
   test("keeps an absent exact transaction search safe while membership loads", async ({
     page,
   }) => {
@@ -1051,9 +1108,7 @@ test.describe("progressive v2 publications", () => {
     );
     await expect(explorerLink).toHaveAttribute("target", "_blank");
     await expect(explorerLink).toHaveAttribute("rel", "noopener noreferrer");
-    await expect(page.locator("#detail-status")).toHaveText(
-      /Complete result|Partial result/,
-    );
+    await expect(page.locator("#detail-status")).toHaveText("");
     await expect(versionTwo).toHaveAttribute("aria-pressed", "true");
     await expect(p2wsh).toHaveAttribute("aria-pressed", "true");
     await expect(matchAll).toHaveAttribute("aria-pressed", "true");

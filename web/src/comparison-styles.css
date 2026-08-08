@@ -1050,6 +1050,16 @@
   margin-bottom: 0;
 }
 
+.comparison-detail-source > h4 {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.comparison-detection-facts {
+  padding-top: 0.15rem;
+}
+
 .comparison-detail-assessment {
   padding: 0.45rem 0.55rem;
   border-left: 2px solid #7f9be2;

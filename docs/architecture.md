@@ -295,7 +295,7 @@ structure (a spectrum stacked by the selected classifier's buckets), ancestor
 fee rate (delta-adjusted ancestor fees over ancestor virtual size), shape (a
 joint fee-rate-by-size density heatmap with marginals), age (a bucket-by-age
 mosaic), data carriage (conservatively recognized carried bytes by
-data-protocols bucket), complexity (an input-count by output-count density),
+data-carriage-shape bucket), complexity (an input-count by output-count density),
 entanglement (banded
 unconfirmed ancestor and descendant counts with the source-reported
 replaceability share), and total output value (the sum of every output,

@@ -61,8 +61,8 @@ export const transactionFactPairs = (
   }
   if (structure.recognized_carried_bytes > structure.op_return_bytes) {
     pairs.push([
-      "Recognized carriage",
-      `${countFormat.format(structure.recognized_carried_bytes)} bytes`,
+      "Recognized carriage, lower bound",
+      `At least ${countFormat.format(structure.recognized_carried_bytes)} bytes`,
     ]);
   }
   return pairs;
@@ -94,7 +94,7 @@ export const transactionFactSummary = (
     }
     if (structure.recognized_carried_bytes > structure.op_return_bytes) {
       parts.push(
-        `recognized carriage ${countFormat.format(structure.recognized_carried_bytes)} B`,
+        `at least ${countFormat.format(structure.recognized_carried_bytes)} recognized bytes`,
       );
     }
   }

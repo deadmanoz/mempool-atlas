@@ -26,10 +26,12 @@ In the default Classifications view, label cards are query controls. Select one
 or more labels from the active classifier, combine them with ANY or ALL, and
 inspect the full matching population as complete and partial transaction
 blocks. Choosing a block, or reaching it by keyboard, opens that transaction's
-detail without replacing the active query. The selected labels and match mode
-are preserved in the page URL. In ALL mode, Atlas dims labels that cannot occur
-with the current selection while keeping selected labels available for removal.
-Independent classifier taxonomies are never combined.
+detail without replacing the active query. Data-protocol and data-carriage
+details present bounded detection evidence as readable carrier, location,
+framing, and byte facts rather than raw JSON. The selected labels and match
+mode are preserved in the page URL. In ALL mode, Atlas dims labels that cannot
+occur with the current selection while keeping selected labels available for
+removal. Independent classifier taxonomies are never combined.
 
 Partial and unavailable results are reported separately, not counted as
 negatives. The
@@ -46,6 +48,8 @@ Hover or focus any plotted region for exact bin ranges and population shares.
 Click a spectrum or density cell to pin it while comparing panels; keyboard
 users can traverse chart bins with the arrow keys. Quantitative charts name
 both axes, and spectra show the active count or virtual-size scale vertically.
+The data-carriage spectrum is grouped by the independent Data carriage shapes
+lens, including an explicit no-detected-shape bucket for OP_RETURN-only rows.
 Data-carriage references
 distinguish the historical 40-byte payload limit from the conventional
 80-byte payload that serializes to an 83-byte OP_RETURN script.

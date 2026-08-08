@@ -126,9 +126,11 @@ describe("transactionFactPairs", () => {
     const pairs = new Map(transactionFactPairs(transaction({ structure })));
 
     expect(pairs.has("OP_RETURN bytes")).toBe(false);
-    expect(pairs.get("Recognized carriage")).toBe("1,530 bytes");
+    expect(pairs.get("Recognized carriage, lower bound")).toBe(
+      "At least 1,530 bytes",
+    );
     expect(transactionFactSummary(transaction({ structure }))).toContain(
-      "recognized carriage 1,530 B",
+      "at least 1,530 recognized bytes",
     );
   });
 });

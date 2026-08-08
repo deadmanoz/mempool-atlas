@@ -634,8 +634,8 @@ deliberately excludes short collision-prone prefixes.
 
 **C. Extend `structure` with a carried-bytes fact. Shipped.**
 `recognized_carried_bytes` retains `op_return_bytes` and adds only byte counts
-backed by the implemented exact carrier fingerprints. Embedded file magic adds
-zero because it can overlap another carrier. Evidence truncation does not
+backed by the implemented high-confidence carrier shapes. Embedded file magic
+adds zero because it can overlap another carrier. Evidence truncation does not
 truncate the metric. The public distribution uses this fact on a 512 KiB axis,
 with exact reference ticks for 255-byte items, the 1,020-byte witness minimum,
 the 1,530-byte JXL-n-hide envelope, and the 6,334-byte OLGA maximum.

@@ -11,6 +11,7 @@ import {
   unclassifiedLabel,
 } from "./classification-progress";
 import { KNOTS_BIP110_CLASSIFIER_ID } from "./classifier-terrain";
+import { classifierDetectionPresentations } from "./classifier-evidence";
 import {
   ComparisonLifecycle,
   RequestLifecycle,
@@ -1120,6 +1121,22 @@ const renderDetailOutcome = (
     rules.className = "detail-rules";
     rules.append(...outcome.detail.rules.map(detailRuleElement));
     panel.append(summary, rules);
+    const detectionValues = outcome.detail.classifications.flatMap((result) => {
+      const descriptor = source.snapshot.classifier_catalog.find(
+        ({ id }) => id === result.classifier_id,
+      );
+      return classifierDetectionPresentations(result, descriptor ?? null).map(
+        ({ label, summary }) => createTransactionDetailValue(label, summary),
+      );
+    });
+    if (detectionValues.length > 0) {
+      const heading = document.createElement("h4");
+      heading.textContent = "Data detections";
+      const detections = document.createElement("div");
+      detections.className = "detail-transaction comparison-detection-facts";
+      detections.append(...detectionValues);
+      panel.append(heading, detections);
+    }
   }
   return panel;
 };

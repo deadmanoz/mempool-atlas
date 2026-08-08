@@ -262,7 +262,7 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
                 label(
                     "no_detected_protocol",
                     "No detected protocol",
-                    "No registered data-protocol fingerprint fired.",
+                    "No supported data-protocol fingerprint fired; this does not mean the transaction contains no embedded data.",
                 ),
             ],
         },
@@ -315,7 +315,7 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
                 label(
                     "no_detected_carriage_shape",
                     "No detected carriage shape",
-                    "No registered data-carriage shape heuristic fired.",
+                    "No registered data-carriage shape heuristic fired; this does not mean no hidden or unrecognized carrier exists.",
                 ),
             ],
         },

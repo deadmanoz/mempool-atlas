@@ -226,7 +226,7 @@ export const commitComparisonDistributionSide = ({
     metricFormat,
     emptyMessage: COMPARISON_EMPTY_MESSAGE,
   });
-  panels.data.note.textContent = `Stacked ${metricNoun} per log recognized-carried-byte bin by Data protocols bucket · ${countFormat.format(model.totals.carrier.count)} transactions have recognized carriage. Atlas sums disjoint positive evidence from OP_RETURN and registered carrier shapes; the value is a conservative lower bound, not an estimate of every possible payload.`;
+  panels.data.note.textContent = `Stacked ${metricNoun} per log recognized-carried-byte bin by Data carriage shape bucket · ${countFormat.format(model.totals.carrier.count)} transactions have recognized carriage. OP_RETURN-only transactions can correctly appear under No detected carriage shape because OP_RETURN is measured separately from the registered shape heuristics. Atlas sums disjoint positive evidence from OP_RETURN and registered carrier shapes; the value is a conservative lower bound, not an estimate of every possible payload.`;
   renderSpectrumChart(panels.data.container, model.dataSpectrum, {
     domain: DATA_BYTES_DOMAIN,
     ticks: DATA_BYTES_TICKS,

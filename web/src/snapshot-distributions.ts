@@ -165,10 +165,10 @@ export const buildSnapshotDistributionModel = ({
     metric,
     groupLimit,
   );
-  const dataDescriptor =
-    classifierCatalog.find(({ id }) => id === "data_protocols") ?? null;
+  const carriageDescriptor =
+    classifierCatalog.find(({ id }) => id === "data_carriage_shape") ?? null;
   const carrierGroups = filteredGroups(
-    panelBucketGroups(transactions, dataDescriptor, metric, dataGroupLimit),
+    panelBucketGroups(transactions, carriageDescriptor, metric, dataGroupLimit),
     (transaction) => (transaction.structure?.recognized_carried_bytes ?? 0) > 0,
   );
   const structuredGroups = filteredGroups(
@@ -238,11 +238,11 @@ export const buildSnapshotDistributionModelCooperatively = async (
     metric,
     groupLimit,
   );
-  const dataDescriptor =
-    classifierCatalog.find(({ id }) => id === "data_protocols") ?? null;
+  const carriageDescriptor =
+    classifierCatalog.find(({ id }) => id === "data_carriage_shape") ?? null;
   const carrierGroups = panelBucketGroups(
     transactions,
-    dataDescriptor,
+    carriageDescriptor,
     metric,
     dataGroupLimit,
   );
