@@ -44,7 +44,6 @@ import {
   type ComparisonPolicyMatrixRow,
   type ComparisonPolicyMatrixSelection,
   type ComparisonPolicyMatrixStatus,
-  type ComparisonPolicyPopulation,
   type ComparisonPolicyView,
 } from "./comparison-policy-view";
 import {
@@ -52,6 +51,7 @@ import {
   prepareComparisonCommitCandidate,
 } from "./comparison-publication-candidate";
 import { renderPrimaryComparisonPublication } from "./comparison-primary-publication";
+import { createComparisonSamplingView } from "./comparison-sampling-view";
 import {
   comparisonRegionEntries,
   lookupComparisonTransaction,
@@ -89,11 +89,11 @@ import {
   type ComparisonViewState,
 } from "./view-state";
 import "./styles.css";
+import "./distribution-styles.css";
 import "./comparison-styles.css";
 import type {
   ClassificationState,
   LoadedSourcePublication,
-  MempoolTransaction,
   RuleAssessment,
   SourceSummary,
   TransactionDetailResponse,
@@ -130,11 +130,13 @@ const transactionSearchInput = requiredElement<HTMLInputElement>(
 const transactionSearchStatus = requiredElement<HTMLElement>(
   "comparison-transaction-search-status",
 );
-const samplingPanel = requiredElement<HTMLElement>("sampling-panel");
-const samplingSummary = requiredElement<HTMLElement>("sampling-summary");
-const chainSummary = requiredElement<HTMLElement>("chain-summary");
-const samplingTimeline = requiredElement<HTMLElement>("sampling-timeline");
-const samplingNote = requiredElement<HTMLElement>("sampling-note");
+const samplingView = createComparisonSamplingView({
+  panel: requiredElement<HTMLElement>("sampling-panel"),
+  summary: requiredElement<HTMLElement>("sampling-summary"),
+  chainSummary: requiredElement<HTMLElement>("chain-summary"),
+  timeline: requiredElement<HTMLElement>("sampling-timeline"),
+  note: requiredElement<HTMLElement>("sampling-note"),
+});
 const policyMatrix = requiredElement<HTMLElement>("comparison-policy-matrix");
 const policyMatrixBody = requiredElement<HTMLTableSectionElement>(
   "comparison-policy-matrix-body",
@@ -178,10 +180,6 @@ const comparisonRuleList = requiredElement<HTMLElement>("comparison-rule-list");
 const policyBuckets = requiredElement<HTMLElement>("policy-buckets");
 const policyBucketSummary = requiredElement<HTMLElement>(
   "policy-bucket-summary",
-);
-const sampleSummary = requiredElement<HTMLElement>("comparison-sample-summary");
-const sampleTransactions = requiredElement<HTMLTableSectionElement>(
-  "comparison-transactions",
 );
 const detailStatus = requiredElement<HTMLElement>("comparison-detail-status");
 const detailContainer = requiredElement<HTMLElement>("comparison-detail");
@@ -379,82 +377,6 @@ const sourceUnclassifiedLabel = (loaded: LoadedSourceSnapshot): string => {
   return unclassifiedLabel(progress);
 };
 
-const timelineRow = (
-  label: string,
-  side: ComparisonSide,
-  source: LoadedSourceSnapshot,
-  minimum: number,
-  span: number,
-): HTMLElement => {
-  const row = document.createElement("div");
-  row.className = "sampling-row";
-  const name = document.createElement("span");
-  name.textContent = label;
-  const track = document.createElement("div");
-  track.className = "sampling-track";
-  const bar = document.createElement("i");
-  bar.dataset.side = side;
-  const start = source.snapshot.collection_started_at_ms;
-  const duration = Math.max(1, source.snapshot.collection_duration_ms);
-  const startPercent = ((start - minimum) / span) * 100;
-  const widthScale = Math.max(0.012, duration / span);
-  bar.style.transform = `translateX(${startPercent}%) scaleX(${widthScale})`;
-  bar.title = `${formatTime(start)}–${formatTime(source.snapshot.collection_completed_at_ms)}`;
-  track.append(bar);
-  const time = document.createElement("time");
-  time.dateTime = new Date(
-    source.snapshot.collection_completed_at_ms,
-  ).toISOString();
-  time.textContent = formatTime(source.snapshot.collection_completed_at_ms);
-  row.append(name, track, time);
-  return row;
-};
-
-const renderSampling = (current: CurrentComparison): void => {
-  samplingPanel.hidden = false;
-  const { left, right } = current;
-  const earlierLabel =
-    current.earlier_side === null
-      ? "completed together"
-      : `${current[current.earlier_side].snapshot.source_label} completed earlier`;
-  samplingSummary.textContent = `${formatDuration(current.observed_skew_ms)} observation skew · ${earlierLabel}`;
-  const sameTip =
-    left.snapshot.chain_tip.hash === right.snapshot.chain_tip.hash;
-  chainSummary.dataset.state = sameTip ? "same" : "different";
-  chainSummary.textContent = sameTip
-    ? `Same chain tip · ${countFormat.format(left.snapshot.chain_tip.height)}`
-    : `Different chain tips · ${countFormat.format(left.snapshot.chain_tip.height)} / ${countFormat.format(right.snapshot.chain_tip.height)}`;
-
-  const minimum = Math.min(
-    left.snapshot.collection_started_at_ms,
-    right.snapshot.collection_started_at_ms,
-  );
-  const maximum = Math.max(
-    left.snapshot.collection_completed_at_ms,
-    right.snapshot.collection_completed_at_ms,
-  );
-  const span = Math.max(1, maximum - minimum);
-  samplingTimeline.replaceChildren(
-    timelineRow("A", "left", left, minimum, span),
-    timelineRow("B", "right", right, minimum, span),
-  );
-
-  const overlap =
-    Math.min(
-      left.snapshot.collection_completed_at_ms,
-      right.snapshot.collection_completed_at_ms,
-    ) -
-    Math.max(
-      left.snapshot.collection_started_at_ms,
-      right.snapshot.collection_started_at_ms,
-    );
-  if (overlap >= 0) {
-    samplingNote.textContent = `The collection windows overlapped by ${formatDuration(overlap)}. Membership still comes from independent node observations.`;
-  } else {
-    samplingNote.textContent = `The collection windows were separated by ${formatDuration(Math.abs(overlap))}. Membership changes during that interval can contribute to regions observed in only one snapshot.`;
-  }
-};
-
 const regionLabel = (
   current: CurrentComparison,
   key: ComparisonRegionKey,
@@ -609,53 +531,9 @@ const scheduleCanvasRender = () =>
         comparison,
         selectedRegion,
         selectedTransactionId,
+        activePolicySide(),
+        policyFilter,
       );
-
-const ruleChip = (
-  label: string,
-  className: string,
-  color?: string,
-): HTMLElement => {
-  const chip = document.createElement("span");
-  chip.className = `rule-chip ${className}`;
-  chip.textContent = label;
-  if (color !== undefined) {
-    chip.style.setProperty("--rule-color", color);
-  }
-  return chip;
-};
-
-const assessmentChips = (
-  transaction: MempoolTransaction | null,
-  loaded: LoadedSourceSnapshot,
-): HTMLElement => {
-  const chips = document.createElement("span");
-  chips.className = "rule-chips comparison-rule-chips";
-  if (transaction === null) {
-    chips.append(ruleChip("Not present", "absent"));
-    return chips;
-  }
-  const assessment = transaction.bip110;
-  if (assessment === null) {
-    chips.append(ruleChip(sourceUnclassifiedLabel(loaded), "unclassified"));
-    return chips;
-  }
-  if (assessment.status === "compatible") {
-    chips.append(ruleChip("Compatible", "compatible"));
-    return chips;
-  }
-  if (assessment.status === "indeterminate") {
-    chips.append(ruleChip("Indeterminate", "unknown"));
-  }
-  for (const ruleId of assessment.violated_rules) {
-    const rule = terrainRule(ruleId);
-    chips.append(ruleChip(`R${rule.number}`, "violated", rule.color));
-  }
-  for (const ruleId of assessment.unknown_rules) {
-    chips.append(ruleChip(`R${terrainRule(ruleId).number}?`, "unknown"));
-  }
-  return chips;
-};
 
 const preparePendingView = (requested: ComparisonViewState): void => {
   selectedRegion = requested.region ?? "common";
@@ -664,13 +542,12 @@ const preparePendingView = (requested: ComparisonViewState): void => {
     requested.side ?? "left",
   );
   selectedTransactionId = requested.txid;
-  policyFilter =
-    selectedTransactionId === null ? requested.filter : { kind: "all" };
+  policyFilter = requested.filter;
   keyboardTransactionIndex = 0;
   transactionSearchInput.value = selectedTransactionId ?? "";
   if (selectedTransactionId === null) {
     setTransactionSearchStatus("idle", "Search the current membership union.");
-    clearDetailPanel("Choose a sample");
+    clearDetailPanel("Select a transaction");
   } else {
     setTransactionSearchStatus(
       "waiting",
@@ -693,7 +570,7 @@ const applyResolvedLoadedView = (
   transactionSearchInput.value = resolved.txid ?? "";
   if (resolved.txid === null) {
     setTransactionSearchStatus("idle", "Search the current membership union.");
-    clearDetailPanel("Choose a sample");
+    clearDetailPanel("Select a transaction");
   } else if (resolved.selectedEntry === null) {
     setTransactionSearchStatus(
       "absent",
@@ -1007,67 +884,6 @@ const renderPolicyBuckets = (
   policyBuckets.replaceChildren(...buttons);
 };
 
-const renderSampleTable = (
-  current: CurrentComparison,
-  population: ComparisonPolicyPopulation,
-): void => {
-  const entries = population.sample;
-  sampleSummary.textContent =
-    population.count === 0
-      ? "No matches"
-      : `Largest ${countFormat.format(entries.length)} of ${countFormat.format(population.count)}`;
-  const rows = entries.map((entry) => {
-    const row = document.createElement("tr");
-    row.dataset.txid = entry.txid;
-    row.classList.toggle("selected", entry.txid === selectedTransactionId);
-    const transactionCell = document.createElement("td");
-    const select = document.createElement("button");
-    select.type = "button";
-    select.className = "tx-select";
-    select.textContent = compactTxid(entry.txid);
-    select.title = entry.txid;
-    select.addEventListener("click", () => {
-      transitionComparisonView({
-        ...currentViewState(),
-        txid: entry.txid,
-      });
-    });
-    transactionCell.append(select);
-    const leftCell = document.createElement("td");
-    leftCell.append(assessmentChips(entry.left, current.left));
-    const rightCell = document.createElement("td");
-    rightCell.append(assessmentChips(entry.right, current.right));
-    const variantCell = document.createElement("td");
-    if (entry.same_wtxid === false) {
-      const badge = document.createElement("span");
-      badge.className = "variant-badge differing";
-      badge.textContent = "Different wtxids";
-      variantCell.append(badge);
-    } else if (entry.same_wtxid === true) {
-      variantCell.textContent = "Same wtxid";
-    } else if (entry.left !== null && entry.right !== null) {
-      variantCell.textContent = "Witness data loading";
-    } else {
-      const other = entry.left === null ? current.left : current.right;
-      variantCell.textContent = `Not present in ${other.snapshot.source_label}`;
-    }
-    row.append(transactionCell, leftCell, rightCell, variantCell);
-    return row;
-  });
-  sampleTransactions.replaceChildren(...rows);
-};
-
-const syncSampleTransactionSelection = (): void => {
-  for (const row of sampleTransactions.querySelectorAll<HTMLTableRowElement>(
-    "tr[data-txid]",
-  )) {
-    row.classList.toggle(
-      "selected",
-      row.dataset.txid === selectedTransactionId,
-    );
-  }
-};
-
 const renderInspector = (): void => {
   const current = comparison;
   const view = comparisonPolicyView;
@@ -1090,8 +906,6 @@ const renderInspector = (): void => {
     comparisonRuleList.replaceChildren();
     policyBuckets.replaceChildren();
     policyBucketSummary.textContent = "No snapshot";
-    sampleTransactions.replaceChildren();
-    sampleSummary.textContent = "No matches";
     return;
   }
   const side = activePolicySide();
@@ -1119,7 +933,6 @@ const renderInspector = (): void => {
   clearPolicyFilter.disabled = policyFilter.kind === "all";
   renderRuleFilters(view);
   renderPolicyBuckets(current, view);
-  renderSampleTable(current, population);
 };
 
 const detailRuleElement = (rule: RuleAssessment): HTMLLIElement => {
@@ -1310,7 +1123,7 @@ const loadSelectedTransactionDetail = async (
     const warning = document.createElement("p");
     warning.className = "variant-warning";
     warning.textContent =
-      "The same txid carries different witness variants. Policy assessments remain source-local.";
+      "The same txid carries different witness variants. Policy assessments remain tied to their reporting node.";
     identity.append(warning);
   }
   detailContainer.replaceChildren(
@@ -1329,7 +1142,7 @@ const renderComparison = async (
     current.right.source,
     current.right.snapshot,
   );
-  renderSampling(current);
+  samplingView.render(current);
   if (comparison !== current) return;
   renderPolicyMatrix(current, view);
   renderRegionControls(current);
@@ -1412,7 +1225,6 @@ const transitionComparisonView = (requested: ComparisonViewState): void => {
       syncPolicyMatrixSelection();
       renderInspector();
     },
-    syncTransactionSelection: syncSampleTransactionSelection,
     renderTransactionNavigator,
     updateQuery,
     scheduleCanvasRender,
@@ -1456,8 +1268,7 @@ const resetComparisonView = (message: string): void => {
   comparisonStage.hidden = true;
   comparisonEmpty.hidden = false;
   comparisonEmpty.textContent = message;
-  samplingPanel.hidden = true;
-  samplingTimeline.replaceChildren();
+  samplingView.reset();
   comparisonDistributions.reset();
   policyMatrix.hidden = true;
   policyMatrixBody.replaceChildren();
@@ -1470,7 +1281,7 @@ const resetComparisonView = (message: string): void => {
   );
   visualSummary.textContent =
     "Each transaction ID appears once: present in both snapshots, observed only in source A snapshot, or observed only in source B snapshot.";
-  clearTransactionSelection("Choose a sample");
+  clearTransactionSelection("Select a transaction");
   renderTransactionNavigator();
   renderInspector();
 };

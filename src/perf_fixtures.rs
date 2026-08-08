@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const FIXTURE_MANIFEST_VERSION: u64 = 2;
-const FUNCTIONAL_DETAIL_LIMIT_PER_SOURCE: usize = 8;
 const FUNCTIONAL_SOURCE_COUNT: usize = 3;
 const MAX_PERFORMANCE_SOURCES: usize = 4;
 const PERFORMANCE_REFERENCE_TIME_MS: u64 = 1_786_000_000_000;
@@ -408,19 +407,13 @@ pub fn export(options: ExportOptions) -> Result<FixtureManifest> {
                 .snapshot
                 .transactions
                 .iter()
-                .filter(|entry| {
-                    entry
-                        .bip110
-                        .as_ref()
-                        .is_some_and(|assessment| assessment.status == Bip110Status::Compatible)
-                })
-                .take(FUNCTIONAL_DETAIL_LIMIT_PER_SOURCE)
+                .filter(|entry| entry.bip110.is_some())
             {
                 let detail_path = format!(
                     "transactions/{}/{}.json",
                     source.snapshot.source_id, entry.txid
                 );
-                let detail_bytes = compatible_detail_bytes(&source.snapshot, entry)?;
+                let detail_bytes = transaction_detail_bytes(&source.snapshot, entry)?;
                 let detail_body = write_body(&output_directory, &detail_path, &detail_bytes)?;
                 transaction_details.push(FixtureTransactionDetail {
                     source_id: source.snapshot.source_id.clone(),
@@ -1129,35 +1122,36 @@ fn transaction_structure(
     )?)
 }
 
-fn compatible_detail_bytes(snapshot: &MempoolSnapshot, entry: &MempoolEntry) -> Result<Vec<u8>> {
+fn transaction_detail_bytes(snapshot: &MempoolSnapshot, entry: &MempoolEntry) -> Result<Vec<u8>> {
     let assessment = entry
         .bip110
         .as_ref()
         .context("detail fixture transaction is unclassified")?;
-    ensure!(
-        assessment.status == Bip110Status::Compatible,
-        "detail fixture requires a compatible transaction"
-    );
     let classifications = entry
         .classifications
         .iter()
         .cloned()
         .map(|mut result| {
-            result.evidence = Some(json!({ "fixture": true }));
+            result.evidence = Some(json!({
+                "observed_labels": &result.labels,
+                "missing_facts": &result.missing_facts,
+            }));
             result
         })
         .collect::<Vec<_>>();
     let rules = Bip110RuleId::ALL
         .iter()
         .map(|rule| {
+            let violated = assessment.violated_rules.contains(rule);
+            let unknown = assessment.unknown_rules.contains(rule);
             json!({
                 "rule": rule,
                 "number": rule.number(),
-                "verdict": "pass",
-                "evidence_count": 0,
-                "evidence": [],
-                "missing_count": 0,
-                "missing": [],
+                "verdict": if violated { "violate" } else if unknown { "unknown" } else { "pass" },
+                "evidence_count": u8::from(violated),
+                "evidence": if violated { vec![synthetic_rule_evidence(*rule)] } else { Vec::new() },
+                "missing_count": u8::from(unknown),
+                "missing": if unknown { vec![json!({ "missing": "script_pub_key", "input": 0 })] } else { Vec::new() },
             })
         })
         .collect::<Vec<Value>>();
@@ -1171,6 +1165,56 @@ fn compatible_detail_bytes(snapshot: &MempoolSnapshot, entry: &MempoolEntry) -> 
         "assessment": assessment,
         "rules": rules,
     }))?)
+}
+
+fn synthetic_rule_evidence(rule: Bip110RuleId) -> Value {
+    match rule {
+        Bip110RuleId::OutputSize => json!({
+            "kind": "output_script_too_large",
+            "vout": 0,
+            "len": 84,
+            "is_op_return": true,
+            "limit": 83,
+        }),
+        Bip110RuleId::ElementSize => json!({
+            "kind": "witness_item_too_large",
+            "input": 0,
+            "item_index": 0,
+            "len": 257,
+            "limit": 256,
+        }),
+        Bip110RuleId::UndefinedVersion => json!({
+            "kind": "undefined_witness_version",
+            "input": 0,
+            "version": 2,
+            "p2sh_wrapped": false,
+            "p2a_non_empty_witness": false,
+        }),
+        Bip110RuleId::TaprootAnnex => json!({
+            "kind": "taproot_annex_present",
+            "input": 0,
+            "annex_len": 1,
+        }),
+        Bip110RuleId::ControlBlockSize => json!({
+            "kind": "control_block_too_large",
+            "input": 0,
+            "len": 289,
+            "depth": 8,
+            "limit": 257,
+        }),
+        Bip110RuleId::OpSuccess => json!({
+            "kind": "op_success_present",
+            "input": 0,
+            "opcode": 80,
+            "opcode_pos": 0,
+        }),
+        Bip110RuleId::TapscriptOpIf => json!({
+            "kind": "tapscript_op_if",
+            "input": 0,
+            "opcode": 99,
+            "opcode_pos": 0,
+        }),
+    }
 }
 
 fn unique_txids(count: usize, seed: u32) -> Vec<String> {
@@ -1309,7 +1353,16 @@ mod tests {
 
         assert_eq!(manifest.manifest_version, FIXTURE_MANIFEST_VERSION);
         assert_eq!(manifest.snapshots.len(), FUNCTIONAL_SOURCE_COUNT);
-        assert!(!manifest.transaction_details.is_empty());
+        let transaction_count = manifest
+            .snapshots
+            .iter()
+            .map(|snapshot| snapshot.transaction_count)
+            .sum::<u64>();
+        assert!(
+            u64::try_from(manifest.transaction_details.len())
+                .expect("fixture detail count fits u64")
+                > transaction_count * 9 / 10
+        );
         assert!(manifest.output_directory.join("manifest.json").is_file());
         assert!(
             manifest
@@ -1338,6 +1391,16 @@ mod tests {
                 .iter()
                 .all(|detail| detail.route.request_path.starts_with("/api/v2/"))
         );
+        for detail in &manifest.transaction_details {
+            let body = fs::read(manifest.output_directory.join(&detail.route.body.path))
+                .expect("read transaction detail fixture");
+            assert!(
+                !body
+                    .windows(br#"\"fixture\":true"#.len())
+                    .any(|window| window == br#"\"fixture\":true"#),
+                "transaction detail fixtures must contain presentable evidence"
+            );
+        }
         fs::remove_dir_all(output_root).expect("remove functional fixture test output");
     }
 

@@ -10,11 +10,14 @@ import type {
   TerrainSelection,
   ViolationSignatureKey,
 } from "./terrain";
+import type { ClassifierLabelMatchMode } from "./classifier-terrain";
 import { RULE_IDS, type RuleId } from "./types";
 
 export interface NodeViewState {
   source: string | null;
   classifier: string | null;
+  classifierLabels: string[];
+  classifierMatch: ClassifierLabelMatchMode;
   selection: TerrainSelection | null;
   txid: string | null;
 }
@@ -31,6 +34,8 @@ export interface ComparisonViewState {
 type SearchInput = string | URLSearchParams;
 
 const SOURCE_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const CLASSIFIER_LABEL_PATTERN = /^[a-z][a-z0-9_]*$/;
+const MAX_CLASSIFIER_LABELS = 32;
 const TXID_PATTERN = /^[0-9a-f]{64}$/i;
 const SIGNATURE_MASK_LIMIT = (1 << RULE_IDS.length) - 1;
 
@@ -52,6 +57,15 @@ const sourceId = (value: string | null): string | null =>
 
 const classifierId = (value: string | null): string | null =>
   value !== null && /^[a-z][a-z0-9_]*$/.test(value) ? value : null;
+
+const classifierLabels = (params: URLSearchParams): string[] =>
+  [...new Set(params.getAll("label"))]
+    .filter((value) => CLASSIFIER_LABEL_PATTERN.test(value))
+    .sort()
+    .slice(0, MAX_CLASSIFIER_LABELS);
+
+const classifierMatch = (value: string | null): ClassifierLabelMatchMode =>
+  value === "all" ? "all" : "any";
 
 const txid = (value: string | null): string | null =>
   value !== null && TXID_PATTERN.test(value) ? value.toLowerCase() : null;
@@ -178,6 +192,8 @@ export const parseNodeViewState = (input: SearchInput): NodeViewState => {
   return {
     source: sourceId(singleValue(params, "source")),
     classifier: classifierId(singleValue(params, "classifier")),
+    classifierLabels: classifierLabels(params),
+    classifierMatch: classifierMatch(singleValue(params, "match")),
     selection,
     txid: txid(singleValue(params, "txid")),
   };
@@ -192,6 +208,16 @@ export const serializeNodeViewState = (state: NodeViewState): string => {
   const classifier = classifierId(state.classifier);
   if (classifier !== null) {
     params.set("classifier", classifier);
+  }
+  const labels = [...new Set(state.classifierLabels)]
+    .filter((value) => CLASSIFIER_LABEL_PATTERN.test(value))
+    .sort()
+    .slice(0, MAX_CLASSIFIER_LABELS);
+  for (const label of labels) {
+    params.append("label", label);
+  }
+  if (labels.length > 0 && state.classifierMatch === "all") {
+    params.set("match", "all");
   }
   if (state.selection?.kind === "rule") {
     const rule = ruleId(state.selection.rule);

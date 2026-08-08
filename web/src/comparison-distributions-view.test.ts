@@ -118,12 +118,13 @@ const comparisonDistributionMarkup = (): string => {
     .flatMap((panel) =>
       (["left", "right"] as const).map(
         (side) =>
-          `<h3 id="dist-${panel}-${side}-title"></h3><div id="${panel}-${side}"><canvas id="${panel}-${side}-canvas"></canvas></div>`,
+          `<h3 id="dist-${panel}-${side}-title"></h3><div id="${panel}-${side}-y-axis"></div><div id="${panel}-${side}"><canvas id="${panel}-${side}-canvas"></canvas></div>`,
       ),
     )
     .join("");
   return `
     <section id="comparison-distributions" hidden>
+      <div class="comparison-distributions-heading"><div><h2>Snapshot distributions</h2></div></div>
       <button id="dist-scope-all" aria-pressed="true"></button>
       <button id="dist-scope-common" aria-pressed="false"></button>
       <button id="dist-scope-left" aria-pressed="false"></button>
@@ -173,12 +174,32 @@ describe("createComparisonDistributionsView", () => {
       "outside sentinel",
     );
     expect(root!.querySelector("#spectrum-left svg")).not.toBeNull();
+    expect(
+      root!.querySelectorAll(
+        "#composition-left .composition-segment[tabindex]",
+      ),
+    ).toHaveLength(0);
+    const passiveTrack = root!.querySelector<HTMLElement>(
+      "#entanglement-left .composition-track[tabindex='0']",
+    );
+    expect(passiveTrack).not.toBeNull();
+    expect(
+      root!.querySelectorAll("#mosaic-left .mosaic-column[tabindex]"),
+    ).toHaveLength(0);
+    expect(
+      root!
+        .querySelector("#mosaic-left .mosaic-board")
+        ?.getAttribute("tabindex"),
+    ).toBe("0");
     expect(harness.pendingAnimationFrames()).toBe(1);
     harness.resizeObservers[0]?.trigger();
     expect(harness.pendingAnimationFrames()).toBe(1);
     harness.flushAnimationFrames();
     harness.flushAnimationFrames();
     expect(harness.canvasContext.setTransform).toHaveBeenCalled();
+    expect(
+      root!.querySelector("#joint-left-canvas")?.getAttribute("aria-pressed"),
+    ).toBe("false");
   });
 
   it("rerenders source-local empty state when a one-sided scope is selected", async () => {
@@ -217,7 +238,13 @@ describe("createComparisonDistributionsView", () => {
     )!;
     const view = createComparisonDistributionsView(root);
     await view.render(comparison);
+    for (let frame = 0; frame < 6; frame += 1) {
+      harness.flushAnimationFrames();
+    }
     const activeSpectrum = root.querySelector("#spectrum-left svg");
+    const activeDensity =
+      root.querySelector<HTMLCanvasElement>("#joint-left-canvas")!;
+    expect(activeDensity.getAttribute("role")).toBe("button");
     const candidate = compareCurrentSnapshots(
       loadedSource("candidate-a", [transaction(50)]),
       loadedSource("candidate-b", [transaction(50)]),
@@ -234,6 +261,7 @@ describe("createComparisonDistributionsView", () => {
     ).toBe(1);
     expect(root.getAttribute("aria-busy")).toBe("false");
     expect(root.querySelector("#spectrum-left svg")).toBe(activeSpectrum);
+    expect(activeDensity.getAttribute("role")).toBe("button");
     expect(root.querySelector("#dist-comp-left-title")?.textContent).toContain(
       "CORE node",
     );
@@ -253,10 +281,17 @@ describe("createComparisonDistributionsView", () => {
     });
 
     expect(view.commit(prepared, candidate)).toBe(true);
+    expect(activeDensity.getAttribute("role")).toBeNull();
+    expect(activeDensity.getAttribute("aria-hidden")).toBe("true");
+    expect(activeDensity.dataset.distributionInspectionKey).toBeUndefined();
     expect(root.querySelector("#dist-comp-left-title")?.textContent).toContain(
       "CANDIDATE-A node",
     );
     expect(root.querySelector("#spectrum-left svg")).not.toBe(activeSpectrum);
+    harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
+    expect(activeDensity.getAttribute("role")).toBe("button");
+    expect(activeDensity.hasAttribute("aria-hidden")).toBe(false);
 
     root.querySelector<HTMLButtonElement>("#dist-scope-common")?.click();
     await vi.waitFor(() => {

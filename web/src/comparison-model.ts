@@ -1,4 +1,4 @@
-import type { ViolationSignatureKey } from "./terrain";
+import { violationSignature, type ViolationSignatureKey } from "./terrain";
 import {
   comparePackedSnapshotRows,
   packedSnapshotRowCount,
@@ -64,6 +64,26 @@ export type ComparisonPolicyFilter =
   | { kind: "rule"; rule: RuleId }
   | { kind: "status"; status: ComparisonPolicyStatus }
   | { kind: "signature"; signature: ViolationSignatureKey };
+
+export const comparisonPolicyFilterMatches = (
+  transaction: MempoolTransaction,
+  filter: ComparisonPolicyFilter,
+): boolean => {
+  if (filter.kind === "all") {
+    return true;
+  }
+  const assessment = transaction.bip110;
+  if (filter.kind === "status") {
+    return (assessment?.status ?? "unclassified") === filter.status;
+  }
+  if (assessment === null) {
+    return false;
+  }
+  if (filter.kind === "rule") {
+    return assessment.violated_rules.includes(filter.rule);
+  }
+  return violationSignature(assessment)?.key === filter.signature;
+};
 
 const COMPARISON_ROW_CACHE_LIMIT = 256;
 

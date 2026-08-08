@@ -25,15 +25,7 @@ const requiredElement = <T extends HTMLElement>(id: string): T => {
   return element as T;
 };
 
-const methodologyText = (descriptor: ClassifierDescriptor): string => {
-  if (descriptor.methodology === "exact") return "Exact properties";
-  if (descriptor.methodology === "heuristic") return "Heuristic shapes";
-  if (descriptor.methodology === "fingerprint") return "Data fingerprints";
-  return "Policy rule set";
-};
-
 export const createTerrainSummaryView = (): TerrainSummaryView => {
-  const eyebrow = requiredElement<HTMLElement>("terrain-eyebrow");
   const title = requiredElement<HTMLElement>("terrain-title");
   const summary = requiredElement<HTMLElement>("terrain-summary");
   const totals = (["a", "b", "c"] as const).map((key) => ({
@@ -65,7 +57,6 @@ export const createTerrainSummaryView = (): TerrainSummaryView => {
       const metricLabel =
         metric === "count" ? "transaction count" : "virtual size";
       if (descriptor?.id === KNOTS_BIP110_CLASSIFIER_ID) {
-        eyebrow.textContent = "Knots mempool policy lens";
         title.textContent = "BIP-110 rule buckets";
         setTotal(
           0,
@@ -94,7 +85,6 @@ export const createTerrainSummaryView = (): TerrainSummaryView => {
       }
       const totals = classifierSummary(snapshot, descriptor.id);
       const summaryBuckets = classifierUsesSummaryBuckets(descriptor);
-      eyebrow.textContent = `${methodologyText(descriptor)} · version ${descriptor.version}`;
       title.textContent = `${descriptor.title} ${summaryBuckets ? "groups" : "buckets"}`;
       setTotal(0, "Complete", totals?.complete_count ?? 0, "complete");
       setTotal(1, "Partial", totals?.partial_count ?? 0, "partial");

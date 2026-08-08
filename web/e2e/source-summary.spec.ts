@@ -784,9 +784,6 @@ test.describe("progressive v2 publications", () => {
       await expect(page.locator("#detail-status")).toHaveText(
         "Not present in this snapshot",
       );
-      await expect(page.locator("#sample-summary")).toHaveText(
-        "Samples load with membership data.",
-      );
       await expect
         .poll(() => new URL(page.url()).searchParams.get("txid"))
         .toBe(absentTxid);
@@ -958,6 +955,196 @@ test.describe("progressive v2 publications", () => {
     }
   });
 
+  test("queries classifier labels and inspects the full matching population", async ({
+    page,
+  }) => {
+    await page.goto("/?source=vps-core-01");
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+
+    const versionTwo = page.locator(
+      '#classification-labels button[data-label="version_2"]',
+    );
+    const p2wsh = page.locator(
+      '#classification-labels button[data-label="p2wsh"]',
+    );
+    const matchAny = page.locator("#classification-match-any");
+    const matchAll = page.locator("#classification-match-all");
+    const querySummary = page.locator("#classification-query-summary");
+    const queryStage = page.locator("#classification-query-stage");
+
+    await versionTwo.click();
+    await p2wsh.click();
+    await expect(versionTwo).toHaveAttribute("aria-pressed", "true");
+    await expect(p2wsh).toHaveAttribute("aria-pressed", "true");
+    await expect(matchAny).toBeEnabled();
+    await expect(matchAll).toBeEnabled();
+    await expect(querySummary).toContainText(
+      "622 transactions match Version 2 or P2WSH.",
+    );
+    expect(new URL(page.url()).searchParams.getAll("label")).toEqual([
+      "p2wsh",
+      "version_2",
+    ]);
+    expect(new URL(page.url()).searchParams.has("match")).toBe(false);
+
+    await matchAll.click();
+    await expect(matchAll).toHaveAttribute("aria-pressed", "true");
+    await expect(querySummary).toContainText(
+      "114 transactions match Version 2 and P2WSH.",
+    );
+    expect(new URL(page.url()).searchParams.get("match")).toBe("all");
+    await expect(queryStage).toBeVisible();
+    const sectionCounts = await page
+      .locator("#classification-query-regions .query-section-label span")
+      .allTextContents();
+    expect(
+      sectionCounts.reduce(
+        (total, count) => total + Number(count.replaceAll(",", "")),
+        0,
+      ),
+    ).toBe(114);
+
+    const completeSection = page.locator(
+      "#classification-query-regions .query-section-label.complete",
+    );
+    await expect(completeSection).toBeVisible();
+    const [stageBox, completeBox] = await Promise.all([
+      queryStage.boundingBox(),
+      completeSection.boundingBox(),
+    ]);
+    if (stageBox === null || completeBox === null) {
+      throw new Error("classification query terrain must be laid out");
+    }
+    await queryStage.click({
+      position: {
+        x: completeBox.x - stageBox.x + 8,
+        y: completeBox.y + completeBox.height - stageBox.y + 8,
+      },
+    });
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("txid"))
+      .toMatch(/^[0-9a-f]{64}$/);
+    const selectedTxid = new URL(page.url()).searchParams.get("txid");
+    if (selectedTxid === null) throw new Error("transaction was not selected");
+    await expect(page.locator("#detail-transaction")).toContainText(
+      selectedTxid,
+    );
+    await expect(page.locator("#detail-status")).toHaveText(
+      /Complete result|Partial result/,
+    );
+    await expect(versionTwo).toHaveAttribute("aria-pressed", "true");
+    await expect(p2wsh).toHaveAttribute("aria-pressed", "true");
+    await expect(matchAll).toHaveAttribute("aria-pressed", "true");
+
+    await page.reload();
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    await expect(versionTwo).toHaveAttribute("aria-pressed", "true");
+    await expect(p2wsh).toHaveAttribute("aria-pressed", "true");
+    await expect(matchAll).toHaveAttribute("aria-pressed", "true");
+    await expect(querySummary).toContainText(
+      "114 transactions match Version 2 and P2WSH.",
+    );
+    await expect(page.locator("#detail-transaction")).toContainText(
+      selectedTxid,
+    );
+
+    await page.locator("#terrain-tab").click();
+    await expect(page.locator("#inspector-filters")).toBeVisible();
+    await expect(page.locator("#inspector-outcome")).toBeVisible();
+    await page.locator('#rule-list button[data-label="p2tr"]').click();
+    expect(new URL(page.url()).searchParams.getAll("label")).toEqual([
+      "p2wsh",
+      "version_2",
+    ]);
+    expect(new URL(page.url()).searchParams.get("match")).toBe("all");
+
+    await page.locator("#overview-tab").click();
+    await expect(versionTwo).toHaveAttribute("aria-pressed", "true");
+    await expect(p2wsh).toHaveAttribute("aria-pressed", "true");
+    await expect(matchAll).toHaveAttribute("aria-pressed", "true");
+    await expect(querySummary).toContainText(
+      "114 transactions match Version 2 and P2WSH.",
+    );
+    await expect(queryStage).toBeVisible();
+    await expect(page.locator("#inspector-filters")).toBeHidden();
+    await expect(page.locator("#inspector-outcome")).toBeHidden();
+  });
+
+  test("keeps snapshot-wide controls prominent and applies fee-age filters automatically", async ({
+    page,
+  }) => {
+    await page.goto("/?source=vps-core-01");
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    await expect(page.locator(".lens-toolbar #mode-count")).toBeVisible();
+    await expect(page.locator("#apply-filters")).toHaveCount(0);
+    await expect(page.locator("#sample-disclosure")).toHaveCount(0);
+    await expect(page.locator("#transaction-disclosure")).toBeVisible();
+    await expect(page.locator("#detail-classifiers")).toHaveCount(0);
+    await expect(page.locator("#inspector-filters")).toBeHidden();
+    await expect(page.locator("#inspector-outcome")).toBeHidden();
+    await expect(page.locator("#transaction-disclosure")).toBeVisible();
+    const inspectorOrder = await page
+      .locator(".inspector-panel")
+      .evaluate((inspector) =>
+        [...inspector.children].map((element) =>
+          element.classList.contains("filter-disclosure")
+            ? "filters"
+            : element.classList.contains("inspector-outcome")
+              ? "outcome"
+              : element.id === "transaction-disclosure"
+                ? "transaction"
+                : "other",
+        ),
+      );
+    expect(inspectorOrder).toEqual(["filters", "outcome", "transaction"]);
+    await expect(page.locator("#detail-status")).toHaveText(
+      "Select a transaction",
+    );
+    const columnControl = page.locator(".distribution-column-control");
+    const distributionGrid = page.locator("#distribution-grid");
+    if ((page.viewportSize()?.width ?? 0) > 900) {
+      await expect(columnControl).toBeVisible();
+      const oneColumn = page.locator("#distribution-columns-1");
+      await oneColumn.click();
+      await expect(oneColumn).toHaveAttribute("aria-pressed", "true");
+      await expect(distributionGrid).toHaveAttribute("data-columns", "1");
+      expect(
+        await distributionGrid.evaluate(
+          (grid) =>
+            getComputedStyle(grid).gridTemplateColumns.split(" ").length,
+        ),
+      ).toBe(1);
+    } else {
+      await expect(columnControl).toBeHidden();
+      expect(
+        await distributionGrid.evaluate(
+          (grid) =>
+            getComputedStyle(grid).gridTemplateColumns.split(" ").length,
+        ),
+      ).toBe(1);
+    }
+
+    await page.locator("#fee-age-tab").click();
+    await page.locator("#minimum-fee-rate").fill("1000000");
+    await expect(page.locator("#filter-summary")).toHaveText(
+      "Showing 0 of 700 transactions.",
+    );
+
+    await page.locator("#reset-filters").click();
+    await expect(page.locator("#filter-summary")).toHaveText(
+      "Showing 700 of 700 transactions.",
+    );
+  });
+
   test("keeps membership filters disabled and inert during a source-switch primary view", async ({
     page,
   }) => {
@@ -988,7 +1175,7 @@ test.describe("progressive v2 publications", () => {
         "primary-interactive",
       );
       const membershipControls = page.locator(
-        "#fee-age-tab, #classification-lens-select, #minimum-fee-rate, #maximum-age, #minimum-vsize, #apply-filters, #reset-filters",
+        "#fee-age-tab, #classification-lens-select, #minimum-fee-rate, #maximum-age, #minimum-vsize, #reset-filters",
       );
       for (const control of await membershipControls.all()) {
         await expect(control).toBeDisabled();
@@ -1079,11 +1266,10 @@ test.describe("progressive v2 publications", () => {
       await expect(commonRegion).toBeEnabled();
       await commonRegion.click();
       await expect(commonRegion).toHaveAttribute("aria-pressed", "true");
-      const sample = page
-        .locator("#comparison-transactions .tx-select")
-        .first();
-      await expect(sample).toBeEnabled();
-      await sample.click();
+      const navigator = page.locator("#comparison-transaction-listbox");
+      await expect(navigator).toBeVisible();
+      await navigator.focus();
+      await page.keyboard.press("Enter");
       await expect(page.locator("#comparison-detail-status")).toContainText(
         "Membership details are still loading",
       );
@@ -1224,9 +1410,12 @@ test.describe("atomic publication replacement", () => {
       "complete-feature-ready",
     );
     await page.locator("#fee-age-tab").click();
+    await page.locator("#minimum-fee-rate").fill("1000000");
+    await expect(page.locator("#filter-summary")).toHaveText(
+      "Showing 0 of 700 transactions.",
+    );
     const retainedFilterSummary =
       (await page.locator("#filter-summary").textContent()) ?? "";
-    await page.locator("#minimum-fee-rate").fill("1000000");
 
     let refreshRequests = 0;
     await page.route(
@@ -1427,6 +1616,75 @@ test.describe("atomic publication replacement", () => {
 });
 
 test.describe("policy terrain raster", () => {
+  test("keeps the active visual emphasis when a transaction is selected", async ({
+    page,
+  }) => {
+    await page.goto(
+      "/?source=vps-core-01&classifier=knots_bip110&rule=element_size",
+    );
+    await expect(page.locator("#page-status")).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    await page.locator("#terrain-tab").click();
+    const selectedRule = page.locator(
+      '#rule-list button[data-rule="element_size"]',
+    );
+    await expect(selectedRule).toHaveAttribute("aria-pressed", "true");
+    const canvas = page.locator("#terrain-canvas");
+    const bounds = await canvas.boundingBox();
+    expect(bounds).not.toBeNull();
+    for (const yShare of [0.15, 0.35, 0.55, 0.75]) {
+      for (const xShare of [0.15, 0.35, 0.55, 0.75]) {
+        if (new URL(page.url()).searchParams.has("txid")) break;
+        await canvas.click({
+          position: {
+            x: (bounds?.width ?? 2) * xShare,
+            y: (bounds?.height ?? 2) * yShare,
+          },
+        });
+      }
+      if (new URL(page.url()).searchParams.has("txid")) break;
+    }
+
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("txid"))
+      .toMatch(/^[0-9a-f]{64}$/);
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("rule"))
+      .toBe("element_size");
+    await expect(selectedRule).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#detail-status")).toHaveText(
+      /Would violate policy|Compatible|Indeterminate/,
+    );
+    await expect(
+      page.locator("#transaction-disclosure .detail-error"),
+    ).toHaveCount(0);
+    await expect(page.locator("#transaction-disclosure")).not.toContainText(
+      '{"fixture":true}',
+    );
+    await waitForRendering(page);
+    const highlightedPixels = await canvas.evaluate((element) => {
+      const context = (element as HTMLCanvasElement).getContext("2d");
+      if (context === null) throw new Error("terrain canvas has no 2D context");
+      const pixels = context.getImageData(
+        0,
+        0,
+        context.canvas.width,
+        context.canvas.height,
+      ).data;
+      let count = 0;
+      for (let index = 0; index < pixels.length; index += 4) {
+        const red = pixels[index] ?? 0;
+        const green = pixels[index + 1] ?? 0;
+        const blue = pixels[index + 2] ?? 0;
+        if (red >= 220 && green >= 220 && blue <= 180) count += 1;
+      }
+      return count;
+    });
+    expect(highlightedPixels).toBeGreaterThan(0);
+  });
+
   test("matches direct selected-region stroke pixels", async ({
     context,
     page,

@@ -102,9 +102,19 @@ const selection = (
 
 const snapshotDistributionMarkup = (): string => `
   <section id="snapshot-distributions">
+    <div class="terrain-heading">
+      <div><h2>Snapshot distributions</h2></div>
+      <div class="distribution-column-control">
+        <button id="distribution-columns-auto" aria-pressed="true">Auto</button>
+        <button id="distribution-columns-1" aria-pressed="false">1</button>
+        <button id="distribution-columns-2" aria-pressed="false">2</button>
+        <button id="distribution-columns-3" aria-pressed="false">3</button>
+      </div>
+    </div>
     <p id="distribution-empty"></p>
-    <div id="distribution-grid">
+    <div id="distribution-grid" data-columns="auto">
       <p id="joint-note"></p>
+      <div id="joint-y-axis"></div>
       <div id="joint-chart"><canvas id="joint-canvas"></canvas></div>
       <p id="composition-note"></p>
       <div id="composition-bars"></div>
@@ -117,6 +127,7 @@ const snapshotDistributionMarkup = (): string => `
       <p id="data-note"></p>
       <div id="data-chart"></div>
       <p id="complexity-note"></p>
+      <div id="complexity-y-axis"></div>
       <div id="complexity-chart"><canvas id="complexity-canvas"></canvas></div>
       <p id="entanglement-note"></p>
       <div id="entanglement-bars"></div>
@@ -131,6 +142,7 @@ describe("createSnapshotDistributionsView", () => {
 
   beforeEach(() => {
     harness = installDistributionViewTestHarness();
+    window.localStorage.clear();
     document.body.innerHTML = `
       <div id="composition-bars">outside sentinel</div>
       ${snapshotDistributionMarkup()}
@@ -139,7 +151,41 @@ describe("createSnapshotDistributionsView", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    window.localStorage.clear();
     harness.cleanup();
+  });
+
+  it("applies and persists an explicit panel column count", () => {
+    window.localStorage.setItem(
+      "mempool-atlas.snapshot-distribution-columns",
+      "2",
+    );
+    createSnapshotDistributionsView({ onSelectBucket: vi.fn() });
+    const grid = document.querySelector<HTMLElement>("#distribution-grid")!;
+    const auto = document.querySelector<HTMLButtonElement>(
+      "#distribution-columns-auto",
+    )!;
+    const one = document.querySelector<HTMLButtonElement>(
+      "#distribution-columns-1",
+    )!;
+    const two = document.querySelector<HTMLButtonElement>(
+      "#distribution-columns-2",
+    )!;
+
+    expect(grid.dataset.columns).toBe("2");
+    expect(two.getAttribute("aria-pressed")).toBe("true");
+    expect(auto.getAttribute("aria-pressed")).toBe("false");
+
+    one.click();
+
+    expect(grid.dataset.columns).toBe("1");
+    expect(one.getAttribute("aria-pressed")).toBe("true");
+    expect(two.getAttribute("aria-pressed")).toBe("false");
+    expect(
+      window.localStorage.getItem(
+        "mempool-atlas.snapshot-distribution-columns",
+      ),
+    ).toBe("1");
   });
 
   it("owns root-scoped async rendering, axes, scheduling, and bucket events", async () => {
@@ -214,8 +260,160 @@ describe("createSnapshotDistributionsView", () => {
 
     expect(composition.firstElementChild).toBe(originalComposition);
     expect(root.querySelector("#spectrum-chart svg")).toBe(spectrum);
-    expect(first.hasAttribute("aria-pressed")).toBe(false);
+    expect(first.getAttribute("aria-pressed")).toBe("false");
     expect(second.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("makes spectra, reference ticks, and density regions inspectable", async () => {
+    const view = createSnapshotDistributionsView({
+      onSelectBucket: vi.fn(),
+    });
+    const root = document.querySelector<HTMLElement>(
+      "section#snapshot-distributions",
+    )!;
+    await view.render(
+      snapshot([transaction(1, "alpha"), transaction(2, "beta")]),
+      selection(),
+    );
+
+    const spectrum = root.querySelector<SVGElement>("#spectrum-chart svg")!;
+    expect(spectrum.getAttribute("role")).toBe("button");
+    expect(spectrum.getAttribute("aria-label")).toContain("Fee rate:");
+    const originalBin = spectrum.getAttribute(
+      "data-distribution-inspection-key",
+    );
+    spectrum.focus();
+    spectrum.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+    );
+    expect(spectrum.getAttribute("data-distribution-inspection-key")).not.toBe(
+      originalBin,
+    );
+    expect(
+      root.querySelector<HTMLElement>(".distribution-inspection-tooltip")
+        ?.hidden,
+    ).toBe(false);
+
+    spectrum.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(spectrum.getAttribute("data-distribution-inspection-pinned")).toBe(
+      "true",
+    );
+    expect(spectrum.getAttribute("aria-pressed")).toBe("true");
+    spectrum.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(spectrum.hasAttribute("data-distribution-inspection-pinned")).toBe(
+      false,
+    );
+    expect(spectrum.getAttribute("aria-pressed")).toBe("false");
+
+    spectrum.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const clear = root.querySelector<HTMLButtonElement>(
+      ".distribution-inspection-control",
+    )!;
+    expect(clear.disabled).toBe(false);
+    clear.click();
+    expect(spectrum.hasAttribute("data-distribution-inspection-pinned")).toBe(
+      false,
+    );
+
+    spectrum.focus();
+    spectrum.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    spectrum.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    const escapedBin = spectrum.getAttribute(
+      "data-distribution-inspection-key",
+    );
+    spectrum.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+    );
+    expect(spectrum.getAttribute("data-distribution-inspection-key")).not.toBe(
+      escapedBin,
+    );
+    expect(
+      root.querySelector<HTMLElement>(".distribution-inspection-tooltip")
+        ?.hidden,
+    ).toBe(false);
+
+    const references = root.querySelectorAll(
+      "#data-chart .panel-axis [data-reference='true']",
+    );
+    expect([...references].map(({ textContent }) => textContent)).toEqual([
+      "40 B",
+      "80 B",
+    ]);
+    expect(
+      root.querySelectorAll(
+        "#data-chart .chart-gridline[data-reference='true']",
+      ),
+    ).toHaveLength(2);
+
+    harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
+    const canvas = root.querySelector<HTMLCanvasElement>("#joint-canvas")!;
+    expect(canvas.getAttribute("role")).toBe("button");
+    expect(canvas.getAttribute("aria-label")).toContain("Fee rate:");
+    expect(
+      root.querySelector("#joint-chart .joint-inspection-highlight"),
+    ).not.toBeNull();
+    expect(root.querySelector("#joint-y-axis")?.textContent).toContain(
+      "1 KivB",
+    );
+
+    canvas.getBoundingClientRect = () =>
+      ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: 480,
+        bottom: 260,
+        width: 480,
+        height: 260,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    const gapMove = new Event("pointermove", { bubbles: true });
+    Object.defineProperties(gapMove, {
+      clientX: { value: 452 },
+      clientY: { value: 60 },
+    });
+    canvas.dispatchEvent(gapMove);
+    expect(canvas.getAttribute("data-distribution-inspection-title")).toBe(
+      "Between plotted regions",
+    );
+    canvas.focus();
+    canvas.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(canvas.hasAttribute("data-distribution-inspection-pinned")).toBe(
+      false,
+    );
+
+    const gridMove = new Event("pointermove", { bubbles: true });
+    Object.defineProperties(gridMove, {
+      clientX: { value: 120 },
+      clientY: { value: 120 },
+    });
+    canvas.dispatchEvent(gridMove);
+    canvas.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const pinnedCell = canvas.getAttribute("data-distribution-inspection-key");
+    expect(canvas.getAttribute("data-distribution-inspection-pinned")).toBe(
+      "true",
+    );
+
+    harness.resizeObservers[0]?.trigger();
+    harness.flushAnimationFrames();
+
+    expect(canvas.getAttribute("data-distribution-inspection-key")).toBe(
+      pinnedCell,
+    );
+    expect(canvas.getAttribute("data-distribution-inspection-pinned")).toBe(
+      "true",
+    );
+    expect(
+      root.querySelector<HTMLElement>(
+        "#joint-chart .joint-inspection-highlight",
+      )?.hidden,
+    ).toBe(false);
   });
 
   it("prepares a replacement without touching the active view and commits only its exact candidate", async () => {
@@ -231,12 +429,18 @@ describe("createSnapshotDistributionsView", () => {
       active.observed_at_ms + 1_000,
     );
     await view.render(active, selection());
+    harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
     const activeSpectrum = root.querySelector("#spectrum-chart svg");
+    const activeDensity =
+      root.querySelector<HTMLCanvasElement>("#joint-canvas")!;
+    expect(activeDensity.getAttribute("role")).toBe("button");
 
     const prepared = await view.prepare(candidate, selection("complete:1"));
 
     expect(root.getAttribute("aria-busy")).toBe("false");
     expect(root.querySelector("#spectrum-chart svg")).toBe(activeSpectrum);
+    expect(activeDensity.getAttribute("role")).toBe("button");
     expect(root.querySelector("#value-note")?.textContent).toContain("2 of 2");
     expect(view.canCommit(prepared, candidate, selection("complete:1"))).toBe(
       true,
@@ -251,10 +455,55 @@ describe("createSnapshotDistributionsView", () => {
     expect(view.commit(prepared, candidate, selection("complete:1"))).toBe(
       true,
     );
+    expect(activeDensity.getAttribute("role")).toBeNull();
+    expect(activeDensity.getAttribute("aria-hidden")).toBe("true");
+    expect(activeDensity.dataset.distributionInspectionKey).toBeUndefined();
     expect(root.querySelector("#value-note")?.textContent).toContain("1 of 1");
     expect(
       root.querySelector('#composition-bars button[data-segment="complete:1"]'),
     ).not.toBeNull();
+
+    harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
+    expect(activeDensity.getAttribute("role")).toBe("button");
+    expect(activeDensity.hasAttribute("aria-hidden")).toBe(false);
+  });
+
+  it("removes an obsolete density empty state before deferred replacement paint", async () => {
+    const view = createSnapshotDistributionsView({
+      onSelectBucket: vi.fn(),
+    });
+    const root = document.querySelector<HTMLElement>(
+      "section#snapshot-distributions",
+    )!;
+    const withoutStructure = {
+      ...transaction(1, "alpha"),
+      structure: null,
+    };
+    const active = snapshot([withoutStructure]);
+    const candidate = snapshot(
+      [transaction(2, "beta")],
+      active.observed_at_ms + 1_000,
+    );
+    await view.render(active, selection());
+    harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
+    expect(root.querySelector("#complexity-chart .empty-state")).not.toBeNull();
+    const prepared = await view.prepare(candidate, selection());
+
+    expect(view.commit(prepared, candidate, selection())).toBe(true);
+
+    expect(root.querySelector("#complexity-chart .empty-state")).toBeNull();
+    expect(
+      root.querySelector("#complexity-canvas")?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
+    expect(root.querySelector("#complexity-canvas")?.getAttribute("role")).toBe(
+      "button",
+    );
   });
 
   it("replaces empty and nonempty owners and cancels reset lifecycle work", async () => {

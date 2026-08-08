@@ -38,17 +38,24 @@ Build and verify the release from a clean, reviewed revision:
 npm --prefix web ci
 just lint
 just test
-VITE_UMAMI_SCRIPT_URL=https://analytics.example.com/script.js \
+VITE_UMAMI_SCRIPT_URL=https://atlas.example.com/analytics/script.js \
 VITE_UMAMI_WEBSITE_ID=00000000-0000-4000-8000-000000000000 \
 VITE_UMAMI_DOMAINS=atlas.example.com \
   just build
 cargo build --release --locked
 ```
 
-Omit the three `VITE_UMAMI_*` variables when analytics is not required. If the
-tracker uses a separate origin, add that exact HTTPS origin to `script-src` and
-`connect-src` in the edge Content Security Policy. A first-party reverse proxy
-can keep both directives at `'self'` instead.
+Omit the three `VITE_UMAMI_*` variables when analytics is not required. By
+default, reverse-proxy the Umami script and collection endpoint through the
+Atlas hostname, as represented by `/analytics/` above. This keeps both
+`script-src` and `connect-src` at `'self'`.
+
+Only load analytics directly from a separate origin after explicitly trusting
+that origin with the Atlas page. Add its exact HTTPS origin to both directives.
+A script origin admitted by `script-src` runs with page privileges; a
+compromised or defective trusted analytics script can block the browser main
+thread indefinitely and stall Atlas interactions. CSP allowlisting grants
+trust, not execution isolation.
 
 For the example systemd layout, install the release binary and `web/dist` as one
 release unit at `/opt/mempool-atlas`, matching the supplied paths. For atomic
@@ -117,6 +124,11 @@ the host address nor any unproxied DNS record can reach port 3101.
 Cloudflare does not cache HTML or JSON by default. Create explicit Cache Rules
 for the public hostname and keep them narrow. Rule ordering matters because the
 last matching rule wins.
+
+The table below describes behavior derived from Atlas origin `Cache-Control`
+headers and the route eligibility rules. The browser and edge columns are
+outcomes, not Browser Cache TTL or Edge Cache TTL override values to enter in
+Cloudflare.
 
 | Route | Eligibility | Browser behavior | Edge behavior |
 | --- | --- | --- | --- |
@@ -229,7 +241,7 @@ describes the fields and actions available to each plan.
 Add these response headers at the edge:
 
 ```text
-Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self' https://analytics.example.com; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' https://analytics.example.com; style-src 'self'; worker-src 'self'
+Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'; worker-src 'self'
 Cross-Origin-Opener-Policy: same-origin
 Permissions-Policy: camera=(), geolocation=(), microphone=()
 Referrer-Policy: no-referrer
@@ -300,8 +312,9 @@ just smoke-public https://atlas.example.com node-a
 It verifies the source discovery status, cache policy, and required semantic
 Atlas version, plus hidden public health paths, Cloudflare routing,
 compression, the always-revalidated manifest, every immutable declared stage,
-manifest and stage validators, transaction detail when the publication is
-non-empty, and conditional `304` behavior.
+manifest and stage validators, exact non-cacheable stage routing and currentness
+errors, transaction detail when the publication is non-empty, and conditional
+`304` behavior.
 Rate-limit actions and direct-origin
 isolation require separate staging and firewall checks.
 

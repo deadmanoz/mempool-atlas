@@ -204,6 +204,9 @@ fn cacheable_payload(
         header::CACHE_CONTROL,
         HeaderValue::from_static(cache_control),
     );
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("accept-encoding"));
     response.headers_mut().insert(
         header::ETAG,
         HeaderValue::from_str(&payload.etag).expect("generated v2 ETag is a valid header value"),
@@ -1083,6 +1086,8 @@ mod tests {
             .expect("response");
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(first.headers()[header::CACHE_CONTROL], STAGE_CACHE_CONTROL);
+        assert_eq!(first.headers()[header::VARY], "accept-encoding");
+        assert!(!first.headers().contains_key(header::CONTENT_ENCODING));
         let etag = first.headers()[header::ETAG].clone();
         assert!(
             etag.to_str()
@@ -1110,6 +1115,7 @@ mod tests {
             not_modified.headers()[header::CACHE_CONTROL],
             STAGE_CACHE_CONTROL
         );
+        assert_eq!(not_modified.headers()[header::VARY], "accept-encoding");
         assert_eq!(not_modified.headers()[X_ATLAS_CONTENT_ID], population_id);
         assert_eq!(
             not_modified.headers()[X_ATLAS_UNCOMPRESSED_LENGTH],

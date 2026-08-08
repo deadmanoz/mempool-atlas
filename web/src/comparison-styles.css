@@ -92,7 +92,7 @@
 }
 
 .source-card {
-  min-block-size: 19.25rem;
+  min-block-size: 17.5rem;
   min-width: 0;
   padding: 0.72rem 0.85rem;
   background: #0a171f;
@@ -190,15 +190,6 @@
   border-left-color: var(--amber);
   background: rgba(225, 170, 75, 0.08);
   color: #c9b989;
-}
-
-.source-card-policy {
-  min-block-size: 1.75rem;
-  margin: 0;
-  padding: 0.35rem 0.55rem;
-  color: var(--faint);
-  font-size: 0.56rem;
-  line-height: 1.35;
 }
 
 .source-card-placeholder {
@@ -665,29 +656,101 @@
   font-size: 0.76rem;
 }
 
-.comparison-policy-section,
-.comparison-bucket-section {
+.comparison-policy-toolbar {
+  margin: 0 0 0.65rem;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.comparison-policy-toolbar-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.72rem 0.85rem;
   border-bottom: 1px solid var(--border);
 }
 
-.comparison-policy-section > .section-heading,
-.comparison-bucket-section > .section-heading {
+.comparison-policy-toolbar-heading > p {
+  max-width: 33rem;
+  margin: 0;
+  color: var(--faint);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.comparison-policy-toolbar-controls {
+  display: grid;
+  grid-template-columns: minmax(15rem, auto) minmax(24rem, 1fr) auto;
+  align-items: stretch;
+  gap: 0.7rem;
+  padding: 0.7rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.comparison-policy-source {
+  display: grid;
+  align-content: center;
+  gap: 0.35rem;
+}
+
+.comparison-policy-source .segmented {
+  width: 100%;
+}
+
+.comparison-policy-source .segmented button {
+  min-width: 0;
+}
+
+.comparison-policy-source[data-locked="true"] .segmented {
+  opacity: 0.72;
+}
+
+.comparison-policy-toolbar .comparison-population-metrics {
+  min-width: 0;
+  border: 1px solid var(--border);
+}
+
+.comparison-policy-clear {
+  align-self: stretch;
+  min-height: 2.35rem;
+  padding-inline: 0.72rem;
+  white-space: nowrap;
+}
+
+.comparison-policy-toolbar-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(18rem, 0.8fr);
+}
+
+.comparison-policy-section,
+.comparison-bucket-section {
+  min-width: 0;
+}
+
+.comparison-policy-section {
+  border-right: 1px solid var(--border);
+}
+
+.comparison-policy-toolbar .section-heading {
   margin: 0;
   padding: 0.65rem 0.85rem 0.45rem;
 }
 
-.comparison-policy-section > .section-heading button {
-  min-height: 1.6rem;
-  padding: 0.2rem 0.4rem;
-  font-size: 0.58rem;
+.comparison-policy-toolbar .rule-list {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding-top: 0.45rem;
 }
 
 .policy-bucket-list {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.34rem;
-  max-height: 16rem;
+  max-height: 9.15rem;
   overflow: auto;
-  padding: 0 0.85rem 0.7rem;
+  padding: 0.45rem 0.85rem 0.55rem;
 }
 
 .policy-bucket-list button {
@@ -728,28 +791,11 @@
   color: var(--cyan);
 }
 
-.comparison-rule-chips {
-  max-width: 13rem;
-}
-
 .rule-chip.absent {
   min-width: 3.8rem;
   border-style: dashed;
   border-color: #43545f;
   color: #758791;
-}
-
-.variant-badge {
-  display: inline-flex;
-  padding: 0.12rem 0.25rem;
-  border: 1px solid var(--border-strong);
-  color: var(--faint);
-  font-size: 0.54rem;
-}
-
-.variant-badge.differing {
-  border-color: rgba(225, 170, 75, 0.78);
-  color: #e8c675;
 }
 
 .comparison-detail {
@@ -815,7 +861,8 @@
 }
 
 /* Comparison-only responsiveness. Shared shell, header, toolbar, and terrain
-   breakpoints live in styles.css so every page receives them. */
+   breakpoints live in styles.css; shared distribution breakpoints live in
+   distribution-styles.css so every page receives them. */
 
 @media (max-width: 900px) {
   .comparison-header .comparison-heading-copy {
@@ -826,14 +873,38 @@
   }
 
   .comparison-controls-heading,
+  .comparison-policy-toolbar-heading,
   .comparison-policy-matrix-heading {
     align-items: flex-start;
     flex-direction: column;
   }
 
   .comparison-controls-heading > p,
+  .comparison-policy-toolbar-heading > p,
   .comparison-policy-matrix-heading > p {
+    max-width: none;
     text-align: left;
+  }
+
+  .comparison-policy-toolbar-controls {
+    grid-template-columns: minmax(13rem, auto) minmax(0, 1fr);
+  }
+
+  .comparison-policy-clear {
+    grid-column: 1 / -1;
+  }
+
+  .comparison-policy-toolbar-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .comparison-policy-section {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .comparison-policy-toolbar .rule-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -855,7 +926,7 @@
   }
 
   .source-card {
-    min-block-size: 24.5rem;
+    min-block-size: 22.75rem;
   }
 
   .source-card dl {
@@ -888,6 +959,19 @@
     min-height: 3.5rem;
   }
 
+  .comparison-policy-toolbar-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .comparison-policy-clear {
+    grid-column: auto;
+  }
+
+  .comparison-policy-toolbar .rule-list,
+  .policy-bucket-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .comparison-stage {
     min-height: 480px;
     height: 480px;
@@ -903,9 +987,10 @@
   }
 }
 
-/* Source-local distribution panels */
+/* Node-by-node distribution panels */
 
 .comparison-distributions {
+  position: relative;
   min-block-size: 24rem;
   margin: 0 0 0.65rem;
   border: 1px solid var(--border);

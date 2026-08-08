@@ -112,7 +112,7 @@ describe("source summary views", () => {
     expect(card.textContent).toContain("1/2 assessed");
   });
 
-  it("keeps policy identity outside the stable comparison LCP copy", () => {
+  it("keeps evaluator identity out of user-facing source details", () => {
     const card = document.querySelector<HTMLElement>("#card");
     if (card === null) throw new Error("missing fixture card");
     createSourceCardView(card, "Source A").renderSnapshot(source(), snapshot());
@@ -120,9 +120,8 @@ describe("source summary views", () => {
     expect(card.querySelector(".source-card-classification")?.textContent).toBe(
       "Classifying · 1/2 assessed. 1 of 2 assessed; 1 transaction has an assessment pending while classification continues. Refresh to read newer progress.",
     );
-    expect(card.querySelector(".source-card-policy")?.textContent).toBe(
-      "Policy: rdts-rules 1.0.0.",
-    );
+    expect(card.querySelector(".source-card-policy")).toBeNull();
+    expect(card.textContent).not.toContain("rdts-rules");
   });
 
   it("preserves comparison card nodes and focus when the snapshot completes", () => {

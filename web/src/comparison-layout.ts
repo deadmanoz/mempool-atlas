@@ -1,7 +1,12 @@
 import {
+  comparisonPolicyFilterMatches,
   comparisonRegionEntries,
+  policySideForRegion,
+  sourceEntry,
   type ComparedTransaction,
+  type ComparisonPolicyFilter,
   type ComparisonRegionKey,
+  type ComparisonSide,
   type CurrentComparison,
 } from "./comparison-model";
 import { prepareCanvasBacking } from "./canvas-backing";
@@ -346,27 +351,71 @@ const paintComparisonBatch = (
   context: CanvasRenderingContext2D,
   batch: ComparisonPaintBatch,
   selectedRegion: ComparisonRegionKey,
+  policySide: ComparisonSide,
+  policyFilter: ComparisonPolicyFilter,
 ): void => {
   const { region } = batch;
-  context.beginPath();
   if (batch.kind === "population") {
     context.fillStyle = REGION_COLOR[region.key];
-    context.globalAlpha = region.key === selectedRegion ? 0.9 : 0.52;
+    if (region.key !== selectedRegion || policyFilter.kind === "all") {
+      context.beginPath();
+      context.globalAlpha = region.key === selectedRegion ? 0.9 : 0.52;
+      for (let index = batch.start; index < batch.end; index += 1) {
+        const rect = glyphRect(region, index);
+        context.rect(rect.x, rect.y, rect.width, rect.height);
+      }
+      context.fill();
+      return;
+    }
+
+    context.beginPath();
+    context.globalAlpha = 0.11;
     for (let index = batch.start; index < batch.end; index += 1) {
       const rect = glyphRect(region, index);
       context.rect(rect.x, rect.y, rect.width, rect.height);
     }
     context.fill();
+
+    context.beginPath();
+    context.globalAlpha = 0.96;
+    const effectiveSide = policySideForRegion(region.key, policySide);
+    for (let index = batch.start; index < batch.end; index += 1) {
+      const entry = region.entries[index];
+      const transaction =
+        entry === undefined ? null : sourceEntry(entry, effectiveSide);
+      if (
+        transaction !== null &&
+        comparisonPolicyFilterMatches(transaction, policyFilter)
+      ) {
+        const rect = glyphRect(region, index);
+        context.rect(rect.x, rect.y, rect.width, rect.height);
+      }
+    }
+    context.fill();
     return;
   }
+  context.beginPath();
   context.globalAlpha = 1;
   context.strokeStyle = "#e1aa4b";
   context.lineWidth = 1;
+  const effectiveSide = policySideForRegion(region.key, policySide);
   for (let index = batch.start; index < batch.end; index += 1) {
-    if (region.differingWitnessBits?.[index] === 1) {
-      const rect = glyphRect(region, index);
-      context.rect(rect.x, rect.y, rect.width, rect.height);
+    if (region.differingWitnessBits?.[index] !== 1) {
+      continue;
     }
+    const entry = region.entries[index];
+    const transaction =
+      entry === undefined ? null : sourceEntry(entry, effectiveSide);
+    if (
+      region.key === selectedRegion &&
+      policyFilter.kind !== "all" &&
+      (transaction === null ||
+        !comparisonPolicyFilterMatches(transaction, policyFilter))
+    ) {
+      continue;
+    }
+    const rect = glyphRect(region, index);
+    context.rect(rect.x, rect.y, rect.width, rect.height);
   }
   context.stroke();
 };
@@ -395,11 +444,19 @@ export const paintComparison = (
   layout: ComparisonLayout,
   comparison: CurrentComparison,
   selectedRegion: ComparisonRegionKey,
+  policySide: ComparisonSide,
+  policyFilter: ComparisonPolicyFilter,
   activeTransactionId: string | null = null,
 ): void => {
   paintComparisonHeaders(context, layout, comparison, selectedRegion);
   for (const batch of comparisonPaintBatches(layout, Number.MAX_SAFE_INTEGER)) {
-    paintComparisonBatch(context, batch, selectedRegion);
+    paintComparisonBatch(
+      context,
+      batch,
+      selectedRegion,
+      policySide,
+      policyFilter,
+    );
   }
   paintActiveComparisonTransaction(context, layout, activeTransactionId);
 };
@@ -464,6 +521,8 @@ export const renderComparisonCanvas = (
   canvas: HTMLCanvasElement,
   comparison: CurrentComparison,
   selectedRegion: ComparisonRegionKey,
+  policySide: ComparisonSide,
+  policyFilter: ComparisonPolicyFilter,
   activeTransactionId: string | null,
   cached: ComparisonGeometry | null,
 ): ComparisonCanvasRenderResult => {
@@ -483,6 +542,8 @@ export const renderComparisonCanvas = (
     result.geometry.layout,
     comparison,
     selectedRegion,
+    policySide,
+    policyFilter,
     activeTransactionId,
   );
   return result;
@@ -492,6 +553,8 @@ export const renderComparisonCanvasProgressively = async (
   canvas: HTMLCanvasElement,
   comparison: CurrentComparison,
   selectedRegion: ComparisonRegionKey,
+  policySide: ComparisonSide,
+  policyFilter: ComparisonPolicyFilter,
   activeTransactionId: string | null,
   cached: ComparisonGeometry | null,
   signal: AbortSignal,
@@ -520,7 +583,14 @@ export const renderComparisonCanvasProgressively = async (
   );
   for (const batch of comparisonPaintBatches(result.geometry.layout)) {
     await runInAnimationFrame(
-      () => paintComparisonBatch(context, batch, selectedRegion),
+      () =>
+        paintComparisonBatch(
+          context,
+          batch,
+          selectedRegion,
+          policySide,
+          policyFilter,
+        ),
       signal,
     );
   }

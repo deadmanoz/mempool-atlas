@@ -21,7 +21,7 @@ import {
   classifierBucketPopulation,
   classifierBuckets,
   classifierLabelPopulation,
-  classifierLabelSamplePopulation,
+  classifierLabelQueryPopulation,
   precomputeClassifierBuckets,
   classifierTerrainGroups,
   classifierTerrainTotals,
@@ -588,16 +588,13 @@ describe("classifier terrain", () => {
       classifierLabelPopulation(transactions, propertyDescriptor, "version_2"),
     ).toBe(versionTwo);
     expect(
-      classifierLabelSamplePopulation(
+      classifierLabelQueryPopulation(
         transactions,
         propertyDescriptor,
-        "version_2",
+        ["version_2"],
+        "any",
       ),
-    ).toMatchObject({
-      count: 3,
-      vsize: 700,
-      transactions: versionTwo?.transactions,
-    });
+    ).toMatchObject({ count: 3, vsize: 700, labelKeys: ["version_2"] });
     expect(
       classifierLabelPopulation(
         transactions,
@@ -621,26 +618,73 @@ describe("classifier terrain", () => {
     ).toBeNull();
   });
 
-  it("precomputes a bounded largest-first marginal-label sample", async () => {
-    const transactions = Array.from({ length: 20 }, (_, index) =>
-      transaction(index + 1, 100 + index, result("complete", ["alpha"])),
-    );
+  it("resolves ANY and ALL label queries without duplicate transactions", async () => {
+    const transactions = [
+      transaction(1, 100, result("complete", ["alpha"])),
+      transaction(2, 200, result("complete", ["alpha", "gamma"])),
+      transaction(3, 300, result("partial", ["gamma"])),
+      transaction(4, 400, result("partial", ["alpha", "gamma"])),
+      transaction(5, 500, null),
+    ];
 
     await precomputeClassifierBuckets(transactions, [descriptor], {
-      batchSize: 5,
+      batchSize: 2,
       yieldBetweenBatches: async () => Promise.resolve(),
     });
-    const sample = classifierLabelSamplePopulation(
+
+    const any = classifierLabelQueryPopulation(
       transactions,
       descriptor,
-      "alpha",
+      ["gamma", "alpha", "alpha", "unknown"],
+      "any",
     );
-
-    expect(sample).toMatchObject({ count: 20, vsize: 2_190, totalShare: 1 });
-    expect(sample?.transactions).toHaveLength(8);
-    expect(sample?.transactions.map(({ vsize }) => vsize)).toEqual([
-      119, 118, 117, 116, 115, 114, 113, 112,
+    expect(any).toMatchObject({
+      labelKeys: ["alpha", "gamma"],
+      matchMode: "any",
+      count: 4,
+      vsize: 1_000,
+      totalShare: 0.8,
+    });
+    expect(any.completeTransactions.map(({ txid }) => txid)).toEqual([
+      transactions[0]?.txid,
+      transactions[1]?.txid,
     ]);
+    expect(any.partialTransactions.map(({ txid }) => txid)).toEqual([
+      transactions[2]?.txid,
+      transactions[3]?.txid,
+    ]);
+
+    const all = classifierLabelQueryPopulation(
+      transactions,
+      descriptor,
+      ["alpha", "gamma"],
+      "all",
+    );
+    expect(all).toMatchObject({ count: 2, vsize: 600, totalShare: 0.4 });
+    expect(all.transactions.map(({ txid }) => txid)).toEqual([
+      transactions[1]?.txid,
+      transactions[3]?.txid,
+    ]);
+  });
+
+  it("returns an explicit empty population when no valid labels are selected", () => {
+    expect(
+      classifierLabelQueryPopulation(
+        [transaction(1, 100, result("complete", ["alpha"]))],
+        descriptor,
+        ["unknown"],
+        "all",
+      ),
+    ).toEqual({
+      labelKeys: [],
+      matchMode: "all",
+      transactions: [],
+      completeTransactions: [],
+      partialTransactions: [],
+      count: 0,
+      vsize: 0,
+      totalShare: 0,
+    });
   });
 
   it("counts multi-label membership independently across result states", () => {

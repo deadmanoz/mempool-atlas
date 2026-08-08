@@ -1,12 +1,23 @@
 import { classifierDescriptor } from "./classification-view";
 import type { ClassifierBucketKey } from "./classifier-terrain";
+import {
+  sameSnapshotDistributionIdentity,
+  sameSnapshotDistributionSelection,
+  snapshotDistributionIdentity,
+  snapshotDistributionVariant,
+  type SnapshotDistributionIdentity,
+  type SnapshotDistributionSelection,
+} from "./snapshot-distribution-view-state";
+import { createSectionDistributionInspector } from "./distribution-interaction";
 import type { JointDensity } from "./fee-distribution";
 import { createFrameSequenceRenderer } from "./frame-sequence-renderer";
 import { PANEL_GROUP_LIMIT } from "./panel-groups";
+import { installSnapshotDistributionLayoutControl } from "./snapshot-distribution-layout-control";
 import {
   commitSnapshotDistributionPanels,
   createSnapshotDistributionPanelElements,
   EMPTY_SNAPSHOT_MESSAGE,
+  invalidateSnapshotDistributionJointPanels,
   prepareSnapshotDistributionJointCanvases,
   renderSnapshotDistributionJointPanels,
   syncSnapshotDistributionSelection,
@@ -16,16 +27,11 @@ import {
   buildSnapshotDistributionModelCooperatively,
   type SnapshotDistributionModel,
 } from "./snapshot-distributions";
-import type { TerrainMode } from "./terrain";
 import type { ClassifierDescriptor, MempoolSnapshot } from "./types";
 
-const DATA_GROUP_LIMIT = 5;
+export type { SnapshotDistributionSelection } from "./snapshot-distribution-view-state";
 
-export interface SnapshotDistributionSelection {
-  classifierId: string;
-  bucketKey: ClassifierBucketKey | null;
-  metric: TerrainMode;
-}
+const DATA_GROUP_LIMIT = 5;
 
 export interface SnapshotDistributionsView {
   prepare(
@@ -52,12 +58,6 @@ export interface SnapshotDistributionsView {
     classifierId: string,
     bucketKey: ClassifierBucketKey | null,
   ): void;
-}
-
-interface SnapshotDistributionIdentity {
-  sourceId: string;
-  observedAtMs: number;
-  classificationRevision: number;
 }
 
 const PREPARED_SNAPSHOT_VIEW = Symbol("prepared-snapshot-view");
@@ -98,33 +98,6 @@ const requiredDescendant = <T extends HTMLElement>(
   return element as T;
 };
 
-const snapshotIdentity = (
-  snapshot: MempoolSnapshot,
-): SnapshotDistributionIdentity => ({
-  sourceId: snapshot.source_id,
-  observedAtMs: snapshot.observed_at_ms,
-  classificationRevision: snapshot.classification_revision,
-});
-
-const sameSnapshotIdentity = (
-  snapshot: MempoolSnapshot,
-  identity: SnapshotDistributionIdentity,
-): boolean =>
-  snapshot.source_id === identity.sourceId &&
-  snapshot.observed_at_ms === identity.observedAtMs &&
-  snapshot.classification_revision === identity.classificationRevision;
-
-const sameSelection = (
-  left: SnapshotDistributionSelection,
-  right: SnapshotDistributionSelection,
-): boolean =>
-  left.classifierId === right.classifierId &&
-  left.bucketKey === right.bucketKey &&
-  left.metric === right.metric;
-
-const snapshotVariant = (selection: SnapshotDistributionSelection): string =>
-  `classifier=${selection.classifierId};metric=${selection.metric};groups=${PANEL_GROUP_LIMIT};dataGroups=${DATA_GROUP_LIMIT}`;
-
 export const createSnapshotDistributionsView = ({
   onSelectBucket,
 }: SnapshotDistributionsViewOptions): SnapshotDistributionsView => {
@@ -132,6 +105,10 @@ export const createSnapshotDistributionsView = ({
   const empty = requiredDescendant<HTMLElement>(root, "distribution-empty");
   const grid = requiredDescendant<HTMLElement>(root, "distribution-grid");
   const cache = new SnapshotDistributionCache();
+  const inspector = createSectionDistributionInspector(
+    root,
+    ":scope > .terrain-heading",
+  );
   const viewToken = {};
   let currentSelection: SnapshotDistributionSelection | null = null;
   let jointDensity: JointDensity | null = null;
@@ -140,10 +117,19 @@ export const createSnapshotDistributionsView = ({
   let renderEpoch = 0;
   let panels: ReturnType<typeof createSnapshotDistributionPanelElements>;
 
+  const renderDensityPanel = (
+    joint: JointDensity | null,
+    complexity: JointDensity | null,
+  ): void =>
+    renderSnapshotDistributionJointPanels(
+      panels,
+      joint,
+      complexity,
+      currentSelection?.metric ?? "count",
+    );
   const densityRenderer = createFrameSequenceRenderer([
-    () => renderSnapshotDistributionJointPanels(panels, jointDensity, null),
-    () =>
-      renderSnapshotDistributionJointPanels(panels, null, complexityDensity),
+    () => renderDensityPanel(jointDensity, null),
+    () => renderDensityPanel(null, complexityDensity),
   ]);
   const scheduleJointRender = (): void => {
     if (jointDensity !== null || complexityDensity !== null) {
@@ -153,9 +139,14 @@ export const createSnapshotDistributionsView = ({
   const cancelJointRender = densityRenderer.cancel;
 
   panels = createSnapshotDistributionPanelElements(root, scheduleJointRender);
+  installSnapshotDistributionLayoutControl(root, grid, scheduleJointRender);
 
   const syncSelection = (): void => {
-    syncSnapshotDistributionSelection(panels.composition, currentSelection);
+    syncSnapshotDistributionSelection(
+      panels.composition,
+      panels.mosaicChart,
+      currentSelection,
+    );
   };
 
   const reset = (message: string): void => {
@@ -163,6 +154,7 @@ export const createSnapshotDistributionsView = ({
     renderController = null;
     renderEpoch += 1;
     cache.reset();
+    inspector.reset();
     currentSelection = null;
     jointDensity = null;
     complexityDensity = null;
@@ -199,7 +191,7 @@ export const createSnapshotDistributionsView = ({
     descriptor,
     variant,
     model,
-    identity: snapshotIdentity(snapshot),
+    identity: snapshotDistributionIdentity(snapshot),
     [PREPARED_SNAPSHOT_VIEW]: viewToken,
   });
 
@@ -210,7 +202,11 @@ export const createSnapshotDistributionsView = ({
   ): Promise<PreparedSnapshotDistributions> => {
     signal?.throwIfAborted();
     const descriptor = classifierDescriptor(snapshot, selection.classifierId);
-    const variant = snapshotVariant(selection);
+    const variant = snapshotDistributionVariant(
+      selection,
+      PANEL_GROUP_LIMIT,
+      DATA_GROUP_LIMIT,
+    );
     if (snapshot.transaction_count === 0) {
       return preparedSnapshot(snapshot, selection, descriptor, variant, null);
     }
@@ -240,7 +236,9 @@ export const createSnapshotDistributionsView = ({
     }
 
     currentSelection = { ...selection };
+    inspector.reset();
     cancelJointRender();
+    invalidateSnapshotDistributionJointPanels(panels);
     jointDensity = null;
     complexityDensity = null;
     if (prepared.model === null) {
@@ -280,8 +278,8 @@ export const createSnapshotDistributionsView = ({
     !(
       prepared[PREPARED_SNAPSHOT_VIEW] !== viewToken ||
       prepared.snapshot !== snapshot ||
-      !sameSnapshotIdentity(snapshot, prepared.identity) ||
-      !sameSelection(prepared.selection, selection)
+      !sameSnapshotDistributionIdentity(snapshot, prepared.identity) ||
+      !sameSnapshotDistributionSelection(prepared.selection, selection)
     );
 
   const commit = (
@@ -306,12 +304,12 @@ export const createSnapshotDistributionsView = ({
     const controller = new AbortController();
     renderController = controller;
     const epoch = ++renderEpoch;
-    const identity = snapshotIdentity(snapshot);
+    const identity = snapshotDistributionIdentity(snapshot);
     const isCurrentRender = (): boolean =>
       renderController === controller &&
       renderEpoch === epoch &&
       !controller.signal.aborted &&
-      sameSnapshotIdentity(snapshot, identity);
+      sameSnapshotDistributionIdentity(snapshot, identity);
 
     cache.replaceOwner(snapshot);
     currentSelection = selection;
@@ -322,7 +320,11 @@ export const createSnapshotDistributionsView = ({
 
     try {
       const descriptor = classifierDescriptor(snapshot, selection.classifierId);
-      const variant = snapshotVariant(selection);
+      const variant = snapshotDistributionVariant(
+        selection,
+        PANEL_GROUP_LIMIT,
+        DATA_GROUP_LIMIT,
+      );
       const model =
         snapshot.transaction_count === 0
           ? null

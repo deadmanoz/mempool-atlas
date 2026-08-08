@@ -64,8 +64,14 @@ export interface ClassifierLabelPopulation {
   totalShare: number;
 }
 
-/** A bounded, largest-first sample paired with exact population aggregates. */
-export interface ClassifierLabelSamplePopulation extends ClassifierLabelPopulation {}
+export type ClassifierLabelMatchMode = "any" | "all";
+
+export interface ClassifierLabelQueryPopulation extends ClassifierLabelPopulation {
+  labelKeys: string[];
+  matchMode: ClassifierLabelMatchMode;
+  completeTransactions: MempoolTransaction[];
+  partialTransactions: MempoolTransaction[];
+}
 
 export interface ClassifierTerrainTotals {
   complete: number;
@@ -84,10 +90,9 @@ const classifierBucketsCache = new WeakMap<
   WeakMap<ClassifierDescriptor, ClassifierBucket[]>
 >();
 interface ClassifierLabelPopulationIndex {
-  rows: Uint32Array | null;
+  rows: Uint32Array;
   vsize: number;
   population: ClassifierLabelPopulation | null;
-  sample: MempoolTransaction[];
 }
 const classifierLabelPopulationsCache = new WeakMap<
   readonly MempoolTransaction[],
@@ -291,12 +296,9 @@ interface ClassifierBucketBuilder {
     {
       rows: number[];
       vsize: number;
-      sampleRows: Array<{ row: number; vsize: number; txid: string }>;
     }
   >;
 }
-
-const CLASSIFIER_LABEL_SAMPLE_LIMIT = 8;
 
 const classifierBucketCache = (
   transactions: readonly MempoolTransaction[],
@@ -335,41 +337,9 @@ const createClassifierBucketBuilder = (
   knownLabelKeys: new Set(descriptor.labels.map(({ key }) => key)),
   buckets: new Map(),
   labels: retainMarginalIndexes
-    ? new Map(
-        descriptor.labels.map(({ key }) => [
-          key,
-          { rows: [], vsize: 0, sampleRows: [] },
-        ]),
-      )
+    ? new Map(descriptor.labels.map(({ key }) => [key, { rows: [], vsize: 0 }]))
     : new Map(),
 });
-
-const addClassifierLabelSample = (
-  sampleRows: Array<{ row: number; vsize: number; txid: string }>,
-  transaction: MempoolTransaction,
-  row: number,
-): void => {
-  const candidate = { row, vsize: transaction.vsize, txid: transaction.txid };
-  const compare = (
-    left: { vsize: number; txid: string },
-    right: { vsize: number; txid: string },
-  ): number => right.vsize - left.vsize || left.txid.localeCompare(right.txid);
-  if (
-    sampleRows.length === CLASSIFIER_LABEL_SAMPLE_LIMIT &&
-    compare(candidate, sampleRows[sampleRows.length - 1]!) >= 0
-  ) {
-    return;
-  }
-  const insertion = sampleRows.findIndex(
-    (existing) => compare(candidate, existing) < 0,
-  );
-  sampleRows.splice(
-    insertion < 0 ? sampleRows.length : insertion,
-    0,
-    candidate,
-  );
-  if (sampleRows.length > CLASSIFIER_LABEL_SAMPLE_LIMIT) sampleRows.pop();
-};
 
 const addTransactionToClassifierBuckets = (
   builder: ClassifierBucketBuilder,
@@ -410,7 +380,6 @@ const addTransactionToClassifierBuckets = (
     if (label === undefined) continue;
     label.rows.push(row);
     label.vsize += transaction.vsize;
-    addClassifierLabelSample(label.sampleRows, transaction, row);
   }
   if (accumulator.observedLabelKeys !== undefined) {
     for (const labelKey of resultLabels) {
@@ -449,20 +418,15 @@ const finalizeClassifierBuckets = (
     });
 
 const finalizeClassifierLabelPopulations = (
-  transactions: readonly MempoolTransaction[],
   builder: ClassifierBucketBuilder,
 ): Map<string, ClassifierLabelPopulationIndex> =>
   new Map(
-    [...builder.labels].map(([labelKey, { rows, vsize, sampleRows }]) => [
+    [...builder.labels].map(([labelKey, { rows, vsize }]) => [
       labelKey,
       {
         rows: Uint32Array.from(rows),
         vsize,
         population: null,
-        sample: transactionIndexView(
-          transactions,
-          sampleRows.map(({ row }) => row),
-        ),
       },
     ]),
   );
@@ -475,7 +439,7 @@ const cacheClassifierBuilder = (
   classifierBucketCache(transactions).set(builder.descriptor, buckets);
   classifierLabelPopulationCache(transactions).set(
     builder.descriptor,
-    finalizeClassifierLabelPopulations(transactions, builder),
+    finalizeClassifierLabelPopulations(builder),
   );
   if (builder.bip110Rules !== null) {
     cacheBip110RuleIndex(transactions, builder.bip110Rules);
@@ -552,15 +516,11 @@ const cacheClassifierBuilderCooperatively = async (
       options.signal?.throwIfAborted();
       const entry = labelEntries[index];
       if (entry === undefined) continue;
-      const [labelKey, { rows, vsize, sampleRows }] = entry;
+      const [labelKey, { rows, vsize }] = entry;
       labels.set(labelKey, {
         rows: Uint32Array.from(rows),
         vsize,
         population: null,
-        sample: transactionIndexView(
-          transactions,
-          sampleRows.map(({ row }) => row),
-        ),
       });
       if (index + 1 < labelEntries.length) {
         await yieldAfterFinalizationSlice();
@@ -654,7 +614,7 @@ const ensureClassifierLabelPopulations = (
       addTransactionToClassifierBuckets(builder, transaction, row);
     }
   }
-  const labels = finalizeClassifierLabelPopulations(transactions, builder);
+  const labels = finalizeClassifierLabelPopulations(builder);
   cache.set(descriptor, labels);
   if (builder.bip110Rules !== null) {
     cacheBip110RuleIndex(transactions, builder.bip110Rules);
@@ -678,11 +638,9 @@ export const classifierLabelPopulation = (
   );
   if (index === undefined) return null;
   if (index.population !== null) return index.population;
-  const rows = index.rows;
-  if (rows === null) {
-    throw new Error(`Classifier label population ${labelKey} is unavailable`);
-  }
-  const entries = sortPopulation(transactionIndexView(transactions, rows));
+  const entries = sortPopulation(
+    transactionIndexView(transactions, index.rows),
+  );
   index.population = {
     transactions: entries,
     count: entries.length,
@@ -690,31 +648,88 @@ export const classifierLabelPopulation = (
     totalShare:
       transactions.length === 0 ? 0 : entries.length / transactions.length,
   };
-  index.rows = null;
   return index.population;
 };
 
+const normalizedQueryLabels = (
+  descriptor: ClassifierDescriptor,
+  labelKeys: readonly string[],
+): string[] => {
+  const selected = new Set(labelKeys);
+  return descriptor.labels.flatMap(({ key }) =>
+    selected.has(key) ? [key] : [],
+  );
+};
+
 /**
- * Return the precomputed largest transactions for one marginal label without
- * materialising and sorting the complete matching population.
+ * Resolve a multi-label query from the compact marginal row indexes built with
+ * the classifier buckets. Each matching transaction appears once, and proven
+ * labels in partial results remain selectable without treating unavailable
+ * results as matches.
  */
-export const classifierLabelSamplePopulation = (
+export const classifierLabelQueryPopulation = (
   transactions: readonly MempoolTransaction[],
   descriptor: ClassifierDescriptor,
-  labelKey: string,
-): ClassifierLabelSamplePopulation | null => {
-  const index = ensureClassifierLabelPopulations(transactions, descriptor).get(
-    labelKey,
-  );
-  if (index === undefined) return null;
-  const count = index.population?.count ?? index.rows?.length ?? 0;
+  labelKeys: readonly string[],
+  matchMode: ClassifierLabelMatchMode,
+): ClassifierLabelQueryPopulation => {
+  const normalized = normalizedQueryLabels(descriptor, labelKeys);
+  if (normalized.length === 0) {
+    return {
+      labelKeys: [],
+      matchMode,
+      transactions: [],
+      completeTransactions: [],
+      partialTransactions: [],
+      count: 0,
+      vsize: 0,
+      totalShare: 0,
+    };
+  }
+
+  const indexes = ensureClassifierLabelPopulations(transactions, descriptor);
+  const membership = new Uint16Array(transactions.length);
+  for (const labelKey of normalized) {
+    const index = indexes.get(labelKey);
+    if (index === undefined) continue;
+    for (const row of index.rows) {
+      membership[row] = (membership[row] ?? 0) + 1;
+    }
+  }
+
+  const completeRows: number[] = [];
+  const partialRows: number[] = [];
+  let vsize = 0;
+  for (let row = 0; row < membership.length; row += 1) {
+    const matches =
+      matchMode === "all"
+        ? membership[row] === normalized.length
+        : (membership[row] ?? 0) > 0;
+    if (!matches) continue;
+    const transaction = transactions[row];
+    if (transaction === undefined) continue;
+    const result = classificationResult(transaction, descriptor.id);
+    if (result === null) continue;
+    (result.state === "complete" ? completeRows : partialRows).push(row);
+    vsize += transaction.vsize;
+  }
+
+  const completeTransactions = transactionIndexView(transactions, completeRows);
+  const partialTransactions = transactionIndexView(transactions, partialRows);
+  const entries = concatenateTransactionViews(transactions, [
+    completeTransactions,
+    partialTransactions,
+  ]);
   return {
-    transactions:
-      index.population?.transactions.slice(0, CLASSIFIER_LABEL_SAMPLE_LIMIT) ??
-      index.sample,
-    count,
-    vsize: index.vsize,
-    totalShare: transactions.length === 0 ? 0 : count / transactions.length,
+    labelKeys: normalized,
+    matchMode,
+    transactions: entries,
+    completeTransactions,
+    partialTransactions,
+    count: entries.length,
+    vsize,
+    totalShare:
+      transactions.length === 0 ? 0 : entries.length / transactions.length,
   };
 };
 

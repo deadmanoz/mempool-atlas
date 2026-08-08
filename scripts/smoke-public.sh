@@ -140,6 +140,48 @@ require_cloudflare_cache_handling() {
     esac
 }
 
+stage_error_probe_number=0
+require_stage_error() {
+    local context=$1
+    local url=$2
+    local expected_status=$3
+    local expected_error=$4
+    local status
+    local cache_control
+    local headers
+    local body
+
+    stage_error_probe_number=$((stage_error_probe_number + 1))
+    headers="$temp_dir/stage-error-$stage_error_probe_number.headers"
+    body="$temp_dir/stage-error-$stage_error_probe_number.json"
+    status=$(curl --silent --show-error --max-time 30 \
+        --dump-header "$headers" \
+        --output "$body" \
+        --write-out '%{http_code}' \
+        "$url")
+    [[ "$status" == "$expected_status" ]] || {
+        printf '%s returned %s instead of %s\n' \
+            "$context" "$status" "$expected_status" >&2
+        exit 1
+    }
+    cache_control=$(require_header cache-control "$headers")
+    [[ "$cache_control" == no-store ]] || {
+        printf '%s must remain non-cacheable\n' "$context" >&2
+        exit 1
+    }
+    [[ -z $(atlas_smoke_header_value etag "$headers") ]] || {
+        printf '%s unexpectedly returned an ETag\n' "$context" >&2
+        exit 1
+    }
+    jq --exit-status --arg error "$expected_error" '
+        type == "object" and keys == ["error"] and .error == $error
+    ' "$body" >/dev/null || {
+        printf '%s returned an unexpected error body\n' "$context" >&2
+        exit 1
+    }
+    require_cloudflare_cache_bypass "$headers" "$context"
+}
+
 curl --silent --show-error --fail-with-body --max-time 30 \
     --dump-header "$temp_dir/sources.headers" \
     --output "$temp_dir/sources.json" \
@@ -241,6 +283,33 @@ jq -e --arg source_id "$source_id" '
     )
 ' "$temp_dir/manifest.json" >/dev/null
 
+population_id=$(jq --exit-status --raw-output '.population_id' \
+    "$temp_dir/manifest.json")
+require_stage_error \
+    "malformed stage content ID" \
+    "$manifest_url/stages/population/not-a-digest" \
+    400 \
+    "invalid v2 stage content ID"
+require_stage_error \
+    "current content ID on the wrong stage lane" \
+    "$manifest_url/stages/membership/$population_id" \
+    404 \
+    "v2 stage does not exist for the requested kind or classifier"
+absent_stage_id=$(printf 'atlas-smoke-absent-stage' |
+    openssl dgst -sha256 -r |
+    awk '{ print $1 }')
+if jq --exit-status --arg content_id "$absent_stage_id" \
+    'any(.stages[]; .content_id == $content_id)' \
+    "$temp_dir/manifest.json" >/dev/null; then
+    printf 'stage error probe digest unexpectedly belongs to the publication\n' >&2
+    exit 1
+fi
+require_stage_error \
+    "well-formed absent stage content ID" \
+    "$manifest_url/stages/population/$absent_stage_id" \
+    409 \
+    "requested stage is not part of the current v2 publication"
+
 stage_records="$temp_dir/stages.records"
 atlas_v2_manifest_stage_records "$temp_dir/manifest.json" >"$stage_records"
 
@@ -306,6 +375,13 @@ while IFS= read -r -d '' kind &&
     [[ "$conditional_stage_cache_control" == "$stage_cache_control_expected" ]] || {
         printf 'conditional stage returned an unexpected cache policy: %s\n' \
             "$conditional_stage_cache_control" >&2
+        exit 1
+    }
+    conditional_stage_vary=$(require_header \
+        vary "$temp_dir/stage-$stage_number-conditional.headers")
+    header_contains_token "$conditional_stage_vary" accept-encoding || {
+        printf 'conditional stage Vary header does not include Accept-Encoding: %s\n' \
+            "$stage_url" >&2
         exit 1
     }
     require_cloudflare_cache_handling \

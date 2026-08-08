@@ -230,12 +230,16 @@ for (const detail of manifest.transaction_details)
   addRoute(detail.route, NO_STORE);
 
 const errorBodies = Object.freeze({
-  invalidStage: Buffer.from('{"error":"invalid v2 stage request"}'),
-  notFound: Buffer.from('{"error":"not found"}'),
+  invalidStage: Buffer.from('{"error":"invalid v2 stage content ID"}'),
+  notFound: Buffer.from(
+    '{"error":"v2 stage does not exist for the requested kind or classifier"}',
+  ),
   queryNotSupported: Buffer.from(
     '{"error":"query-dependent v2 representations are not supported"}',
   ),
-  superseded: Buffer.from('{"error":"stage is not current"}'),
+  superseded: Buffer.from(
+    '{"error":"requested stage is not part of the current v2 publication"}',
+  ),
 });
 const transactionDetailPath =
   /^\/api\/v2\/sources\/[^/]+\/transactions\/([0-9a-f]{64})$/;
@@ -303,6 +307,25 @@ const server = createServer((request, response) => {
     return;
   }
   const body = routes.get(url.pathname);
+  const detailMatch = url.pathname.match(transactionDetailPath);
+  if (
+    detailMatch !== null &&
+    (body === undefined || FIXTURE_DETAIL_STATUS !== 200)
+  ) {
+    const txid = detailMatch[1];
+    const detailStatus = body === undefined ? 404 : FIXTURE_DETAIL_STATUS;
+    const detailError =
+      detailStatus === 404
+        ? `transaction "${txid}" is not in the current snapshot`
+        : `transaction "${txid}" is present but has no policy assessment in the current snapshot`;
+    send(
+      request,
+      response,
+      detailStatus,
+      Buffer.from(JSON.stringify({ error: detailError })),
+    );
+    return;
+  }
   if (body === undefined) {
     const status = stageErrorStatus(url.pathname);
     if (status === 409) {
@@ -317,22 +340,6 @@ const server = createServer((request, response) => {
     );
     return;
   }
-  const detailMatch = url.pathname.match(transactionDetailPath);
-  if (detailMatch !== null && FIXTURE_DETAIL_STATUS !== 200) {
-    const txid = detailMatch[1];
-    const detailError =
-      FIXTURE_DETAIL_STATUS === 404
-        ? `transaction "${txid}" is not in the current snapshot`
-        : `transaction "${txid}" is present but has no policy assessment in the current snapshot`;
-    send(
-      request,
-      response,
-      FIXTURE_DETAIL_STATUS,
-      Buffer.from(JSON.stringify({ error: detailError })),
-    );
-    return;
-  }
-
   const bytes = body.bytes;
   const etag = `W/"${body.contentId}"`;
   const headers = {

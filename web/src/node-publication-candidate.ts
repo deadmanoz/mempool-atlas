@@ -149,6 +149,19 @@ export const prepareNodePublicationCandidate = async (
     requestedState.txid === null
       ? undefined
       : findSnapshotTransaction(snapshot, requestedState.txid);
+  const selectedDescriptor = classifierDescriptor(
+    snapshot,
+    selectedClassifierId,
+  );
+  const requestedLabels = new Set(requestedState.classifierLabels);
+  const selectedClassifierLabels =
+    selectedDescriptor?.labels.flatMap(({ key }) =>
+      requestedLabels.has(key) ? [key] : [],
+    ) ?? [];
+  const selectedClassifierMatch =
+    selectedDescriptor?.semantics === "multi_label"
+      ? requestedState.classifierMatch
+      : "any";
   let selectedClassifierBucketKey: ClassifierBucketKey | null = null;
   let selectedInspector: TerrainSelection;
   if (selectedClassifierId === KNOTS_BIP110_CLASSIFIER_ID) {
@@ -184,6 +197,8 @@ export const prepareNodePublicationCandidate = async (
     viewState: {
       source: source.source_id,
       classifier: selectedClassifierId,
+      classifierLabels: selectedClassifierLabels,
+      classifierMatch: selectedClassifierMatch,
       selection:
         selectedClassifierId === KNOTS_BIP110_CLASSIFIER_ID
           ? selectedInspector

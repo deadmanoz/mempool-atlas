@@ -42,19 +42,31 @@ lenses, and serves source-local node and comparison views.
 - `web/src/source-summary-styles.css` owns the node source-summary component
   and all of its breakpoints.
 - `web/src/classification-overview-view.ts` owns the node lens selector,
-  methodology, marginal-label controls, and classification summary subtree.
+  multi-label ANY/ALL controls, lens semantics guidance, and classification
+  summary subtree. `web/src/classification-query-view.ts` owns the full-result
+  Canvas listbox, hit testing, keyboard traversal, resize lifecycle, and
+  transaction-local selection paint. `web/src/classifier-terrain.ts` owns the
+  compact marginal indexes and deduplicated ANY/ALL query resolution.
 - `web/src/snapshot-distributions.ts` owns aggregate-only distribution models
   and caching. The two `*-distributions-view.ts` modules own their complete
-  node and comparison distribution DOM subtrees.
-- `web/src/comparison-policy-view.ts` owns source-local policy aggregates and
-  bounded samples. `web/src/comparison-view-transition.ts` classifies
+  node and comparison distribution DOM subtrees;
+  `snapshot-distribution-view-state.ts` owns the node view's identity,
+  selection, and variant state.
+- `web/src/distribution-interaction.ts` owns the section-local tooltip and pin
+  lifecycle. `web/src/distribution-chart-inspection.ts` owns exact bin
+  descriptions and pointer hit-testing shared by SVG spectra and Canvas
+  densities. `web/src/snapshot-distribution-layout-control.ts` owns the node
+  distribution grid's persisted desktop column preference.
+- `web/src/comparison-policy-view.ts` owns per-node policy aggregates and
+  filter totals. `web/src/comparison-view-transition.ts` classifies
   interactive state changes before the controller applies effects, including
   observed asynchronous canvas scheduling.
-- `web/src/node-sample-selection.ts` resolves constant-time eligibility when a
-  selected transaction is pinned into a bounded node sample.
-- `web/src/styles.css` owns shared shell, header, toolbar, terrain, and chart
-  rules, including their breakpoints. `web/src/comparison-styles.css` adds only
-  comparison-page selectors.
+- `web/src/terrain-selection-view.ts` restores the last bounded terrain paint
+  and overlays transaction-local focus without replaying the full population.
+- `web/src/styles.css` owns shared shell, header, toolbar, and terrain rules,
+  including their breakpoints. `web/src/distribution-styles.css` owns shared
+  Snapshot distributions and chart rules, including their breakpoints.
+  `web/src/comparison-styles.css` adds only comparison-page selectors.
 - `web/e2e/` holds Playwright viewport, early-metadata, and layout-shift
   coverage driven by the fixture Atlas API in `web/dev/fixture-server.mjs`.
 - `web/perf/` holds the production-build performance server, Playwright
@@ -187,15 +199,28 @@ newer and npm 10 or newer.
   multi-label populations as marginal and potentially overlapping.
 - Use the selected classifier for both the Classifications overview and Buckets
   view. Never combine classifier taxonomies.
+- Let Classifications combine labels from the active classifier with ANY or ALL
+  and render every matching transaction once in a selectable Canvas. Keep
+  complete and partial matches separate, exclude unavailable results, preserve
+  the query in canonical URL state, and show only selected-transaction detail
+  in its inspector. Keep Buckets label and rule controls independent.
 - Each transaction appears in exactly one terrain region. Lenses keep complete,
   partial, and unavailable results separate. Transaction properties uses broad
   script-profile presentation groups while retaining exact labels on each
   transaction; smaller generic lenses use exact observed label-set buckets.
 - Preserve one selectable Canvas block per transaction inside its terrain group.
+  Selecting a transaction preserves the active label, rule, and bucket
+  emphasis and adds a transaction-local highlight; only an explicit region or
+  filter control may restyle the wider terrain.
   Keep section and bucket area proportional to the selected count or virtual
   size metric, suppress labels that cannot fit, cache classifier partitions
-  across interactions, and keep filters, samples, and transaction evidence
-  behind explicit disclosure.
+  across interactions, and keep the selected transaction detail persistently
+  visible in the inspector. Membership filters apply directly without a
+  separate confirmation action, and the count/vsize metric remains a prominent
+  snapshot-wide control because it also changes the distribution panels. In
+  the inspector, show label and rule controls before their population outcome,
+  then show the selected transaction's membership facts and active-lens result.
+  Do not repeat every classifier as a cross-lens detail-card stack.
 - Keep BIP-110 as a specialist adapter: complete violations use one canonical
   exact `violated_rules` bucket, while partial violations use separate
   proven-plus-unknown buckets.
@@ -204,13 +229,29 @@ newer and npm 10 or newer.
 - Comparison merge-joins two independent sorted snapshots in the browser.
 - Common transactions retain both source-local witness variants and policy
   assessments.
+- Comparison policy focus highlights matching transactions inside the selected
+  membership region. Selecting a transaction preserves that focus and adds
+  only a local highlight; explicit region, node-policy, or filter changes may
+  repaint the wider comparison canvas.
 - Absence from a source is not evidence of rejection, filtering, or relay
   causality.
-- Keep source, classifier, optional policy region, filter, and optional
-  transaction in canonical URL state.
+- Keep source, classifier, Classifications label set and match mode, optional
+  policy region, filter, and optional transaction in canonical URL state.
+- Present Node and Compare as the shared primary view switch in both page
+  headers, with the active product visually explicit at every breakpoint.
 - Avoid one DOM node or a duplicate union-sized index per transaction.
 - Cache distribution and comparison-policy aggregates by their semantic input
-  identity. Keep only bounded transaction samples in derived browser models.
+  identity. Keep transaction selection direct rather than deriving parallel
+  sample tables.
+- Keep distribution inspection presentation-only. Spectra and densities use
+  one tab stop per chart, pointer hit-testing, arrow-key region traversal, and
+  one pinned region without rescanning transactions or creating per-bin DOM.
+- Let desktop users persist an auto, one-, two-, or three-column Snapshot
+  distributions layout without rebuilding aggregate models. Narrow viewports
+  always render one readable column.
+- Position distribution ticks from their raw logarithmic domains and describe
+  exact bin bounds in inspectors. Do not present the 83-byte serialized
+  OP_RETURN script reference as an `op_return_bytes` payload threshold.
 - Keep `main.ts` and `comparison-main.ts` focused on page lifecycle and
   cross-view orchestration. Visible distribution subtrees own their lookup,
   rendering, event, resize, cache, and reset lifecycles.

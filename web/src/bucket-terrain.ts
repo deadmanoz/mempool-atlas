@@ -726,6 +726,56 @@ const createBucketTerrainRasterCache = <
   return created;
 };
 
+const paintSelectedTerrainGlyph = <
+  SectionKey extends string,
+  RegionKey extends string,
+>(
+  context: CanvasRenderingContext2D,
+  glyph: BucketTerrainGlyph<SectionKey, RegionKey>,
+): void => {
+  const { x, y, width, height } = glyph.rect;
+  const inset = Math.min(1.5, width / 6, height / 6);
+  context.save();
+  context.globalAlpha = 1;
+  context.fillStyle = "#f7ff6a";
+  context.shadowColor = "#f7ff6a";
+  context.shadowBlur = 12;
+  context.globalAlpha = 0.28;
+  context.fillRect(x, y, width, height);
+  context.globalAlpha = 1;
+  context.strokeStyle = "#f7ff6a";
+  context.lineWidth = 2.5;
+  context.strokeRect(x, y, width, height);
+  if (width > inset * 4 && height > inset * 4) {
+    context.shadowBlur = 0;
+    context.strokeStyle = "#ffffff";
+    context.lineWidth = 1;
+    context.strokeRect(
+      x + inset,
+      y + inset,
+      width - inset * 2,
+      height - inset * 2,
+    );
+  }
+  context.restore();
+};
+
+export const paintBucketTerrainSelection = <
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+>(
+  context: CanvasRenderingContext2D,
+  layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
+  selectedTxid: string | null,
+): boolean => {
+  if (selectedTxid === null) return false;
+  const selectedGlyph = layout.glyphs.find(({ txid }) => txid === selectedTxid);
+  if (selectedGlyph === undefined) return false;
+  paintSelectedTerrainGlyph(context, selectedGlyph);
+  return true;
+};
+
 export const paintBucketTerrain = <
   SectionKey extends string,
   RegionKey extends string,
@@ -794,20 +844,7 @@ export const paintBucketTerrain = <
         );
       }
     }
-    const selectedGlyph =
-      selectedTxid === null
-        ? undefined
-        : layout.glyphs.find(({ txid }) => txid === selectedTxid);
-    if (selectedGlyph !== undefined) {
-      context.strokeStyle = "#f7ff6a";
-      context.lineWidth = 2.5;
-      context.strokeRect(
-        selectedGlyph.rect.x,
-        selectedGlyph.rect.y,
-        selectedGlyph.rect.width,
-        selectedGlyph.rect.height,
-      );
-    }
+    paintBucketTerrainSelection(context, layout, selectedTxid);
     return;
   }
   context.clearRect(0, 0, layout.width, layout.height);
@@ -932,16 +969,7 @@ export const paintBucketTerrain = <
     }
   }
   context.globalAlpha = 1;
-  if (selectedGlyph !== null) {
-    context.strokeStyle = "#f7ff6a";
-    context.lineWidth = 2.5;
-    context.strokeRect(
-      selectedGlyph.rect.x,
-      selectedGlyph.rect.y,
-      selectedGlyph.rect.width,
-      selectedGlyph.rect.height,
-    );
-  }
+  if (selectedGlyph !== null) paintSelectedTerrainGlyph(context, selectedGlyph);
 };
 
 export const renderBucketTerrain = <

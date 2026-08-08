@@ -238,8 +238,6 @@ export const createSourceCardView = (
   );
   const classificationNote = document.createElement("p");
   classificationNote.className = "source-card-classification";
-  const policyNote = document.createElement("p");
-  policyNote.className = "source-card-policy";
   const placeholderNote = document.createElement("p");
   placeholderNote.className = "source-card-placeholder";
   const warning = document.createElement("p");
@@ -251,7 +249,6 @@ export const createSourceCardView = (
     nodeLink,
     facts,
     classificationNote,
-    policyNote,
     placeholderNote,
     warning,
   );
@@ -328,11 +325,6 @@ export const createSourceCardView = (
     classificationNote.hidden = false;
     classificationNote.dataset.state = classification.state;
     classificationNote.textContent = `${classification.compact}. ${classification.summary}`;
-    policyNote.hidden = false;
-    policyNote.textContent =
-      snapshot === null
-        ? "Policy details arrive with the complete snapshot."
-        : `Policy: ${snapshot.bip110_summary.evaluator_id} ${snapshot.bip110_summary.evaluator_version}.`;
     placeholderNote.hidden = message === null;
     placeholderNote.textContent = message ?? "";
     warning.hidden = source.availability !== "stale";
@@ -355,7 +347,6 @@ export const createSourceCardView = (
     setSourceFact(membershipFact, "Waiting");
     setSourceFact(classificationFact, "Waiting");
     classificationNote.hidden = true;
-    policyNote.hidden = true;
     placeholderNote.hidden = false;
     placeholderNote.textContent = message;
     warning.hidden = true;

@@ -58,54 +58,138 @@ describe("classification overview view", () => {
       <div id="method"></div>
       <div id="empty"></div>
       <div id="labels"></div>
-      <div id="summary"></div>`;
+      <div id="summary"></div>
+      <div id="selected"></div>
+      <button id="any"></button>
+      <button id="all"></button>
+      <button id="clear"></button>`;
   });
 
-  it("normalizes selection and keeps label controls stable across renders", () => {
-    const onSelectLabel = vi.fn();
+  it("normalizes a multi-label query and keeps label controls stable", () => {
+    const onToggleLabel = vi.fn();
+    const onSetMatchMode = vi.fn();
+    const onClear = vi.fn();
     const lensSelect = document.querySelector<HTMLSelectElement>("#lens");
     const method = document.querySelector<HTMLElement>("#method");
     const empty = document.querySelector<HTMLElement>("#empty");
     const labels = document.querySelector<HTMLElement>("#labels");
     const summary = document.querySelector<HTMLElement>("#summary");
+    const selectedSummary = document.querySelector<HTMLElement>("#selected");
+    const matchAny = document.querySelector<HTMLButtonElement>("#any");
+    const matchAll = document.querySelector<HTMLButtonElement>("#all");
+    const clear = document.querySelector<HTMLButtonElement>("#clear");
     if (
       lensSelect === null ||
       method === null ||
       empty === null ||
       labels === null ||
-      summary === null
+      summary === null ||
+      selectedSummary === null ||
+      matchAny === null ||
+      matchAll === null ||
+      clear === null
     ) {
       throw new Error("missing classification overview fixture");
     }
     const view = createClassificationOverviewView(
-      { lensSelect, method, empty, labels, summary },
-      onSelectLabel,
+      {
+        lensSelect,
+        method,
+        empty,
+        labels,
+        summary,
+        selectedSummary,
+        matchAny,
+        matchAll,
+        clear,
+      },
+      onToggleLabel,
+      onSetMatchMode,
+      onClear,
     );
 
-    view.render(null, { classifierId: "missing", label: null });
+    view.render(null, {
+      classifierId: "missing",
+      labels: [],
+      matchMode: "any",
+    });
     expect(method.textContent).toContain("Waiting for classifier catalog");
 
     const selection = view.render(snapshot(), {
       classifierId: "missing",
-      label: "missing",
+      labels: ["second", "missing", "first", "second"],
+      matchMode: "all",
     });
     expect(selection).toEqual({
       classifierId: "transaction_shape",
-      label: "second",
+      labels: ["first", "second"],
+      matchMode: "all",
     });
     expect(lensSelect.value).toBe("transaction_shape");
-    expect(method.textContent).toContain("Heuristic signals");
+    expect(method.textContent).toBe("Labels can overlap within this lens.");
+    expect(method.textContent).not.toContain("version");
     expect(summary.textContent).toContain("2 complete");
+    expect(selectedSummary.textContent).toContain("2 labels selected");
     const second = labels.querySelector<HTMLButtonElement>(
       'button[data-label="second"]',
     );
     expect(second?.getAttribute("aria-pressed")).toBe("true");
     second?.click();
-    expect(onSelectLabel).toHaveBeenCalledWith("second");
+    expect(onToggleLabel).toHaveBeenCalledWith("second");
+    expect(matchAny.disabled).toBe(false);
+    expect(matchAll.disabled).toBe(false);
+    expect(matchAll.getAttribute("aria-pressed")).toBe("true");
+    matchAny.click();
+    clear.click();
+    expect(onSetMatchMode).toHaveBeenCalledWith("any");
+    expect(onClear).toHaveBeenCalledOnce();
 
     view.render(snapshot(), selection);
     expect(
       labels.querySelector<HTMLButtonElement>('button[data-label="second"]'),
     ).toBe(second);
+  });
+
+  it("keeps an empty selection instead of choosing the largest label", () => {
+    const lensSelect = document.querySelector<HTMLSelectElement>("#lens")!;
+    const method = document.querySelector<HTMLElement>("#method")!;
+    const empty = document.querySelector<HTMLElement>("#empty")!;
+    const labels = document.querySelector<HTMLElement>("#labels")!;
+    const summary = document.querySelector<HTMLElement>("#summary")!;
+    const selectedSummary = document.querySelector<HTMLElement>("#selected")!;
+    const matchAny = document.querySelector<HTMLButtonElement>("#any")!;
+    const matchAll = document.querySelector<HTMLButtonElement>("#all")!;
+    const clear = document.querySelector<HTMLButtonElement>("#clear")!;
+    const view = createClassificationOverviewView(
+      {
+        lensSelect,
+        method,
+        empty,
+        labels,
+        summary,
+        selectedSummary,
+        matchAny,
+        matchAll,
+        clear,
+      },
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+    );
+
+    expect(
+      view.render(snapshot(), {
+        classifierId: "transaction_shape",
+        labels: [],
+        matchMode: "all",
+      }),
+    ).toEqual({
+      classifierId: "transaction_shape",
+      labels: [],
+      matchMode: "all",
+    });
+    expect(labels.querySelectorAll('[aria-pressed="true"]')).toHaveLength(0);
+    expect(clear.disabled).toBe(true);
+    expect(matchAll.disabled).toBe(true);
   });
 });

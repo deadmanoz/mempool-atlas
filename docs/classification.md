@@ -277,8 +277,19 @@ their existing meaning.
 
 The browser presents one classifier lens at a time through a shared selector.
 That selection drives both the Classifications overview and the Buckets view.
-Every lens remains visible in transaction-detail cards. Atlas never forms
-Cartesian-product regions across classifiers.
+Atlas never forms Cartesian-product regions across classifiers. Changing the
+selected lens changes the classifier outcome shown for the selected transaction;
+the inspector does not render a cross-lens card stack.
+
+In Classifications, each declared label is an independent toggle. ANY matches
+at least one selected label and ALL matches every selected label. ALL is
+available when at least two labels are selected from a multi-label descriptor;
+other classifier semantics normalize to ANY. Each matching transaction appears
+once in the full query result, with complete and partial populations rendered
+in separate Canvas sections. A proven label in a partial result remains
+queryable, while unavailable results never match. Selecting a block by pointer
+or keyboard opens only the transaction's membership facts and active-lens
+result. The label set and match mode are canonical URL state.
 
 For an exact, heuristic, or fingerprint lens, Buckets partitions transactions
 by result coverage and a lens-specific presentation adapter. Complete,
@@ -298,10 +309,12 @@ The terrain preserves one selectable block per transaction inside its group.
 Section, bucket, and transaction area remain proportional to transaction count
 or virtual size, while density-aware spacing prevents the blocks from
 overwhelming the grouping hierarchy. Labels appear only where their region can
-display them cleanly, and marginal filters, samples, and transaction evidence
-remain available through progressive disclosure. Classifier partitions are
-cached for the current snapshot so selecting a group does not regroup and
-resort the full mempool.
+display them cleanly. Marginal filters remain available through progressive
+disclosure, while the selected transaction's facts and evidence remain directly
+visible in the inspector. The snapshot-wide count/vsize metric controls both
+terrain area and distribution weighting. Classifier partitions are cached for
+the current snapshot so selecting a group does not regroup and resort the full
+mempool.
 
 Selecting `knots_bip110` activates the specialist policy presentation. It uses
 compatible, indeterminate, unavailable, exact violated-rule-set, and partial
@@ -341,15 +354,24 @@ including inherited signaling; it is deliberately distinct from the exact
 Derived facts arrive progressively in the nullable `structure` object,
 computed from the same raw transaction bytes fetched for classification:
 
-| Fact | Definition |
-| --- | --- |
-| `input_count` | Number of transaction inputs |
-| `output_count` | Number of transaction outputs |
-| `op_return_bytes` | Sum of decoded pushed bytes across OP_RETURN output scripts; if a tail is not valid push-only script, count its serialized bytes after OP_RETURN |
-| `output_sats` | Sum of all output values in satoshis |
-| `witness_bytes` | Serialized total size minus base size |
+| Fact              | Definition                                                                                                                                                                                                      |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `input_count`     | Number of transaction inputs                                                                                                                                                                                    |
+| `output_count`    | Number of transaction outputs                                                                                                                                                                                   |
+| `op_return_bytes` | Sum across OP_RETURN outputs. When a tail decodes entirely to pushes, count the decoded pushed bytes; if decoding fails or any non-push opcode is present, count that output's serialized bytes after OP_RETURN |
+| `output_sats`     | Sum of all output values in satoshis                                                                                                                                                                            |
+| `witness_bytes`   | Serialized total size minus base size                                                                                                                                                                           |
 
 `structure` is non-null exactly when classifier results are present for the
 transaction, and it carries forward between snapshots only while the exact
 `txid` and `wtxid` survive. Panels that consume derived facts state how many
 transactions they cover rather than treating missing facts as zeros.
+
+The Data carriage distribution therefore plots a transaction-total hybrid
+carried-byte fact, not serialized script size and not a per-output policy
+limit. Its 40-byte reference describes Bitcoin Core 0.9 and 0.10's pushed-data
+default. Its 80-byte reference describes Bitcoin Core 0.11's pushed-data
+default and explains that a conventional 80-byte single push occupies an
+83-byte serialized OP_RETURN script, matching the Core 0.12–29 and BIP-110
+script-size reference. Atlas does not place an 83-byte threshold on this axis
+because that would change the measurement basis.

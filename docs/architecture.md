@@ -13,13 +13,13 @@ The editable source is [`assets/architecture.drawio`](assets/architecture.drawio
 
 Atlas runs as one process with five responsibilities:
 
-| Component | Responsibility |
-| --- | --- |
-| Membership collector | Fetch and validate one complete mempool observation per source |
-| Shared fact resolver | Resolve bounded raw transaction and prevout facts once per current generation |
-| Classifier lenses | Evaluate exact properties, heuristic shapes, data fingerprints, and BIP-110 compatibility independently |
-| Current-state publisher | Atomically expose source snapshots, lifecycle, and transaction detail |
-| Web and API server | Serve source-local data and the two browser products |
+| Component               | Responsibility                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| Membership collector    | Fetch and validate one complete mempool observation per source                                          |
+| Shared fact resolver    | Resolve bounded raw transaction and prevout facts once per current generation                           |
+| Classifier lenses       | Evaluate exact properties, heuristic shapes, data fingerprints, and BIP-110 compatibility independently |
+| Current-state publisher | Atomically expose source snapshots, lifecycle, and transaction detail                                   |
+| Web and API server      | Serve source-local data and the two browser products                                                    |
 
 Each Bitcoin node remains an independent authority for its own mempool. Atlas
 does not install software beside the node, combine source membership on the
@@ -92,11 +92,11 @@ to be a current mempool parent.
 
 The classifier reports one of three public lifecycle states:
 
-| State | Meaning |
-| --- | --- |
-| `classifying` | Eligible classification work remains for the current membership |
-| `complete` | No eligible work remains, although some results may be unavailable |
-| `paused` | A systemic or internal failure stopped this generation |
+| State         | Meaning                                                            |
+| ------------- | ------------------------------------------------------------------ |
+| `classifying` | Eligible classification work remains for the current membership    |
+| `complete`    | No eligible work remains, although some results may be unavailable |
+| `paused`      | A systemic or internal failure stopped this generation             |
 
 Membership health and classification lifecycle are independent. Replacement
 membership supersedes stale classifier work, and results from an older
@@ -107,12 +107,12 @@ generation cannot update current state.
 `src/classifiers.rs` implements four versioned lenses over the
 resolved fact set:
 
-| Lens | Method | Question answered |
-| --- | --- | --- |
-| `transaction_properties` | Exact, multi-label | Which serialized and script-family properties are present? |
-| `transaction_shape` | Heuristic, multi-label | Which explicitly defined transaction-shape patterns match? |
-| `data_protocols` | Fingerprint, multi-label | Which supported data-carrier byte patterns are present? |
-| `knots_bip110` | Policy rule set | How does this witness variant evaluate against deployed BIP-110 policy? |
+| Lens                     | Method                   | Question answered                                                       |
+| ------------------------ | ------------------------ | ----------------------------------------------------------------------- |
+| `transaction_properties` | Exact, multi-label       | Which serialized and script-family properties are present?              |
+| `transaction_shape`      | Heuristic, multi-label   | Which explicitly defined transaction-shape patterns match?              |
+| `data_protocols`         | Fingerprint, multi-label | Which supported data-carrier byte patterns are present?                 |
+| `knots_bip110`           | Policy rule set          | How does this witness variant evaluate against deployed BIP-110 policy? |
 
 The catalog, rules, thresholds, missing-fact behavior, and limitations are
 defined in [`classification.md`](classification.md). Each lens versions its
@@ -230,17 +230,33 @@ stages from different manifests. Packed columns, bitsets, and first-seen result
 dictionaries remain worker-owned, with presentation adapters exposing rows only
 on demand rather than retaining the former full-row object graph.
 
+The shared header presents Node and Compare as an equal-width primary view
+switch on both products, with the active view explicit at every breakpoint.
 The node viewer renders one source snapshot. Its default Classifications view
-lets the user select one declared lens, inspect marginal label populations, and
-open matching transaction samples. Multi-label populations can overlap. The
-browser does not combine labels from different classifiers. The dedicated
-classification overview view owns that lens selector, methodology, marginal
-label controls, and summary DOM subtree while `main.ts` coordinates it with
-the remaining node-page views.
+lets the user select one declared lens and combine its marginal labels with ANY
+or ALL. Multi-label populations can overlap, but the resulting complete and
+partial populations contain each matching transaction once. A dedicated query
+view renders the full population as selectable Canvas blocks from compact
+marginal row indexes. Proven labels in partial results remain queryable, while
+unavailable results never match. Changing only the selected transaction
+repaints its highlight without rescanning the snapshot. The browser does not
+combine labels from different classifiers.
 
-The same selection drives the Buckets view. Classifier lenses partition
-transactions by complete, partial, or unavailable coverage and a lens-specific
-presentation adapter. Transaction properties uses broad script-profile groups;
+The Classifications inspector shows only the selected transaction's membership
+facts and active-lens result. It does not repeat label controls, every classifier
+as a cross-lens detail-card stack, or a sample-transaction table. The Buckets
+inspector retains its independent marginal label and rule controls before the
+population outcome they determine. `classification-overview-view.ts` owns the
+lens selector, query controls, label cards, and semantics guidance;
+`classification-query-view.ts` owns the query summary, Canvas listbox, hit
+testing, keyboard traversal, resize lifecycle, and transaction highlight.
+`main.ts` coordinates both with the remaining node-page views.
+
+The selected classifier also drives the Buckets view, but Classifications query
+labels and match mode remain independent of Buckets label and region emphasis.
+Classifier lenses partition transactions by complete, partial, or unavailable
+coverage and a lens-specific presentation adapter. Transaction properties uses
+broad script-profile groups;
 its exact labels remain marginal and transaction-level. Smaller generic lenses
 retain exact observed label-set buckets. Every transaction belongs to exactly
 one terrain region.
@@ -268,8 +284,29 @@ banner above the explore controls names the retained observation's age and poll
 failure when a source is stale and reuses the paused-classification summary when
 assessments are missing.
 
+Every aggregate region participates in one section-local inspection surface.
+Composition and mosaic regions expose their exact count, virtual size, and
+share, while each spectrum or density chart remains one keyboard tab stop with
+arrow-key bin traversal. Pointer movement hit-tests the existing SVG or Canvas
+raster; clicking a plotted region pins its inspector until it is cleared or the
+view owner changes. Inspection is presentation-only: it does not rebuild an
+aggregate model, rescan transactions, alter filters, or add per-bin DOM nodes.
+On desktop, a persisted presentation control lets the user keep the responsive
+grid or explicitly arrange the nine panels in one, two, or three columns. The
+single-column layout gives every chart the full content width. Narrow viewports
+always retain one readable column regardless of the stored desktop preference.
+The node distribution view delegates this presentation-only preference to
+`snapshot-distribution-layout-control.ts`.
+Axes derive positions from their raw logarithmic domains and preserve exact bin
+bounds in the inspector. Data-carriage reference ticks mark 40 pushed bytes and
+80 pushed bytes; the latter explains the conventional 83-byte serialized
+script without representing 83 as a carried-byte bin boundary.
+
 The node and comparison distribution sections each own their complete DOM,
 cache, resize, rendering, and reset lifecycle behind a small view interface.
+When a new model commits, each view synchronously retires the previous density
+canvas and its inspection metadata before scheduling the replacement paint, so
+old cells cannot remain visible or interactive beside new panel content.
 The page entry points retain source loading, URL state, and coordination between
 views rather than accumulating panel-specific implementation.
 
@@ -283,17 +320,24 @@ indexes for all seven marginal rule populations. The terrain keeps one logical
 glyph per transaction for hit testing, while two bounded per-layout canvas
 rasters let rule changes compose dim and highlighted regions without replaying
 every glyph. Changing the layout size, metric, or selection kind replaces that
-raster pair. Fee rate by age remains a secondary view.
+raster pair. Selecting a transaction does not replace the active label, rule,
+or bucket emphasis. It repaints the existing composition with one local glow,
+while explicit region and filter controls remain the only interactions that
+restyle the wider terrain. Fee rate by age remains a secondary view.
 
 The comparison page fetches two independent snapshots and merge-joins their
 sorted `txid` arrays in the browser. It derives present-in-both and two
 observed-only regions without creating a server-side comparison object. One
-policy projection pass builds source-local aggregate rows, including separate
-left and right policy views for transactions common to both snapshots. Exact
-and partial violation signatures remain separate, marginal rule counts may
-overlap, and filter samples retain at most twelve deterministic entries.
-Repeated filter selections reuse the aggregate and bounded sample. Mirrored
-source-local distribution panels render each side's complete snapshot on
+policy projection pass builds per-node aggregate rows, including separate left
+and right policy views for transactions common to both snapshots. Exact and
+partial violation signatures remain separate, marginal rule counts may
+overlap, and repeated filter selections reuse aggregate-only totals. The
+prominent policy-focus toolbar owns those filters and makes their relationship
+to the focused counts and highlighted overlap-map population explicit. An
+explicit policy-focus change repaints the selected region, while selecting a
+transaction reuses that focused base and adds only a local highlight. The
+policy focus remains separate from the node-by-node distribution scope
+selector. Mirrored distribution panels render each node's complete snapshot on
 shared fixed axes using the same browser-derived builders as the node viewer
 across all nine questions; the two populations are summarized independently
 and never merged.
@@ -311,8 +355,11 @@ sampling, workspace, and panel geometry prevents later derivation from
 displacing the interactive comparison as those sections populate.
 
 Both products keep source, classifier or policy selection, and optional
-transaction state in the URL. Snapshot and detail requests use generation
-guards so obsolete responses cannot replace a newer source or pair selection.
+transaction state in the URL. The node URL also keeps the selected
+Classifications label set and match mode. Repeated `label` parameters are
+normalized against the selected catalog descriptor, and `match=all` is emitted
+only when applicable. Snapshot and detail requests use generation guards so
+obsolete responses cannot replace a newer source or pair selection.
 On the comparison page, changing only the selected transaction reuses the
 current population view. Repeating the same interactive selection is a true
 no-op, while a refreshed snapshot pair still reapplies state and reloads detail

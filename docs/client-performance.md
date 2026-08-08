@@ -89,7 +89,10 @@ from the 40,000,000-byte and 60 MiB complete-model ceilings.
 Canvas backing stores are outside the V8 heap and worker-inclusive measurements.
 Each retained specialist raster is therefore capped at 4,194,304 pixels; the
 dim/highlight pair has a nominal 32 MiB RGBA ceiling even on high-density large
-displays.
+displays. The node terrain may retain one additional current base at the same
+pixel cap so transaction-only selection restores the existing composition and
+paints one local focus marker without replaying every transaction. That base
+has a nominal 16 MiB RGBA ceiling and is discarded with the terrain layout.
 
 The memory API depends on Chrome's Performance Manager, which is not present in
 headless Chromium. The performance matrix therefore uses a normal Chromium
@@ -224,6 +227,9 @@ setup, then cycles all seven rule controls inside a dedicated responsiveness
 interval. The release gate covers both the synchronous handlers and the cached
 visible repaint. Replacement preparation and commit run first in independent
 intervals so specialist terrain state cannot contaminate their measurements.
+Transaction selection is a separate visual contract: it preserves the active
+label, rule, or bucket emphasis and adds one local highlight instead of using a
+whole-terrain restyle as a shortcut for the interaction gate.
 
 After the complete memory sample, each stable node run activates the fee-rate
 by age lens and waits for its 70,000-row canvas to paint, then submits a

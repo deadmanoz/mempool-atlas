@@ -20,10 +20,6 @@
               <span id="atlas-version" class="atlas-version">v…</span>
             </div>
             <p>Transaction Classifications</p>
-            <nav class="product-nav" aria-label="Mempool Atlas products">
-              <a href="./" aria-current="page">Node</a>
-              <a id="compare-link" href="./compare/">Compare</a>
-            </nav>
           </div>
         </div>
 
@@ -67,6 +63,17 @@
         <button id="refresh" class="refresh-button" type="button">
           Refresh
         </button>
+
+        <nav class="product-nav" aria-label="Atlas view">
+          <a href="./" aria-current="page">
+            <strong>Node</strong>
+            <span>Single snapshot</span>
+          </a>
+          <a id="compare-link" href="./compare/">
+            <strong>Compare</strong>
+            <span>Two snapshots</span>
+          </a>
+        </nav>
       </header>
 
       <section
@@ -164,6 +171,18 @@
           ></select>
         </label>
 
+        <div class="toolbar-metric" role="group" aria-label="Snapshot metric">
+          <span class="toolbar-label">Snapshot metric</span>
+          <div class="segmented compact">
+            <button id="mode-count" type="button" aria-pressed="true">
+              Count
+            </button>
+            <button id="mode-vsize" type="button" aria-pressed="false">
+              vsize
+            </button>
+          </div>
+        </div>
+
         <div class="coverage-block">
           <div
             id="classification-lifecycle"
@@ -225,6 +244,49 @@
               The first complete mempool snapshot is being collected.
             </p>
             <div
+              id="classification-query-controls"
+              class="classification-query-controls"
+            >
+              <p
+                id="classification-selection-summary"
+                class="classification-selection-summary"
+                aria-live="polite"
+              >
+                Choose labels to reveal their transactions.
+              </p>
+              <div
+                class="classification-match-control"
+                role="group"
+                aria-label="Match selected labels"
+              >
+                <span>Match</span>
+                <button
+                  id="classification-match-any"
+                  type="button"
+                  aria-pressed="true"
+                  disabled
+                >
+                  ANY
+                </button>
+                <button
+                  id="classification-match-all"
+                  type="button"
+                  aria-pressed="false"
+                  disabled
+                >
+                  ALL
+                </button>
+              </div>
+              <button
+                id="classification-clear"
+                class="classification-clear"
+                type="button"
+                disabled
+              >
+                Clear selection
+              </button>
+            </div>
+            <div
               id="classification-labels"
               class="classification-labels"
               aria-label="Classifier labels"
@@ -233,6 +295,67 @@
               Labels within a multi-label classifier can overlap. Atlas does not
               combine independent classifier taxonomies.
             </p>
+
+            <section
+              id="classification-query"
+              class="classification-query"
+              aria-labelledby="classification-query-heading"
+            >
+              <header class="classification-query-heading">
+                <div>
+                  <p class="eyebrow">Query result</p>
+                  <h3 id="classification-query-heading">
+                    Matching transactions
+                  </h3>
+                </div>
+                <p
+                  id="classification-query-summary"
+                  class="classification-query-summary"
+                  aria-live="polite"
+                >
+                  No label query selected.
+                </p>
+              </header>
+              <p id="classification-query-empty" class="empty-state">
+                Choose one or more labels above to reveal their transactions.
+              </p>
+              <div
+                id="classification-query-stage"
+                class="canvas-wrap classification-query-stage"
+                role="listbox"
+                tabindex="0"
+                aria-label="Matching classifier transactions"
+                aria-activedescendant="classification-query-active-option"
+                hidden
+              >
+                <canvas
+                  id="classification-query-canvas"
+                  aria-hidden="true"
+                ></canvas>
+                <div
+                  id="classification-query-regions"
+                  class="terrain-regions"
+                  aria-hidden="true"
+                ></div>
+                <div
+                  id="classification-query-active-option"
+                  class="visually-hidden"
+                  role="option"
+                  aria-selected="false"
+                >
+                  No matching transactions
+                </div>
+              </div>
+              <p id="classification-query-hint" class="visual-summary" hidden>
+                Each block is one matching transaction. Click a block for its
+                details, or focus the canvas and use the arrow keys.
+              </p>
+              <p
+                id="classification-query-navigation-status"
+                class="visually-hidden"
+                aria-live="polite"
+              ></p>
+            </section>
           </div>
 
           <div
@@ -243,9 +366,6 @@
           >
             <div class="terrain-heading">
               <div>
-                <p id="terrain-eyebrow" class="eyebrow">
-                  Selected classifier lens
-                </p>
                 <h2 id="terrain-title">Transaction buckets</h2>
               </div>
               <dl class="terrain-totals" aria-label="Classification totals">
@@ -342,14 +462,6 @@
                 </span>
               </label>
               <div class="filter-actions">
-                <button
-                  id="apply-filters"
-                  class="primary-action"
-                  type="submit"
-                  disabled
-                >
-                  Apply
-                </button>
                 <button id="reset-filters" type="button" disabled>Reset</button>
               </div>
             </form>
@@ -364,54 +476,18 @@
           </div>
         </section>
 
-        <aside class="inspector-panel" aria-labelledby="inspector-name">
-          <div class="inspector-heading">
-            <div>
-              <p id="inspector-eyebrow" class="eyebrow">Classifier lens</p>
-              <h2 id="inspector-name">Choose a classifier label</h2>
-            </div>
-            <span id="inspector-badge" class="policy-badge">Classifier</span>
-          </div>
-
-          <p id="inspector-description" class="rule-description">
-            Select a classifier label or bucket to inspect its population.
-          </p>
-          <p id="inspector-note" class="policy-note">
-            Each classifier declares its method, evidence boundary, and
-            limitations independently.
-          </p>
-
-          <div class="mode-row">
-            <span class="toolbar-label">Area represents</span>
-            <div class="segmented compact" aria-label="Bucket area metric">
-              <button id="mode-count" type="button" aria-pressed="true">
-                Count
-              </button>
-              <button id="mode-vsize" type="button" aria-pressed="false">
-                vsize
-              </button>
-            </div>
-          </div>
-
-          <dl class="population-metrics">
-            <div>
-              <dt>Transactions</dt>
-              <dd id="rule-count">0</dd>
-            </div>
-            <div>
-              <dt>Virtual size</dt>
-              <dd id="rule-vsize">0 vB</dd>
-            </div>
-            <div>
-              <dt>Snapshot share</dt>
-              <dd id="rule-share">0%</dd>
-            </div>
-          </dl>
-
-          <details class="inspector-disclosure filter-disclosure">
+        <aside
+          class="inspector-panel"
+          aria-label="Transaction details and classifier outcome"
+        >
+          <details
+            id="inspector-filters"
+            class="inspector-disclosure filter-disclosure"
+            open
+          >
             <summary>
               <span>Labels &amp; rules</span>
-              <small>Optional filters</small>
+              <small>Choose a population</small>
             </summary>
             <nav
               id="rule-list"
@@ -423,47 +499,57 @@
             </p>
           </details>
 
-          <details
-            id="sample-disclosure"
-            class="inspector-disclosure sample-section"
+          <section
+            id="inspector-outcome"
+            class="inspector-outcome"
+            aria-labelledby="inspector-name"
           >
-            <summary>
-              <span id="sample-heading">Sample transactions</span>
-              <small id="sample-summary">No matches</small>
-            </summary>
-            <div class="disclosure-content">
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th scope="col">Transaction</th>
-                      <th id="sample-classification-heading" scope="col">
-                        Classification
-                      </th>
-                      <th scope="col">vsize</th>
-                      <th scope="col">Fee rate</th>
-                    </tr>
-                  </thead>
-                  <tbody id="rule-transactions"></tbody>
-                </table>
+            <div class="inspector-heading">
+              <div>
+                <p id="inspector-eyebrow" class="eyebrow">Classifier lens</p>
+                <h2 id="inspector-name">Choose a classifier label</h2>
               </div>
+              <span id="inspector-badge" class="policy-badge">Classifier</span>
             </div>
-          </details>
 
-          <details
+            <p id="inspector-description" class="rule-description">
+              Select a classifier label or bucket to inspect its population.
+            </p>
+            <p id="inspector-note" class="policy-note">
+              Each classifier declares its method, evidence boundary, and
+              limitations independently.
+            </p>
+
+            <dl class="population-metrics">
+              <div>
+                <dt>Transactions</dt>
+                <dd id="rule-count">0</dd>
+              </div>
+              <div>
+                <dt>Virtual size</dt>
+                <dd id="rule-vsize">0 vB</dd>
+              </div>
+              <div>
+                <dt>Snapshot share</dt>
+                <dd id="rule-share">0%</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section
             id="transaction-disclosure"
-            class="inspector-disclosure detail-section"
+            class="detail-section"
+            aria-labelledby="detail-heading"
           >
-            <summary>
+            <header class="detail-section-heading">
               <span id="detail-heading">Selected transaction</span>
-              <small id="detail-status">Choose a sample</small>
-            </summary>
+              <small id="detail-status">Select a transaction</small>
+            </header>
             <div class="disclosure-content">
               <div id="detail-transaction" class="detail-transaction"></div>
-              <div id="detail-classifiers" class="detail-classifiers"></div>
               <ol id="detail-rules" class="detail-rules"></ol>
             </div>
-          </details>
+          </section>
         </aside>
       </div>
 
@@ -477,15 +563,59 @@
             <p class="eyebrow">Snapshot distributions</p>
             <h2>Composition, fees, size &amp; age</h2>
           </div>
-          <p class="panel-summary">
-            One node's current view. Absence from this mempool is not evidence
-            of rejection.
-          </p>
+          <div class="distribution-heading-tools">
+            <p class="panel-summary">
+              One node's current view. Absence from this mempool is not evidence
+              of rejection.
+            </p>
+            <div
+              class="distribution-column-control"
+              role="group"
+              aria-label="Snapshot distribution panel columns"
+            >
+              <span>Panel columns</span>
+              <div class="segmented compact">
+                <button
+                  id="distribution-columns-auto"
+                  type="button"
+                  aria-pressed="true"
+                >
+                  Auto
+                </button>
+                <button
+                  id="distribution-columns-1"
+                  type="button"
+                  aria-pressed="false"
+                >
+                  1
+                </button>
+                <button
+                  id="distribution-columns-2"
+                  type="button"
+                  aria-pressed="false"
+                >
+                  2
+                </button>
+                <button
+                  id="distribution-columns-3"
+                  type="button"
+                  aria-pressed="false"
+                >
+                  3
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
         <p id="distribution-empty" class="empty-state">
           The first complete mempool snapshot is being collected.
         </p>
-        <div id="distribution-grid" class="distribution-grid" hidden>
+        <div
+          id="distribution-grid"
+          class="distribution-grid"
+          data-columns="auto"
+          hidden
+        >
           <article
             class="distribution-card"
             aria-label="Composition by classifier lens"
@@ -511,9 +641,11 @@
             <h3>Fee rate × size</h3>
             <p id="joint-note" class="distribution-note">Waiting</p>
             <div class="joint-layout">
-              <div class="joint-y-axis" aria-hidden="true">
-                <span>128k+</span><span>2k</span><span>64</span>
-              </div>
+              <div
+                id="joint-y-axis"
+                class="joint-y-axis"
+                aria-hidden="true"
+              ></div>
               <div id="joint-chart" class="joint-chart-wrap">
                 <canvas
                   id="joint-canvas"
@@ -540,9 +672,11 @@
             <h3>Inputs × outputs</h3>
             <p id="complexity-note" class="distribution-note">Waiting</p>
             <div class="joint-layout">
-              <div class="joint-y-axis" aria-hidden="true">
-                <span>1k+</span><span>32</span><span>1</span>
-              </div>
+              <div
+                id="complexity-y-axis"
+                class="joint-y-axis"
+                aria-hidden="true"
+              ></div>
               <div id="complexity-chart" class="joint-chart-wrap">
                 <canvas
                   id="complexity-canvas"

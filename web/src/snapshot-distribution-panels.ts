@@ -5,6 +5,12 @@ import {
 import {
   DEFAULT_JOINT_COLOR,
   feeRateAxisRow,
+  formatByteAxisValue,
+  formatCountAxisValue,
+  formatFeeRateAxisValue,
+  formatOutputValueAxisValue,
+  formatVirtualSizeAxisValue,
+  invalidateJointChart,
   panelAxisRow,
   prepareJointChartCanvas,
   renderCompositionBars,
@@ -14,9 +20,15 @@ import {
 } from "./detail-panels";
 import {
   DATA_BYTES_TICKS,
+  DATA_BYTES_DOMAIN,
+  FEE_RATE_DOMAIN,
   FEE_RATE_TICKS,
+  IO_COUNT_DOMAIN,
   IO_COUNT_TICKS,
+  OUTPUT_VALUE_DOMAIN,
   OUTPUT_VALUE_TICKS,
+  VSIZE_DOMAIN,
+  VSIZE_TICKS,
   type JointDensity,
 } from "./fee-distribution";
 import { countFormat, formatVsize } from "./format";
@@ -47,8 +59,10 @@ export interface SnapshotDistributionPanelElements {
   dataNote: HTMLElement;
   jointChart: HTMLElement;
   jointCanvas: HTMLCanvasElement;
+  jointYAxis: HTMLElement;
   complexityChart: HTMLElement;
   complexityCanvas: HTMLCanvasElement;
+  complexityYAxis: HTMLElement;
   complexityNote: HTMLElement;
   entanglement: HTMLElement;
   entanglementNote: HTMLElement;
@@ -97,11 +111,13 @@ export const createSnapshotDistributionPanelElements = (
     dataNote: requiredDescendant<HTMLElement>(root, "data-note"),
     jointChart: requiredDescendant<HTMLElement>(root, "joint-chart"),
     jointCanvas: requiredDescendant<HTMLCanvasElement>(root, "joint-canvas"),
+    jointYAxis: requiredDescendant<HTMLElement>(root, "joint-y-axis"),
     complexityChart: requiredDescendant<HTMLElement>(root, "complexity-chart"),
     complexityCanvas: requiredDescendant<HTMLCanvasElement>(
       root,
       "complexity-canvas",
     ),
+    complexityYAxis: requiredDescendant<HTMLElement>(root, "complexity-y-axis"),
     complexityNote: requiredDescendant<HTMLElement>(root, "complexity-note"),
     entanglement: requiredDescendant<HTMLElement>(root, "entanglement-bars"),
     entanglementNote: requiredDescendant<HTMLElement>(
@@ -123,11 +139,28 @@ export const renderSnapshotDistributionJointPanels = (
   elements: SnapshotDistributionPanelElements,
   jointDensity: JointDensity | null,
   complexityDensity: JointDensity | null,
+  metric: TerrainMode,
 ): void => {
+  const metricLabel = metric === "count" ? "Transaction count" : "Virtual size";
+  const metricFormat =
+    metric === "count"
+      ? (value: number): string => `${countFormat.format(value)} tx`
+      : formatVsize;
   if (jointDensity !== null) {
     renderJointChart(elements.jointChart, elements.jointCanvas, jointDensity, {
       color: DEFAULT_JOINT_COLOR,
       emptyMessage: EMPTY_SNAPSHOT_MESSAGE,
+      keyPrefix: "snapshot:fee-size",
+      xDomain: FEE_RATE_DOMAIN,
+      yDomain: VSIZE_DOMAIN,
+      xAxisLabel: "Fee rate",
+      yAxisLabel: "Virtual size",
+      metricLabel,
+      formatXValue: formatFeeRateAxisValue,
+      formatYValue: formatVirtualSizeAxisValue,
+      formatMetric: metricFormat,
+      yAxis: elements.jointYAxis,
+      yTicks: VSIZE_TICKS,
     });
   }
   if (complexityDensity !== null) {
@@ -138,6 +171,18 @@ export const renderSnapshotDistributionJointPanels = (
       {
         color: DEFAULT_JOINT_COLOR,
         emptyMessage: "No structure facts are available yet.",
+        keyPrefix: "snapshot:input-output",
+        xDomain: IO_COUNT_DOMAIN,
+        yDomain: IO_COUNT_DOMAIN,
+        xAxisLabel: "Inputs",
+        yAxisLabel: "Outputs",
+        metricLabel,
+        shareDenominatorLabel: "transactions with structure facts",
+        formatXValue: formatCountAxisValue,
+        formatYValue: formatCountAxisValue,
+        formatMetric: metricFormat,
+        yAxis: elements.complexityYAxis,
+        yTicks: IO_COUNT_TICKS,
       },
     );
   }
@@ -156,8 +201,24 @@ export const prepareSnapshotDistributionJointCanvases = (
   }
 };
 
+export const invalidateSnapshotDistributionJointPanels = (
+  elements: SnapshotDistributionPanelElements,
+): void => {
+  invalidateJointChart(
+    elements.jointChart,
+    elements.jointCanvas,
+    elements.jointYAxis,
+  );
+  invalidateJointChart(
+    elements.complexityChart,
+    elements.complexityCanvas,
+    elements.complexityYAxis,
+  );
+};
+
 export const syncSnapshotDistributionSelection = (
   composition: HTMLElement,
+  mosaic: HTMLElement,
   selection: SnapshotDistributionPanelSelection | null,
 ): void => {
   for (const button of composition.querySelectorAll<HTMLButtonElement>(
@@ -167,11 +228,15 @@ export const syncSnapshotDistributionSelection = (
       selection?.bucketKey !== null &&
       button.dataset.classifier === selection?.classifierId &&
       button.dataset.segment === selection?.bucketKey;
-    if (selected) {
-      button.setAttribute("aria-pressed", "true");
-    } else {
-      button.removeAttribute("aria-pressed");
-    }
+    button.setAttribute("aria-pressed", String(selected));
+  }
+  for (const button of mosaic.querySelectorAll<HTMLButtonElement>(
+    "button.mosaic-column",
+  )) {
+    button.setAttribute(
+      "aria-pressed",
+      String(button.dataset.column === selection?.bucketKey),
+    );
   }
 };
 
@@ -192,49 +257,59 @@ export const commitSnapshotDistributionPanels = ({
   const lensName = descriptor?.title ?? "the selected classifier";
   const interactive = selection.classifierId !== KNOTS_BIP110_CLASSIFIER_ID;
 
-  renderSpectrumChart(
-    elements.spectrumChart,
-    model.feeSpectrum,
-    FEE_RATE_TICKS,
+  renderSpectrumChart(elements.spectrumChart, model.feeSpectrum, {
+    domain: FEE_RATE_DOMAIN,
+    ticks: FEE_RATE_TICKS,
+    axisLabel: "Fee rate",
+    metricLabel: metricNoun,
+    keyPrefix: "snapshot:fee-rate",
+    formatRangeValue: formatFeeRateAxisValue,
     metricFormat,
-    EMPTY_SNAPSHOT_MESSAGE,
-  );
+    emptyMessage: EMPTY_SNAPSHOT_MESSAGE,
+  });
   elements.spectrumNote.textContent = `Stacked ${metricNoun} per log fee-rate bin by ${lensName} bucket.`;
 
-  renderSpectrumChart(
-    elements.packageChart,
-    model.ancestorFeeSpectrum,
-    FEE_RATE_TICKS,
+  renderSpectrumChart(elements.packageChart, model.ancestorFeeSpectrum, {
+    domain: FEE_RATE_DOMAIN,
+    ticks: FEE_RATE_TICKS,
+    axisLabel: "Ancestor fee rate",
+    metricLabel: metricNoun,
+    keyPrefix: "snapshot:ancestor-fee-rate",
+    formatRangeValue: formatFeeRateAxisValue,
     metricFormat,
-    EMPTY_SNAPSHOT_MESSAGE,
-  );
+    emptyMessage: EMPTY_SNAPSHOT_MESSAGE,
+  });
   elements.packageNote.textContent = `Ancestor fee rate by ${lensName} bucket: delta-adjusted ancestor fees over ancestor virtual size. This is not the cluster mempool mining score.`;
   elements.jointNote.textContent = `Density of ${metricNoun} across fee rate and size, with marginals.`;
 
   renderMosaicChart(elements.mosaicChart, model.ageMosaic, {
     metricFormat,
     emptyMessage: EMPTY_SNAPSHOT_MESSAGE,
-    isColumnInteractive: interactive,
+    isColumnInteractive: (column) =>
+      interactive && column.key !== "all" && column.key !== "overflow",
+    isColumnSelected: (column) => column.key === selection.bucketKey,
     onColumnSelect: (column) => {
-      if (column.key !== "all" && column.key !== "overflow") {
-        onSelectBucket({
-          classifierId: selection.classifierId,
-          bucketKey: column.key as ClassifierBucketKey,
-        });
-      }
+      onSelectBucket({
+        classifierId: selection.classifierId,
+        bucketKey: column.key as ClassifierBucketKey,
+      });
     },
   });
   elements.mosaicNote.textContent = `Column width is each ${lensName} bucket's ${metricNoun} share; cells split the bucket by age at observation.`;
 
   const coverage = `structure facts cover ${countFormat.format(model.totals.structured.count)} of ${countFormat.format(snapshot.transaction_count)} transactions`;
-  renderSpectrumChart(
-    elements.dataChart,
-    model.dataSpectrum,
-    DATA_BYTES_TICKS,
+  renderSpectrumChart(elements.dataChart, model.dataSpectrum, {
+    domain: DATA_BYTES_DOMAIN,
+    ticks: DATA_BYTES_TICKS,
+    axisLabel: "Carried bytes",
+    metricLabel: metricNoun,
+    shareDenominatorLabel: "OP_RETURN carriers",
+    keyPrefix: "snapshot:data-carriage",
+    formatRangeValue: formatByteAxisValue,
     metricFormat,
-    "No observed transaction carries OP_RETURN data.",
-  );
-  elements.dataNote.textContent = `Stacked ${metricNoun} per log carried-byte bin by Data protocols bucket · ${countFormat.format(model.totals.carrier.count)} transactions carry OP_RETURN bytes.`;
+    emptyMessage: "No observed transaction carries OP_RETURN data.",
+  });
+  elements.dataNote.textContent = `Stacked ${metricNoun} per log carried-byte bin by Data protocols bucket · ${countFormat.format(model.totals.carrier.count)} transactions carry OP_RETURN bytes. References describe conventional pushed-payload forms; Atlas plots carried bytes summed across OP_RETURN outputs, not serialized script size.`;
   elements.complexityNote.textContent = `Density of ${metricNoun} across input and output counts, with marginals · ${coverage}.`;
 
   renderCompositionBars(elements.entanglement, model.entanglement, {
@@ -243,13 +318,17 @@ export const commitSnapshotDistributionPanels = ({
   });
   elements.entanglementNote.textContent = `Unconfirmed mempool relatives reported by the source node · ${countFormat.format(model.totals.replaceable.count)} transactions are reported replaceable.`;
 
-  renderSpectrumChart(
-    elements.valueChart,
-    model.valueSpectrum,
-    OUTPUT_VALUE_TICKS,
+  renderSpectrumChart(elements.valueChart, model.valueSpectrum, {
+    domain: OUTPUT_VALUE_DOMAIN,
+    ticks: OUTPUT_VALUE_TICKS,
+    axisLabel: "Total output value",
+    metricLabel: metricNoun,
+    shareDenominatorLabel: "transactions with structure facts",
+    keyPrefix: "snapshot:output-value",
+    formatRangeValue: formatOutputValueAxisValue,
     metricFormat,
-    "No structure facts are available yet.",
-  );
+    emptyMessage: "No structure facts are available yet.",
+  });
   elements.valueNote.textContent = `Total output value per transaction by ${lensName} bucket · ${coverage}.`;
 
   elements.compositionNote.textContent = `Share of ${metricNoun} per independent classifier lens. Lenses are not combined.`;

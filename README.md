@@ -8,16 +8,24 @@ happens in the browser; the server never combines mempools.
 
 ## What it shows
 
-| Lens | Question |
-| --- | --- |
+| Lens                   | Question                                                                                |
+| ---------------------- | --------------------------------------------------------------------------------------- |
 | Transaction properties | Which exact version, witness, replaceability, and script-family properties are present? |
-| Transaction shape | Which conservative CoinJoin, consolidation, or batch-payout heuristics match? |
-| Data protocols | Which supported inscription, token, or OP_RETURN byte patterns are present? |
-| Knots BIP-110 | Would this witness variant violate Bitcoin Knots' deployed policy? |
+| Transaction shape      | Which conservative CoinJoin, consolidation, or batch-payout heuristics match?           |
+| Data protocols         | Which supported inscription, token, or OP_RETURN byte patterns are present?             |
+| Knots BIP-110          | Would this witness variant violate Bitcoin Knots' deployed policy?                      |
 
 Atlas also shows fee rate, age, virtual size, ancestor fee rate, ancestry,
 replaceability, structure facts, and transaction detail. The browser builds
 the distribution charts from the current snapshot.
+
+In the default Classifications view, label cards are query controls. Select one
+or more labels from the active classifier, combine them with ANY or ALL, and
+inspect the full matching population as complete and partial transaction
+blocks. Choosing a block, or reaching it by keyboard, opens that transaction's
+detail without replacing the active query. The selected labels and match mode
+are preserved in the page URL. Independent classifier taxonomies are never
+combined.
 
 Partial and unavailable results are reported separately, not counted as
 negatives. The
@@ -29,6 +37,12 @@ BIP-110 rule may still be consensus-valid, and absence from one sampled mempool
 does not prove that a node rejected or filtered it.
 
 ## Snapshot distributions
+
+Hover or focus any plotted region for exact bin ranges and population shares.
+Click a spectrum or density cell to pin it while comparing panels; keyboard
+users can traverse chart bins with the arrow keys. Data-carriage references
+distinguish the historical 40-byte payload limit from the conventional
+80-byte payload that serializes to an 83-byte OP_RETURN script.
 
 ![Composition, fee structure, ancestor fee rate, and fee-rate-by-size density](docs/assets/snapshot-distributions.png)
 
@@ -51,7 +65,7 @@ Each side keeps its own witness variant and policy assessment. Presence or
 absence describes the sampled mempools only. It does not prove that a node
 accepted, rejected, filtered, or relayed a transaction.
 
-![Membership overlap with source-local policy controls](docs/assets/comparison-membership.png)
+![Membership overlap with per-node policy controls](docs/assets/comparison-membership.png)
 
 ![Side-by-side classifier composition and fee structure](docs/assets/comparison-distributions.png)
 
@@ -59,9 +73,9 @@ accepted, rejected, filtered, or relayed a transaction.
 
 ![Side-by-side data carriage, input-output density, and entanglement](docs/assets/comparison-distributions-structure.png)
 
-![Side-by-side output value and source-local policy outcomes](docs/assets/comparison-distributions-value.png)
+![Side-by-side output value and per-node policy outcomes](docs/assets/comparison-distributions-value.png)
 
-![The complete source-local policy matrix](docs/assets/policy-comparison.png)
+![The complete per-node policy matrix](docs/assets/policy-comparison.png)
 
 ## Architecture
 

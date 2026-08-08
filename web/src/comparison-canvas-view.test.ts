@@ -59,26 +59,43 @@ describe("ComparisonCanvasView", () => {
     vi.restoreAllMocks();
   });
 
-  it("reuses the population base for transaction and policy-only transitions", async () => {
+  it("reuses the population base for transaction-only transitions and repaints explicit policy focus", async () => {
     const canvas = document.createElement("canvas");
     canvas.getBoundingClientRect = () =>
       ({ width: 900, height: 500 }) as DOMRect;
     const view = new ComparisonCanvasView(canvas);
 
-    await view.render(comparison, "common", null);
+    await view.render(comparison, "common", null, "left", { kind: "all" });
     const populationRects = vi.mocked(context.rect).mock.calls.length;
     const baseCopies = vi.mocked(context.drawImage).mock.calls.length;
 
-    await view.render(comparison, "common", txid(2));
+    await view.render(comparison, "common", txid(2), "left", { kind: "all" });
     expect(vi.mocked(context.rect).mock.calls).toHaveLength(populationRects);
     expect(vi.mocked(context.drawImage).mock.calls).toHaveLength(
       baseCopies + 1,
     );
 
-    await view.render(comparison, "common", txid(2));
+    await view.render(comparison, "common", txid(2), "left", { kind: "all" });
     expect(vi.mocked(context.rect).mock.calls).toHaveLength(populationRects);
     expect(vi.mocked(context.drawImage).mock.calls).toHaveLength(
       baseCopies + 1,
+    );
+
+    await view.render(comparison, "common", txid(2), "left", {
+      kind: "status",
+      status: "compatible",
+    });
+    expect(vi.mocked(context.rect).mock.calls.length).toBeGreaterThan(
+      populationRects,
+    );
+    const focusedPopulationRects = vi.mocked(context.rect).mock.calls.length;
+
+    await view.render(comparison, "common", txid(1), "left", {
+      kind: "status",
+      status: "compatible",
+    });
+    expect(vi.mocked(context.rect).mock.calls).toHaveLength(
+      focusedPopulationRects,
     );
   });
 
@@ -93,8 +110,12 @@ describe("ComparisonCanvasView", () => {
       ({ width: 900, height: 500 }) as DOMRect;
     const view = new ComparisonCanvasView(canvas);
 
-    const stale = view.render(comparison, "common", null);
-    const current = view.render(comparison, "left_only", null);
+    const stale = view.render(comparison, "common", null, "left", {
+      kind: "all",
+    });
+    const current = view.render(comparison, "left_only", null, "left", {
+      kind: "all",
+    });
 
     await expect(stale).resolves.toBe("superseded");
     while (frames.length > 0) {

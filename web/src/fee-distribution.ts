@@ -12,62 +12,29 @@ export interface LogDomain {
 }
 
 export interface AxisTick {
+  /** Raw value on the owning logarithmic domain. */
+  value: number;
   position: number;
   label: string;
+  /** Longer context for an interactive marker or reduced-density label. */
+  description?: string;
+  /** Higher-priority labels should survive responsive tick reduction. */
+  priority: number;
 }
 
-export const FEE_RATE_DOMAIN: Readonly<LogDomain> = { minLog2: 0, maxLog2: 9 };
-export const VSIZE_DOMAIN: Readonly<LogDomain> = { minLog2: 6, maxLog2: 17 };
+export interface AxisTickValue {
+  value: number;
+  label: string;
+  description?: string;
+  priority?: number;
+}
 
-export const FEE_RATE_TICKS: readonly AxisTick[] = [
-  { position: 0, label: "1" },
-  { position: 5 / 9, label: "32" },
-  { position: 1, label: "512+" },
-];
-
-/** OP_RETURN carried bytes, one byte through 128 KiB. */
-export const DATA_BYTES_DOMAIN: Readonly<LogDomain> = {
-  minLog2: 0,
-  maxLog2: 17,
-};
-
-export const DATA_BYTES_TICKS: readonly AxisTick[] = [
-  { position: 0, label: "1 B" },
-  { position: 9 / 17, label: "512 B" },
-  { position: 1, label: "128 KiB+" },
-];
-
-/** Input or output counts, one through 1024. */
-export const IO_COUNT_DOMAIN: Readonly<LogDomain> = {
-  minLog2: 0,
-  maxLog2: 10,
-};
-
-export const IO_COUNT_TICKS: readonly AxisTick[] = [
-  { position: 0, label: "1" },
-  { position: 0.5, label: "32" },
-  { position: 1, label: "1k+" },
-];
-
-/** Total output value in sats, 1k sats through 1000 BTC. */
-export const OUTPUT_VALUE_DOMAIN: Readonly<LogDomain> = {
-  minLog2: Math.log2(1_000),
-  maxLog2: Math.log2(100_000_000_000),
-};
-
-export const OUTPUT_VALUE_TICKS: readonly AxisTick[] = [
-  { position: 0, label: "1k sat" },
-  {
-    position:
-      (Math.log2(100_000_000) - OUTPUT_VALUE_DOMAIN.minLog2) /
-      (OUTPUT_VALUE_DOMAIN.maxLog2 - OUTPUT_VALUE_DOMAIN.minLog2),
-    label: "1 BTC",
-  },
-  { position: 1, label: "1k BTC+" },
-];
-
-export const transactionFeeRate = (transaction: MempoolTransaction): number =>
-  transaction.vsize > 0 ? transaction.fee_sats / transaction.vsize : 0;
+export interface LogDomainBinBounds {
+  /** Null for the first bin, which also receives lower clamped values. */
+  lowerInclusive: number | null;
+  /** Null for the last bin, which also receives upper clamped values. */
+  upperExclusive: number | null;
+}
 
 export const logDomainPosition = (
   domain: Readonly<LogDomain>,
@@ -80,6 +47,150 @@ export const logDomainPosition = (
   const position = (Math.log2(value) - domain.minLog2) / span;
   return Math.min(1, Math.max(0, position));
 };
+
+/** Inverse of `logDomainPosition` over the unclamped domain. */
+export const logDomainValue = (
+  domain: Readonly<LogDomain>,
+  position: number,
+): number => {
+  const clampedPosition = Math.min(1, Math.max(0, position));
+  return (
+    2 ** (domain.minLog2 + clampedPosition * (domain.maxLog2 - domain.minLog2))
+  );
+};
+
+/**
+ * Exact value bounds for one equal-width logarithmic bin. Null open bounds
+ * describe the values clamped into the first and last bins.
+ */
+export const logDomainBinBounds = (
+  domain: Readonly<LogDomain>,
+  bin: number,
+  binCount: number,
+): LogDomainBinBounds => {
+  if (!Number.isInteger(binCount) || binCount <= 0) {
+    throw new RangeError("Log-domain bin count must be a positive integer");
+  }
+  if (!Number.isInteger(bin) || bin < 0 || bin >= binCount) {
+    throw new RangeError("Log-domain bin index is outside the requested range");
+  }
+  return {
+    lowerInclusive: bin === 0 ? null : logDomainValue(domain, bin / binCount),
+    upperExclusive:
+      bin === binCount - 1
+        ? null
+        : logDomainValue(domain, (bin + 1) / binCount),
+  };
+};
+
+/** Build positioned ticks from meaningful raw values rather than fractions. */
+export const logDomainTicks = (
+  domain: Readonly<LogDomain>,
+  ticks: readonly AxisTickValue[],
+): AxisTick[] =>
+  ticks.map(({ value, label, description, priority = 1 }) => ({
+    value,
+    position: logDomainPosition(domain, value),
+    label,
+    ...(description === undefined ? {} : { description }),
+    priority,
+  }));
+
+export const FEE_RATE_DOMAIN: Readonly<LogDomain> = { minLog2: 0, maxLog2: 9 };
+export const VSIZE_DOMAIN: Readonly<LogDomain> = { minLog2: 6, maxLog2: 17 };
+
+export const FEE_RATE_TICKS: readonly AxisTick[] = logDomainTicks(
+  FEE_RATE_DOMAIN,
+  [
+    { value: 1, label: "1", priority: 3 },
+    { value: 4, label: "4", priority: 2 },
+    { value: 16, label: "16", priority: 2 },
+    { value: 64, label: "64", priority: 2 },
+    { value: 256, label: "256", priority: 2 },
+    { value: 512, label: "512+", priority: 3 },
+  ],
+);
+
+export const VSIZE_TICKS: readonly AxisTick[] = logDomainTicks(VSIZE_DOMAIN, [
+  { value: 64, label: "64 vB", priority: 3 },
+  { value: 256, label: "256 vB", priority: 2 },
+  { value: 1_024, label: "1 KivB", priority: 2 },
+  { value: 4_096, label: "4 KivB", priority: 2 },
+  { value: 16_384, label: "16 KivB", priority: 2 },
+  { value: 65_536, label: "64 KivB", priority: 2 },
+  { value: 131_072, label: "128 KivB+", priority: 3 },
+]);
+
+/** OP_RETURN carried bytes, one byte through 128 KiB. */
+export const DATA_BYTES_DOMAIN: Readonly<LogDomain> = {
+  minLog2: 0,
+  maxLog2: 17,
+};
+
+export const DATA_BYTES_TICKS: readonly AxisTick[] = logDomainTicks(
+  DATA_BYTES_DOMAIN,
+  [
+    { value: 1, label: "1 B", priority: 3 },
+    { value: 8, label: "8 B", priority: 1 },
+    {
+      value: 40,
+      label: "40 B",
+      description:
+        "Historical payload reference. Bitcoin Core 0.9 and 0.10 allowed at most 40 pushed data bytes in the then-standard single-push OP_RETURN form (42 serialized script bytes with a direct push).",
+      priority: 3,
+    },
+    {
+      value: 80,
+      label: "80 B",
+      description:
+        "Payload reference. Bitcoin Core 0.11 defaulted to 80 pushed data bytes. A conventional single-push 80-byte payload serializes to an 83-byte OP_RETURN script, the Core 0.12–29 and BIP-110 script-size reference.",
+      priority: 3,
+    },
+    { value: 512, label: "512 B", priority: 2 },
+    { value: 4_096, label: "4 KiB", priority: 2 },
+    { value: 32_768, label: "32 KiB", priority: 1 },
+    { value: 131_072, label: "128 KiB+", priority: 3 },
+  ],
+);
+
+/** Input or output counts, one through 1024. */
+export const IO_COUNT_DOMAIN: Readonly<LogDomain> = {
+  minLog2: 0,
+  maxLog2: 10,
+};
+
+export const IO_COUNT_TICKS: readonly AxisTick[] = logDomainTicks(
+  IO_COUNT_DOMAIN,
+  [
+    { value: 1, label: "1", priority: 3 },
+    { value: 4, label: "4", priority: 2 },
+    { value: 16, label: "16", priority: 2 },
+    { value: 64, label: "64", priority: 2 },
+    { value: 256, label: "256", priority: 2 },
+    { value: 1_024, label: "1k+", priority: 3 },
+  ],
+);
+
+/** Total output value in sats, 1k sats through 1000 BTC. */
+export const OUTPUT_VALUE_DOMAIN: Readonly<LogDomain> = {
+  minLog2: Math.log2(1_000),
+  maxLog2: Math.log2(100_000_000_000),
+};
+
+export const OUTPUT_VALUE_TICKS: readonly AxisTick[] = logDomainTicks(
+  OUTPUT_VALUE_DOMAIN,
+  [
+    { value: 1_000, label: "1k sat", priority: 3 },
+    { value: 100_000, label: "100k sat", priority: 2 },
+    { value: 10_000_000, label: "10m sat", priority: 2 },
+    { value: 100_000_000, label: "1 BTC", priority: 3 },
+    { value: 10_000_000_000, label: "100 BTC", priority: 2 },
+    { value: 100_000_000_000, label: "1k BTC+", priority: 3 },
+  ],
+);
+
+export const transactionFeeRate = (transaction: MempoolTransaction): number =>
+  transaction.vsize > 0 ? transaction.fee_sats / transaction.vsize : 0;
 
 const metricWeight = (
   transaction: MempoolTransaction,

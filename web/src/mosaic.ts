@@ -22,7 +22,7 @@ export const AGE_BANDS: readonly AgeBand[] = [
   },
   { key: "under_6h", label: "1–6 h", color: "#4397ac", maxAgeMs: 21_600_000 },
   { key: "under_24h", label: "6–24 h", color: "#2f6a80", maxAgeMs: 86_400_000 },
-  { key: "over_24h", label: "> 24 h", color: "#28495c", maxAgeMs: null },
+  { key: "over_24h", label: "≥ 24 h", color: "#28495c", maxAgeMs: null },
 ];
 
 export interface MosaicCell {

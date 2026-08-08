@@ -24,7 +24,11 @@ const properties: ClassifierDescriptor = {
   methodology: "exact",
   semantics: "multi_label",
   required_facts: ["raw_transaction"],
-  labels: [],
+  labels: [
+    { key: "version_2", label: "Version 2", description: "Version 2." },
+    { key: "p2wsh", label: "P2WSH", description: "P2WSH." },
+    { key: "p2tr", label: "P2TR", description: "P2TR." },
+  ],
 };
 
 const bip110: ClassifierDescriptor = {
@@ -34,7 +38,10 @@ const bip110: ClassifierDescriptor = {
   methodology: "policy",
   semantics: "rule_set",
   required_facts: ["raw_transaction"],
-  labels: [],
+  labels: [
+    { key: "compatible", label: "Compatible", description: "Compatible." },
+    { key: "violating", label: "Violating", description: "Violating." },
+  ],
 };
 
 const snapshot = (): MempoolSnapshot => ({
@@ -114,6 +121,8 @@ const publicationInput = (
   viewState: {
     source: "core",
     classifier,
+    classifierLabels: [],
+    classifierMatch: "any",
     selection: null,
     txid: null,
   },
@@ -131,7 +140,14 @@ describe("node publication candidate", () => {
   it("resolves the classifier and view state before publication commit", async () => {
     const candidate = await prepareNodePublicationCandidate(
       publication(),
-      { source: "core", classifier: null, selection: null, txid: null },
+      {
+        source: "core",
+        classifier: null,
+        classifierLabels: [],
+        classifierMatch: "any",
+        selection: null,
+        txid: null,
+      },
       false,
     );
 
@@ -145,6 +161,8 @@ describe("node publication candidate", () => {
     expect(candidate.viewState).toEqual({
       source: "core",
       classifier: "transaction_properties",
+      classifierLabels: [],
+      classifierMatch: "any",
       selection: null,
       txid: null,
     });
@@ -155,12 +173,50 @@ describe("node publication candidate", () => {
     });
   });
 
+  it("normalizes the Classifications query against descriptor order", async () => {
+    const candidate = await prepareNodePublicationCandidate(
+      publication(),
+      {
+        source: "core",
+        classifier: "transaction_properties",
+        classifierLabels: ["p2tr", "unknown", "version_2", "p2tr"],
+        classifierMatch: "all",
+        selection: null,
+        txid: null,
+      },
+      false,
+    );
+
+    expect(candidate.viewState.classifierLabels).toEqual(["version_2", "p2tr"]);
+    expect(candidate.viewState.classifierMatch).toBe("all");
+  });
+
+  it("keeps rule-set classifier matching in ANY mode", async () => {
+    const candidate = await prepareNodePublicationCandidate(
+      publication(),
+      {
+        source: "core",
+        classifier: "knots_bip110",
+        classifierLabels: ["violating"],
+        classifierMatch: "all",
+        selection: null,
+        txid: null,
+      },
+      false,
+    );
+
+    expect(candidate.viewState.classifierLabels).toEqual(["violating"]);
+    expect(candidate.viewState.classifierMatch).toBe("any");
+  });
+
   it("retains primary-stage interaction state when snapshot content is unchanged", async () => {
     const candidate = await prepareNodePublicationCandidate(
       publication("snapshot-a", "34".repeat(32)),
       {
         source: "core",
         classifier: "transaction_properties",
+        classifierLabels: [],
+        classifierMatch: "any",
         selection: null,
         txid: null,
       },
@@ -188,6 +244,8 @@ describe("node publication candidate", () => {
       {
         source: "core",
         classifier: "transaction_properties",
+        classifierLabels: [],
+        classifierMatch: "any",
         selection: null,
         txid: null,
       },
@@ -215,6 +273,8 @@ describe("node publication candidate", () => {
       {
         source: "core",
         classifier: "knots_bip110",
+        classifierLabels: [],
+        classifierMatch: "any",
         selection: null,
         txid: null,
       },
@@ -250,6 +310,8 @@ describe("node publication candidate", () => {
       {
         source: "core",
         classifier: "knots_bip110",
+        classifierLabels: [],
+        classifierMatch: "any",
         selection,
         txid: null,
       },
@@ -267,6 +329,8 @@ describe("node publication candidate", () => {
       {
         source: "core",
         classifier: "knots_bip110",
+        classifierLabels: [],
+        classifierMatch: "any",
         selection: null,
         txid: null,
       },
@@ -283,7 +347,14 @@ describe("node publication candidate", () => {
     await expect(
       prepareNodePublicationCandidate(
         publication(),
-        { source: "core", classifier: null, selection: null, txid: null },
+        {
+          source: "core",
+          classifier: null,
+          classifierLabels: [],
+          classifierMatch: "any",
+          selection: null,
+          txid: null,
+        },
         true,
       ),
     ).rejects.toThrow("Publication readiness does not match its renderer");
@@ -296,7 +367,14 @@ describe("node publication candidate", () => {
     await expect(
       prepareNodePublicationCandidate(
         response,
-        { source: "core", classifier: null, selection: null, txid: null },
+        {
+          source: "core",
+          classifier: null,
+          classifierLabels: [],
+          classifierMatch: "any",
+          selection: null,
+          txid: null,
+        },
         false,
       ),
     ).rejects.toThrow("Loaded publication is missing classification progress");
@@ -339,6 +417,36 @@ describe("node publication candidate", () => {
       unusedDistributionsView,
     );
 
+    expect(reads).toBe(5);
+  });
+
+  it("reprepares when the Classifications query changes before commit", async () => {
+    const initial = publicationInput();
+    const changed: NodePublicationInput = {
+      ...initial,
+      viewState: {
+        ...initial.viewState,
+        classifierLabels: ["version_2", "p2wsh"],
+        classifierMatch: "all",
+      },
+    };
+    let reads = 0;
+
+    const prepared = await prepareNodePublicationCommit(
+      publication(),
+      false,
+      false,
+      new AbortController().signal,
+      () => true,
+      () => (reads++ === 0 ? initial : changed),
+      unusedDistributionsView,
+    );
+
+    expect(prepared.candidate.viewState.classifierLabels).toEqual([
+      "version_2",
+      "p2wsh",
+    ]);
+    expect(prepared.candidate.viewState.classifierMatch).toBe("all");
     expect(reads).toBe(5);
   });
 

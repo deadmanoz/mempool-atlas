@@ -10,7 +10,6 @@ const ids = [
   "minimum-fee-rate",
   "maximum-age",
   "minimum-vsize",
-  "apply-filters",
   "reset-filters",
 ];
 
@@ -21,7 +20,6 @@ beforeEach(() => {
     <input id="minimum-fee-rate">
     <select id="maximum-age"></select>
     <input id="minimum-vsize">
-    <button id="apply-filters"></button>
     <button id="reset-filters"></button>
   `;
 });

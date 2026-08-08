@@ -497,8 +497,15 @@ describe("createTerrainLayout", () => {
       strokeStyle: "",
       lineWidth: 1,
       globalAlpha: 1,
+      shadowColor: "",
+      shadowBlur: 0,
+      save: () => operations.push("save"),
+      restore: () => operations.push("restore"),
       clearRect: () => undefined,
-      fillRect: () => operations.push("fill"),
+      fillRect: () =>
+        operations.push(
+          `fill:${contextState.fillStyle}:${contextState.globalAlpha}`,
+        ),
       strokeRect(x: number, y: number, width: number, height: number): void {
         operations.push(`stroke:${contextState.strokeStyle}`);
         strokeCalls.push({
@@ -531,7 +538,8 @@ describe("createTerrainLayout", () => {
         ...selectedGlyph?.rect,
       },
     ]);
-    expect(operations.at(-1)).toBe("stroke:#f7ff6a");
+    expect(operations).toContain("fill:#f7ff6a:0.28");
+    expect(operations.at(-1)).toBe("restore");
   });
 
   it("paints one visible Canvas block per transaction", () => {

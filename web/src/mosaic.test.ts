@@ -83,6 +83,19 @@ describe("buildAgeMosaic", () => {
     expect(mosaic.columns[0]?.cells[0]?.bandKey).toBe("over_24h");
   });
 
+  it("labels the inclusive 24-hour boundary precisely", () => {
+    const mosaic = buildAgeMosaic(
+      [group("boundary", [transaction(1, 100, 86_400_000)])],
+      OBSERVED,
+      "count",
+    );
+    expect(mosaic.columns[0]?.cells[0]).toMatchObject({
+      bandKey: "over_24h",
+      bandLabel: "≥ 24 h",
+    });
+    expect(AGE_BANDS.at(-1)?.label).toBe("≥ 24 h");
+  });
+
   it("matches the cooperative mosaic builder exactly", async () => {
     const groups = [
       group("a", [transaction(1, 100, 60_000), transaction(2, 200, 7_200_000)]),

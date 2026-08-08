@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  comparisonPolicyFilterMatches,
   compareCurrentSnapshots,
   lookupComparisonTransaction,
   type ComparedTransaction,
@@ -23,6 +24,51 @@ const transaction = (
     entered_at_ms: 1_699_999_000_000 + value,
     bip110,
   });
+
+describe("comparisonPolicyFilterMatches", () => {
+  const violating: Bip110Assessment = {
+    status: "violating",
+    primary_rule: "element_size",
+    violated_rules: ["element_size"],
+    unknown_rules: ["output_size"],
+  };
+  const assessed = transaction(1, 100, violating);
+  const unassessed = transaction(2, 100, null);
+
+  it("matches status, marginal rule, and signature filters", () => {
+    expect(comparisonPolicyFilterMatches(assessed, { kind: "all" })).toBe(true);
+    expect(
+      comparisonPolicyFilterMatches(assessed, {
+        kind: "status",
+        status: "violating",
+      }),
+    ).toBe(true);
+    expect(
+      comparisonPolicyFilterMatches(assessed, {
+        kind: "rule",
+        rule: "element_size",
+      }),
+    ).toBe(true);
+    expect(
+      comparisonPolicyFilterMatches(assessed, {
+        kind: "rule",
+        rule: "output_size",
+      }),
+    ).toBe(false);
+    expect(
+      comparisonPolicyFilterMatches(assessed, {
+        kind: "signature",
+        signature: "partial:02:01",
+      }),
+    ).toBe(true);
+    expect(
+      comparisonPolicyFilterMatches(unassessed, {
+        kind: "status",
+        status: "unclassified",
+      }),
+    ).toBe(true);
+  });
+});
 
 describe("compareCurrentSnapshots", () => {
   it("merge-joins sorted membership into three disjoint regions", () => {

@@ -18,6 +18,7 @@ build-web:
 
 test:
     just test-release
+    just test-root-scripts
     just test-smoke-public-stages
     just test-smoke-public-fixture
     just test-rust
@@ -25,6 +26,9 @@ test:
 
 test-release:
     ./scripts/test-release-head.sh
+
+test-root-scripts:
+    node --test scripts/check-web-e2e-ports.test.mjs
 
 test-smoke-public-stages:
     ./scripts/test-smoke-public-stages.sh
@@ -42,7 +46,7 @@ test-web:
 # Vite itself; run `just test-web-e2e-install` once to fetch the browser.
 test-web-e2e:
     node scripts/check-web-e2e-ports.mjs
-    node --test scripts/check-web-e2e-ports.test.mjs
+    just test-root-scripts
     just functional-fixtures
     npm --prefix web run test:e2e
 
@@ -54,6 +58,7 @@ lint:
     cargo fmt --all -- --check
     cargo clippy --all-targets --features perf-fixtures -- -D warnings
     npm --prefix web run check
+    npm --prefix web exec -- prettier --check scripts/check-web-e2e-ports.mjs scripts/check-web-e2e-ports.test.mjs
 
 structure:
     ./scripts/check-structure.sh
@@ -61,6 +66,7 @@ structure:
 format:
     cargo fmt --all
     npm --prefix web run format
+    npm --prefix web exec -- prettier --write scripts/check-web-e2e-ports.mjs scripts/check-web-e2e-ports.test.mjs
 
 dev:
     cargo run

@@ -8,6 +8,8 @@ import {
 import {
   commitComparisonDistributionSide,
   createComparisonDistributionPanels,
+  invalidateComparisonDistributionDensities,
+  renderComparisonDistributionDensity,
   resetComparisonDistributionSide,
 } from "./comparison-distribution-panels";
 import {
@@ -15,12 +17,9 @@ import {
   type ComparisonDistributionScope,
 } from "./comparison-distribution-population";
 import type { ComparisonSide, CurrentComparison } from "./comparison-model";
-import {
-  DEFAULT_JOINT_COLOR,
-  prepareJointChartCanvas,
-  renderJointChart,
-} from "./detail-panels";
+import { prepareJointChartCanvas } from "./detail-panels";
 import type { JointDensity } from "./fee-distribution";
+import { createSectionDistributionInspector } from "./distribution-interaction";
 import {
   SnapshotDistributionCache,
   type SnapshotDistributionModel,
@@ -91,6 +90,10 @@ export const createComparisonDistributionsView = (
   root: HTMLElement,
 ): ComparisonDistributionsView => {
   const panels = createComparisonDistributionPanels(root);
+  const inspector = createSectionDistributionInspector(
+    root,
+    ":scope > .comparison-distributions-heading",
+  );
   const scopeButtons: Record<ComparisonDistributionScope, HTMLButtonElement> = {
     all: requiredDescendant<HTMLButtonElement>(root, "dist-scope-all"),
     common: requiredDescendant<HTMLButtonElement>(root, "dist-scope-common"),
@@ -139,18 +142,11 @@ export const createComparisonDistributionsView = (
       ? complexityDensities[side]
       : jointDensities[side];
     if (density !== null) {
-      renderJointChart(
-        complexity
-          ? panels[side].complexity.container
-          : panels[side].joint.container,
-        complexity ? panels[side].complexity.canvas : panels[side].joint.canvas,
+      renderComparisonDistributionDensity(
+        panels[side],
+        side,
         density,
-        {
-          color: DEFAULT_JOINT_COLOR,
-          emptyMessage: complexity
-            ? "No structure facts are available yet."
-            : "This sampled mempool is empty.",
-        },
+        complexity,
       );
     }
     if (taskIndex + 1 < COMPARISON_SIDES.length * 2) {
@@ -269,6 +265,8 @@ export const createComparisonDistributionsView = (
     }
 
     cancelDensityRender();
+    inspector.reset();
+    invalidateComparisonDistributionDensities(panels);
     committedRevision = null;
     for (const side of COMPARISON_SIDES) {
       const { snapshot } = current[side];
@@ -277,6 +275,7 @@ export const createComparisonDistributionsView = (
       commitComparisonDistributionSide(
         panels[side],
         model,
+        side,
         snapshot.source_label,
         comparisonDistributionScopeSuffix(prepared.scope),
       );
@@ -411,6 +410,7 @@ export const createComparisonDistributionsView = (
     committedRevision = null;
     currentComparison = null;
     cache.reset();
+    inspector.reset();
     root.hidden = true;
     root.setAttribute("aria-busy", "false");
     scope = "all";

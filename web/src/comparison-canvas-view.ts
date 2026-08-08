@@ -7,7 +7,9 @@ import {
 } from "./comparison-layout";
 import { prepareCanvasBacking } from "./canvas-backing";
 import type {
+  ComparisonPolicyFilter,
   ComparisonRegionKey,
+  ComparisonSide,
   CurrentComparison,
 } from "./comparison-model";
 
@@ -50,17 +52,29 @@ const currentCanvasMetrics = (canvas: HTMLCanvasElement) => {
   };
 };
 
+const policyPaintKey = (
+  side: ComparisonSide,
+  filter: ComparisonPolicyFilter,
+): string => {
+  if (filter.kind === "all") return `${side}:all`;
+  if (filter.kind === "status") return `${side}:status:${filter.status}`;
+  if (filter.kind === "rule") return `${side}:rule:${filter.rule}`;
+  return `${side}:signature:${filter.signature}`;
+};
+
 export class ComparisonCanvasView {
   private geometry: ComparisonGeometry | null = null;
   private controller: AbortController | null = null;
   private readonly baseCanvas = document.createElement("canvas");
   private baseComparison: CurrentComparison | null = null;
   private baseRegion: ComparisonRegionKey | null = null;
+  private basePolicyPaintKey: string | null = null;
   private paintedTransactionId: string | null = null;
   private desiredTransactionId: string | null = null;
   private pendingBase: Promise<ComparisonCanvasRenderStatus> | null = null;
   private pendingComparison: CurrentComparison | null = null;
   private pendingRegion: ComparisonRegionKey | null = null;
+  private pendingPolicyPaintKey: string | null = null;
 
   constructor(private readonly canvas: HTMLCanvasElement) {}
 
@@ -74,9 +88,11 @@ export class ComparisonCanvasView {
     this.pendingBase = null;
     this.pendingComparison = null;
     this.pendingRegion = null;
+    this.pendingPolicyPaintKey = null;
     this.geometry = null;
     this.baseComparison = null;
     this.baseRegion = null;
+    this.basePolicyPaintKey = null;
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
     delete this.canvas.dataset.renderedRegion;
@@ -111,9 +127,11 @@ export class ComparisonCanvasView {
     this.pendingBase = null;
     this.pendingComparison = null;
     this.pendingRegion = null;
+    this.pendingPolicyPaintKey = null;
     this.geometry = candidate.geometry;
     this.baseComparison = null;
     this.baseRegion = null;
+    this.basePolicyPaintKey = null;
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
     delete this.canvas.dataset.renderedRegion;
@@ -122,11 +140,13 @@ export class ComparisonCanvasView {
   private baseMatches(
     comparison: CurrentComparison,
     selectedRegion: ComparisonRegionKey,
+    currentPolicyPaintKey: string,
   ): boolean {
     const { width, height, pixelRatio } = currentCanvasMetrics(this.canvas);
     return (
       this.baseComparison === comparison &&
       this.baseRegion === selectedRegion &&
+      this.basePolicyPaintKey === currentPolicyPaintKey &&
       this.geometry?.width === width &&
       this.geometry.height === height &&
       this.geometry.pixelRatio === pixelRatio
@@ -172,16 +192,20 @@ export class ComparisonCanvasView {
     comparison: CurrentComparison,
     selectedRegion: ComparisonRegionKey,
     activeTransactionId: string | null,
+    policySide: ComparisonSide,
+    policyFilter: ComparisonPolicyFilter,
   ): Promise<ComparisonCanvasRenderStatus> {
     this.desiredTransactionId = activeTransactionId;
-    if (this.baseMatches(comparison, selectedRegion)) {
+    const currentPolicyPaintKey = policyPaintKey(policySide, policyFilter);
+    if (this.baseMatches(comparison, selectedRegion, currentPolicyPaintKey)) {
       this.paintActiveTransaction(activeTransactionId);
       return Promise.resolve("rendered");
     }
     if (
       this.pendingBase !== null &&
       this.pendingComparison === comparison &&
-      this.pendingRegion === selectedRegion
+      this.pendingRegion === selectedRegion &&
+      this.pendingPolicyPaintKey === currentPolicyPaintKey
     ) {
       return this.pendingBase;
     }
@@ -190,9 +214,11 @@ export class ComparisonCanvasView {
     this.controller = controller;
     this.baseComparison = null;
     this.baseRegion = selectedRegion;
+    this.basePolicyPaintKey = null;
     this.paintedTransactionId = null;
     this.pendingComparison = comparison;
     this.pendingRegion = selectedRegion;
+    this.pendingPolicyPaintKey = currentPolicyPaintKey;
     let pending!: Promise<ComparisonCanvasRenderStatus>;
     pending = (async () => {
       try {
@@ -200,6 +226,8 @@ export class ComparisonCanvasView {
           this.canvas,
           comparison,
           selectedRegion,
+          policySide,
+          policyFilter,
           null,
           this.geometry,
           controller.signal,
@@ -209,6 +237,7 @@ export class ComparisonCanvasView {
         this.captureBase();
         this.baseComparison = comparison;
         this.baseRegion = selectedRegion;
+        this.basePolicyPaintKey = currentPolicyPaintKey;
         this.canvas.dataset.renderedRegion = selectedRegion;
         this.paintActiveTransaction(this.desiredTransactionId);
         return "rendered";
@@ -222,6 +251,7 @@ export class ComparisonCanvasView {
           this.pendingBase = null;
           this.pendingComparison = null;
           this.pendingRegion = null;
+          this.pendingPolicyPaintKey = null;
         }
       }
     })();

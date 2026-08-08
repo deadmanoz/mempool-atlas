@@ -20,21 +20,25 @@
               <span id="atlas-version" class="atlas-version">v…</span>
             </div>
             <p>Current Comparison</p>
-            <nav class="product-nav" aria-label="Mempool Atlas products">
-              <a href="../">Node</a>
-              <a href="./" aria-current="page">Compare</a>
-            </nav>
           </div>
         </div>
         <div class="comparison-heading-copy">
           <strong>Two independent snapshots</strong>
-          <span
-            >Current membership only. Observations remain source-local.</span
-          >
+          <span>Current membership only. Each node keeps its own view.</span>
         </div>
         <button id="comparison-refresh" class="refresh-button" type="button">
           Refresh
         </button>
+        <nav class="product-nav" aria-label="Atlas view">
+          <a href="../">
+            <strong>Node</strong>
+            <span>Single snapshot</span>
+          </a>
+          <a href="./" aria-current="page">
+            <strong>Compare</strong>
+            <span>Two snapshots</span>
+          </a>
+        </nav>
       </header>
 
       <section
@@ -161,6 +165,96 @@
         </button>
       </section>
 
+      <section
+        class="comparison-policy-toolbar"
+        aria-labelledby="comparison-policy-focus-heading"
+      >
+        <div class="comparison-policy-toolbar-heading">
+          <div>
+            <p class="eyebrow">Policy focus</p>
+            <h2 id="comparison-policy-focus-heading">
+              Explore one node's policy view
+            </h2>
+          </div>
+          <p>
+            Highlights matching transactions in the selected overlap region. The
+            node-by-node charts have their own population selector below.
+          </p>
+        </div>
+
+        <div class="comparison-policy-toolbar-controls">
+          <div id="policy-source-row" class="comparison-policy-source">
+            <span class="toolbar-label">Node policy</span>
+            <div
+              class="segmented compact"
+              role="group"
+              aria-label="Policy classification node"
+            >
+              <button id="policy-left" type="button" aria-pressed="true">
+                Source A
+              </button>
+              <button id="policy-right" type="button" aria-pressed="false">
+                Source B
+              </button>
+            </div>
+          </div>
+
+          <dl class="population-metrics comparison-population-metrics">
+            <div>
+              <dt>Matches</dt>
+              <dd id="comparison-match-count">0</dd>
+            </div>
+            <div>
+              <dt>Virtual size</dt>
+              <dd id="comparison-match-vsize">0 vB</dd>
+            </div>
+            <div>
+              <dt>Union share</dt>
+              <dd id="comparison-match-share">0%</dd>
+            </div>
+          </dl>
+
+          <button
+            id="clear-policy-filter"
+            class="comparison-policy-clear"
+            type="button"
+          >
+            Show all policy results
+          </button>
+        </div>
+
+        <div class="comparison-policy-toolbar-filters">
+          <section
+            class="comparison-policy-section"
+            aria-labelledby="marginal-rules-heading"
+          >
+            <div class="section-heading">
+              <h3 id="marginal-rules-heading">Proven rule</h3>
+              <span>Marginal counts overlap</span>
+            </div>
+            <nav
+              id="comparison-rule-list"
+              class="rule-list"
+              aria-label="BIP-110 marginal rule filters"
+            ></nav>
+          </section>
+
+          <section
+            class="comparison-bucket-section"
+            aria-labelledby="policy-buckets-heading"
+          >
+            <div class="section-heading">
+              <h3 id="policy-buckets-heading">Policy result or rule set</h3>
+              <span id="policy-bucket-summary">No snapshot</span>
+            </div>
+            <div id="policy-buckets" class="policy-bucket-list"></div>
+            <p class="rule-overlap-note">
+              Exact and partial rule combinations remain separate.
+            </p>
+          </section>
+        </div>
+      </section>
+
       <div class="workspace comparison-workspace">
         <section
           class="terrain-panel"
@@ -250,96 +344,13 @@
             do not establish why the memberships differ.
           </p>
 
-          <div id="policy-source-row" class="mode-row">
-            <span class="toolbar-label">Policy source</span>
-            <div
-              class="segmented compact"
-              aria-label="Policy classification source"
-            >
-              <button id="policy-left" type="button" aria-pressed="true">
-                Source A
-              </button>
-              <button id="policy-right" type="button" aria-pressed="false">
-                Source B
-              </button>
-            </div>
-          </div>
-
-          <dl class="population-metrics comparison-population-metrics">
-            <div>
-              <dt>Matches</dt>
-              <dd id="comparison-match-count">0</dd>
-            </div>
-            <div>
-              <dt>Virtual size</dt>
-              <dd id="comparison-match-vsize">0 vB</dd>
-            </div>
-            <div>
-              <dt>Union share</dt>
-              <dd id="comparison-match-share">0%</dd>
-            </div>
-          </dl>
-
-          <section
-            class="comparison-policy-section"
-            aria-labelledby="marginal-rules-heading"
-          >
-            <div class="section-heading">
-              <h3 id="marginal-rules-heading">Marginal rule filters</h3>
-              <button id="clear-policy-filter" type="button">Show all</button>
-            </div>
-            <nav
-              id="comparison-rule-list"
-              class="rule-list"
-              aria-label="BIP-110 marginal rule filters"
-            ></nav>
-            <p class="rule-overlap-note">
-              Rule totals overlap. Exact and partial combinations remain
-              separate below.
-            </p>
-          </section>
-
-          <section
-            class="comparison-bucket-section"
-            aria-labelledby="policy-buckets-heading"
-          >
-            <div class="section-heading">
-              <h3 id="policy-buckets-heading">Observed policy buckets</h3>
-              <span id="policy-bucket-summary">No snapshot</span>
-            </div>
-            <div id="policy-buckets" class="policy-bucket-list"></div>
-          </section>
-
-          <section
-            class="sample-section"
-            aria-labelledby="comparison-sample-heading"
-          >
-            <div class="section-heading">
-              <h3 id="comparison-sample-heading">Sample transactions</h3>
-              <span id="comparison-sample-summary">No matches</span>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">Transaction</th>
-                    <th scope="col">Source A policy</th>
-                    <th scope="col">Source B policy</th>
-                    <th scope="col">Variant</th>
-                  </tr>
-                </thead>
-                <tbody id="comparison-transactions"></tbody>
-              </table>
-            </div>
-          </section>
-
           <section
             class="detail-section"
             aria-labelledby="comparison-detail-heading"
           >
             <div class="section-heading">
               <h3 id="comparison-detail-heading">Selected transaction</h3>
-              <span id="comparison-detail-status">Choose a sample</span>
+              <span id="comparison-detail-status">Select a transaction</span>
             </div>
             <div id="comparison-detail" class="comparison-detail"></div>
           </section>
@@ -350,12 +361,12 @@
       <section
         id="comparison-distributions"
         class="comparison-distributions"
-        aria-label="Source-local distributions"
+        aria-label="Node-by-node distributions"
         hidden
       >
         <div class="comparison-distributions-heading">
           <div>
-            <p class="eyebrow">Source-local distributions</p>
+            <p class="eyebrow">Node-by-node distributions</p>
             <h2>How does each current mempool look?</h2>
           </div>
           <div
@@ -377,9 +388,9 @@
             </button>
           </div>
           <p>
-            Each panel summarizes the selected population of one source's
-            current snapshot on shared axes, weighted by virtual size. Absence
-            from one source is not evidence of rejection.
+            Each panel summarizes one node's selected population on shared axes,
+            weighted by virtual size. Absence from one node is not evidence of
+            rejection.
           </p>
         </div>
         <div class="comparison-distribution-grid">
@@ -432,9 +443,11 @@
               source.
             </p>
             <div class="joint-layout">
-              <div class="joint-y-axis" aria-hidden="true">
-                <span>128k+</span><span>2k</span><span>64</span>
-              </div>
+              <div
+                id="joint-left-y-axis"
+                class="joint-y-axis"
+                aria-hidden="true"
+              ></div>
               <div id="joint-left" class="joint-chart-wrap">
                 <canvas
                   id="joint-left-canvas"
@@ -451,9 +464,11 @@
               source.
             </p>
             <div class="joint-layout">
-              <div class="joint-y-axis" aria-hidden="true">
-                <span>128k+</span><span>2k</span><span>64</span>
-              </div>
+              <div
+                id="joint-right-y-axis"
+                class="joint-y-axis"
+                aria-hidden="true"
+              ></div>
               <div id="joint-right" class="joint-chart-wrap">
                 <canvas
                   id="joint-right-canvas"
@@ -483,7 +498,9 @@
             <h3 id="dist-data-left-title">Data carriage · Source A</h3>
             <p class="distribution-note">
               OP_RETURN carried bytes by data-protocols group, virtual-size
-              weighted.
+              weighted. References describe conventional pushed-payload forms;
+              Atlas plots bytes summed across outputs, not serialized script
+              size.
             </p>
             <div id="data-left" class="spectrum-wrap"></div>
           </article>
@@ -491,7 +508,9 @@
             <h3 id="dist-data-right-title">Data carriage · Source B</h3>
             <p class="distribution-note">
               OP_RETURN carried bytes by data-protocols group, virtual-size
-              weighted.
+              weighted. References describe conventional pushed-payload forms;
+              Atlas plots bytes summed across outputs, not serialized script
+              size.
             </p>
             <div id="data-right" class="spectrum-wrap"></div>
           </article>
@@ -502,9 +521,11 @@
               within this source.
             </p>
             <div class="joint-layout">
-              <div class="joint-y-axis" aria-hidden="true">
-                <span>1k+</span><span>32</span><span>1</span>
-              </div>
+              <div
+                id="complexity-left-y-axis"
+                class="joint-y-axis"
+                aria-hidden="true"
+              ></div>
               <div id="complexity-left" class="joint-chart-wrap">
                 <canvas
                   id="complexity-left-canvas"
@@ -523,9 +544,11 @@
               within this source.
             </p>
             <div class="joint-layout">
-              <div class="joint-y-axis" aria-hidden="true">
-                <span>1k+</span><span>32</span><span>1</span>
-              </div>
+              <div
+                id="complexity-right-y-axis"
+                class="joint-y-axis"
+                aria-hidden="true"
+              ></div>
               <div id="complexity-right" class="joint-chart-wrap">
                 <canvas
                   id="complexity-right-canvas"
@@ -580,9 +603,9 @@
             </h2>
           </div>
           <p>
-            Each row is one source-local membership population partitioned by
+            Each row represents one node's membership population, partitioned by
             policy result. Transactions present in both snapshots appear once
-            for each source.
+            for each node.
           </p>
         </div>
         <div class="comparison-policy-matrix-scroll">

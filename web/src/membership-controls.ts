@@ -4,7 +4,6 @@ const MEMBERSHIP_CONTROL_IDS = [
   "minimum-fee-rate",
   "maximum-age",
   "minimum-vsize",
-  "apply-filters",
   "reset-filters",
 ] as const;
 
