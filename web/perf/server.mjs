@@ -11,7 +11,16 @@ const FIXTURE_ROOT = join(WEB_ROOT, ".perf-fixtures", "performance");
 const MANIFEST_PATH = join(FIXTURE_ROOT, "manifest.json");
 const MANIFEST_VERSION = 2;
 const PERFORMANCE_SOURCE_COUNT = 2;
-const PERFORMANCE_TRANSACTION_COUNT = 70_000;
+const PERFORMANCE_TRANSACTION_COUNT = Number.parseInt(
+  process.env.ATLAS_PERF_TRANSACTION_COUNT ?? "70000",
+  10,
+);
+if (
+  !Number.isSafeInteger(PERFORMANCE_TRANSACTION_COUNT) ||
+  PERFORMANCE_TRANSACTION_COUNT <= 0
+) {
+  throw new Error("ATLAS_PERF_TRANSACTION_COUNT must be a positive integer");
+}
 const GZIP_LEVEL = 6;
 const STAGE_CACHE_CONTROL =
   "public, max-age=31536000, immutable, must-revalidate";

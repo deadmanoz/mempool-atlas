@@ -19,7 +19,7 @@ export interface DistributionViewTestHarness {
   readonly resizeObservers: ControlledResizeObserver[];
   readonly cancelledAnimationFrames: number[];
   pendingAnimationFrames(): number;
-  flushAnimationFrames(): void;
+  flushAnimationFrames(): Promise<void>;
   cleanup(): void;
 }
 
@@ -99,6 +99,7 @@ export const installDistributionViewTestHarness =
       readonly thresholds = [0];
     }
     vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
+    vi.stubGlobal("scheduler", { yield: () => Promise.resolve() });
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
       () => canvasContext as unknown as CanvasRenderingContext2D,
     );
@@ -124,12 +125,14 @@ export const installDistributionViewTestHarness =
       resizeObservers,
       cancelledAnimationFrames,
       pendingAnimationFrames: () => animationFrames.size,
-      flushAnimationFrames: () => {
+      flushAnimationFrames: async () => {
         const pending = [...animationFrames.values()];
         animationFrames.clear();
         for (const callback of pending) {
           callback(performance.now());
         }
+        await Promise.resolve();
+        await Promise.resolve();
       },
       cleanup: () => {
         document.body.replaceChildren();

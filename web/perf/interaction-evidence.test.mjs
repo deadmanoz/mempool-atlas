@@ -18,11 +18,28 @@ const measurement = (label, start, end, handler, outcome) => ({
 
 const nodeEvidence = () => {
   const measuredInteractions = [
-    measurement("node-fee-rate-by-age-activation", 10, 30, 5, {
+    measurement("node-buckets-activation", 10, 30, 3, {
+      selected_lens: "buckets",
+      rendered_transaction_count: 70_000,
+    }),
+    measurement("node-terrain-metric-toggle", 40, 70, 4, {
+      selected_metric: "vsize",
+      rendered_transaction_count: 70_000,
+    }),
+    measurement("node-classifier-lens-switch", 80, 115, 5, {
+      selected_classifier: "transaction_shape",
+      rendered_transaction_count: 70_000,
+    }),
+    measurement("node-marginal-label-selection", 125, 165, 6, {
+      selected_classifier: "transaction_shape",
+      selected_label: "other_shape",
+      label_selected: true,
+    }),
+    measurement("node-fee-rate-by-age-activation", 175, 205, 5, {
       selected_lens: "fee-rate-by-age",
       rendered_transaction_count: 70_000,
     }),
-    measurement("node-filter-input", 40, 80, 6, {
+    measurement("node-filter-input", 215, 255, 6, {
       minimum_fee_rate: 2,
       filtered_transaction_count: 60_000,
       source_transaction_count: 70_000,
@@ -32,6 +49,7 @@ const nodeEvidence = () => {
   return {
     result: {
       scenario: "node",
+      snapshot_transaction_count: 70_000,
       measured_interactions: measuredInteractions,
       maximum_interaction_handler_ms: 6,
       maximum_interaction_settle_ms: 40,

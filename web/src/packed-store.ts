@@ -598,6 +598,24 @@ export const packedSnapshotRowVsize = (
   row: number,
 ): number | undefined => stores.get(snapshot)?.rowVsize(row);
 
+export const packedTransactionRowVsize = (
+  transactions: readonly MempoolTransaction[],
+  row: number,
+): number | undefined => transactionStores.get(transactions)?.rowVsize(row);
+
+export const packedTransactionRowTxid = (
+  transactions: readonly MempoolTransaction[],
+  row: number,
+): string | undefined => {
+  const store = transactionStores.get(transactions);
+  const txids = store === undefined ? undefined : txidColumns.get(store);
+  return store !== undefined &&
+    txids !== undefined &&
+    isValidRow(row, store.rowCount)
+    ? hashAt(txids, row)
+    : undefined;
+};
+
 export const packedSnapshotTransaction = (
   snapshot: MempoolSnapshot,
   row: number,

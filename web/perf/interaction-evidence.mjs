@@ -20,7 +20,14 @@ const nonEmptyArray = (value, label) => {
 
 export const interactionLabelsForScenario = (scenario) => {
   if (scenario === "node") {
-    return ["node-fee-rate-by-age-activation", "node-filter-input"];
+    return [
+      "node-buckets-activation",
+      "node-terrain-metric-toggle",
+      "node-classifier-lens-switch",
+      "node-marginal-label-selection",
+      "node-fee-rate-by-age-activation",
+      "node-filter-input",
+    ];
   }
   if (scenario === "comparison") {
     return ["comparison-distribution-scope-switch"];
@@ -86,20 +93,48 @@ export const validateInteractionEvidence = (
     }
   });
 
-  const [firstInteraction, secondInteraction] = measurements;
+  const [firstInteraction] = measurements;
   if (result.scenario === "node") {
+    const [
+      terrainInteraction,
+      metricInteraction,
+      classifierInteraction,
+      labelInteraction,
+      feeAgeInteraction,
+      filterInteraction,
+    ] = measurements;
+    const sourceTransactionCount = finite(
+      result.snapshot_transaction_count,
+      `${label}.snapshot_transaction_count`,
+      { positive: true },
+    );
     const filteredCount = finite(
-      secondInteraction.outcome.filtered_transaction_count,
+      filterInteraction.outcome.filtered_transaction_count,
       `${label}.node-filter-input.filtered_transaction_count`,
       { positive: true },
     );
     if (
-      firstInteraction.outcome.selected_lens !== "fee-rate-by-age" ||
-      firstInteraction.outcome.rendered_transaction_count !== 70_000 ||
-      secondInteraction.outcome.minimum_fee_rate !== 2 ||
-      secondInteraction.outcome.source_transaction_count !== 70_000 ||
-      filteredCount >= 70_000 ||
-      secondInteraction.outcome.rendered_transaction_count !== filteredCount
+      terrainInteraction.outcome.selected_lens !== "buckets" ||
+      terrainInteraction.outcome.rendered_transaction_count !==
+        sourceTransactionCount ||
+      metricInteraction.outcome.selected_metric !== "vsize" ||
+      metricInteraction.outcome.rendered_transaction_count !==
+        sourceTransactionCount ||
+      classifierInteraction.outcome.selected_classifier !==
+        "transaction_shape" ||
+      classifierInteraction.outcome.rendered_transaction_count !==
+        sourceTransactionCount ||
+      labelInteraction.outcome.selected_classifier !== "transaction_shape" ||
+      labelInteraction.outcome.selected_label !== "other_shape" ||
+      labelInteraction.outcome.label_selected !== true ||
+      feeAgeInteraction.outcome.selected_lens !== "fee-rate-by-age" ||
+      feeAgeInteraction.outcome.rendered_transaction_count !==
+        sourceTransactionCount ||
+      filterInteraction.outcome.minimum_fee_rate !== 2 ||
+      filterInteraction.outcome.source_transaction_count !==
+        sourceTransactionCount ||
+      filteredCount >= sourceTransactionCount ||
+      filterInteraction.outcome.rendered_transaction_count !== filteredCount
     ) {
       throw new Error(`${label}.measured_interactions outcomes are invalid`);
     }

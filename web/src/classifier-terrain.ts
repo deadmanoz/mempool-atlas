@@ -1,5 +1,6 @@
 import type {
   BucketTerrainLayout,
+  BucketTerrainPaint,
   BucketTerrainSectionGroup,
 } from "./bucket-terrain";
 import {
@@ -98,6 +99,7 @@ interface ClassifierLabelPopulationIndex {
   rows: Uint32Array;
   vsize: number;
   population: ClassifierLabelPopulation | null;
+  rowMembership: Uint8Array | null;
 }
 const classifierLabelPopulationsCache = new WeakMap<
   readonly MempoolTransaction[],
@@ -118,6 +120,12 @@ export type ClassifierTerrainLayout = BucketTerrainLayout<
   ClassifierBucketKey,
   ClassifierBucketSignature
 >;
+
+export interface ClassifierTerrainPaintSelection {
+  selectedBucketKey: ClassifierBucketKey | null;
+  selectedLabel: string | null;
+  selectedLabelMembership: Uint8Array | null;
+}
 
 const LABEL_COLORS = [
   "#53d9d4",
@@ -432,6 +440,7 @@ const finalizeClassifierLabelPopulations = (
         rows: Uint32Array.from(rows),
         vsize,
         population: null,
+        rowMembership: null,
       },
     ]),
   );
@@ -526,6 +535,7 @@ const cacheClassifierBuilderCooperatively = async (
         rows: Uint32Array.from(rows),
         vsize,
         population: null,
+        rowMembership: null,
       });
       if (index + 1 < labelEntries.length) {
         await yieldAfterFinalizationSlice();
@@ -654,6 +664,29 @@ export const classifierLabelPopulation = (
       transactions.length === 0 ? 0 : entries.length / transactions.length,
   };
   return index.population;
+};
+
+/**
+ * Return one bit per root transaction row for a marginal classifier label.
+ * Terrain paint can then classify a glyph without a txid lookup or packed-row
+ * materialization. The bitset is retained with the existing label-row index.
+ */
+export const classifierLabelRowMembership = (
+  transactions: readonly MempoolTransaction[],
+  descriptor: ClassifierDescriptor,
+  labelKey: string,
+): Uint8Array | null => {
+  const index = ensureClassifierLabelPopulations(transactions, descriptor).get(
+    labelKey,
+  );
+  if (index === undefined) return null;
+  if (index.rowMembership !== null) return index.rowMembership;
+  const membership = new Uint8Array(Math.ceil(transactions.length / 8));
+  for (const row of index.rows) {
+    membership[row >> 3] = (membership[row >> 3] ?? 0) | (1 << (row & 7));
+  }
+  index.rowMembership = membership;
+  return membership;
 };
 
 const normalizedQueryLabels = (
@@ -892,6 +925,48 @@ export const classifierBucketColor = (
     ({ key }) => key === signature.labelKeys[0],
   );
   return LABEL_COLORS[Math.max(0, firstIndex) % LABEL_COLORS.length] as string;
+};
+
+export const classifierTerrainPaint = (
+  descriptor: ClassifierDescriptor,
+  selection: ClassifierTerrainPaintSelection,
+): BucketTerrainPaint<
+  ClassifierTerrainSectionKey,
+  ClassifierBucketKey,
+  ClassifierBucketSignature
+> => {
+  const { selectedBucketKey, selectedLabel, selectedLabelMembership } =
+    selection;
+  const hasFilter = selectedBucketKey !== null || selectedLabel !== null;
+  const glyphMatchesSelectedLabel = (sourceRow: number): boolean =>
+    selectedLabelMembership !== null &&
+    ((selectedLabelMembership[sourceRow >> 3] ?? 0) &
+      (1 << (sourceRow & 7))) !==
+      0;
+  return {
+    color: (region) => classifierBucketColor(descriptor, region.signature),
+    selected: (region) =>
+      selectedBucketKey !== null
+        ? region.key === selectedBucketKey
+        : selectedLabel !== null &&
+          !classifierBucketIsSummary(region.signature) &&
+          classifierBucketContainsLabel(region.signature, selectedLabel),
+    partial: (region) => region.signature.state === "partial",
+    glyphOpacity: (region, selected, glyph) =>
+      region.signature.state === "unavailable"
+        ? hasFilter
+          ? 0.2
+          : 0.82
+        : selected
+          ? 1
+          : selectedBucketKey !== null
+            ? 0.46
+            : selectedLabel !== null
+              ? glyphMatchesSelectedLabel(glyph.sourceRow)
+                ? 1
+                : 0.2
+              : 0.82,
+  };
 };
 
 export const classifierBucketContainsLabel = (

@@ -703,6 +703,38 @@ const measureClickHandler = async (
   return { intervalStartTimeMs, ...handler };
 };
 
+const measureSelectHandler = async (
+  page: Page,
+  selector: string,
+  value: string,
+): Promise<ClickHandlerTiming> => {
+  const intervalStartTimeMs = await page.evaluate(() => performance.now());
+  const handler = await page.evaluate(
+    ({ targetSelector, nextValue }) => {
+      const target = document.querySelector<HTMLSelectElement>(targetSelector);
+      if (target === null) {
+        throw new Error(`interaction target ${targetSelector} is unavailable`);
+      }
+      if (![...target.options].some((option) => option.value === nextValue)) {
+        throw new Error(
+          `interaction option ${nextValue} is unavailable in ${targetSelector}`,
+        );
+      }
+      const startTimeMs = performance.now();
+      target.value = nextValue;
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+      const endTimeMs = performance.now();
+      return {
+        startTimeMs,
+        endTimeMs,
+        durationMs: endTimeMs - startTimeMs,
+      };
+    },
+    { targetSelector: selector, nextValue: value },
+  );
+  return { intervalStartTimeMs, ...handler };
+};
+
 const measuredInteraction = (
   label: string,
   handler: ClickHandlerTiming,
@@ -1324,7 +1356,89 @@ const filterSummaryCounts = (
 
 const measureNodePackedStoreInteractions = async (
   page: Page,
+  transactionCount: number,
 ): Promise<MeasuredInteraction[]> => {
+  const formattedTransactionCount = transactionCount.toLocaleString("en-US");
+  const terrainHandler = await measureClickHandler(page, "#terrain-tab");
+  await expect(page.locator("#terrain-tab")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator("#terrain-canvas")).toHaveAttribute(
+    "aria-label",
+    new RegExp(`for ${formattedTransactionCount} transactions`),
+  );
+  const terrainSettledAtMs = await settleFrames(page);
+  const terrainMeasurement = measuredInteraction(
+    "node-buckets-activation",
+    terrainHandler,
+    terrainSettledAtMs,
+    {
+      selected_lens: "buckets",
+      rendered_transaction_count: transactionCount,
+    },
+  );
+
+  const metricHandler = await measureClickHandler(page, "#mode-vsize");
+  await expect(page.locator("#mode-vsize")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.locator("#terrain-canvas")).toHaveAttribute(
+    "aria-label",
+    /area represents virtual size/,
+  );
+  const metricSettledAtMs = await settleFrames(page);
+  const metricMeasurement = measuredInteraction(
+    "node-terrain-metric-toggle",
+    metricHandler,
+    metricSettledAtMs,
+    { selected_metric: "vsize", rendered_transaction_count: transactionCount },
+  );
+
+  const classifierHandler = await measureSelectHandler(
+    page,
+    "#classification-lens-select",
+    "transaction_shape",
+  );
+  await expect(page.locator("#classification-lens-select")).toHaveValue(
+    "transaction_shape",
+  );
+  await expect(page.locator("#terrain-canvas")).toHaveAttribute(
+    "aria-label",
+    new RegExp(
+      `^Transaction shape buckets for ${formattedTransactionCount} transactions`,
+    ),
+  );
+  const classifierSettledAtMs = await settleFrames(page);
+  const classifierMeasurement = measuredInteraction(
+    "node-classifier-lens-switch",
+    classifierHandler,
+    classifierSettledAtMs,
+    {
+      selected_classifier: "transaction_shape",
+      rendered_transaction_count: transactionCount,
+    },
+  );
+
+  const marginalLabelSelector = '#rule-list button[data-label="other_shape"]';
+  const labelHandler = await measureClickHandler(page, marginalLabelSelector);
+  await expect(page.locator(marginalLabelSelector)).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  const labelSettledAtMs = await settleFrames(page);
+  const labelMeasurement = measuredInteraction(
+    "node-marginal-label-selection",
+    labelHandler,
+    labelSettledAtMs,
+    {
+      selected_classifier: "transaction_shape",
+      selected_label: "other_shape",
+      label_selected: true,
+    },
+  );
+
   const feeAgeHandler = await measureClickHandler(page, "#fee-age-tab");
   await expect(page.locator("#fee-age-tab")).toHaveAttribute(
     "aria-selected",
@@ -1332,7 +1446,7 @@ const measureNodePackedStoreInteractions = async (
   );
   await expect(page.locator("#mempool-canvas")).toHaveAttribute(
     "aria-label",
-    "Fee rate by age view containing 70,000 filtered transactions.",
+    `Fee rate by age view containing ${formattedTransactionCount} filtered transactions.`,
   );
   const feeAgeSettledAtMs = await settleFrames(page);
   const feeAgeMeasurement = measuredInteraction(
@@ -1341,7 +1455,7 @@ const measureNodePackedStoreInteractions = async (
     feeAgeSettledAtMs,
     {
       selected_lens: "fee-rate-by-age",
-      rendered_transaction_count: 70_000,
+      rendered_transaction_count: transactionCount,
     },
   );
 
@@ -1355,13 +1469,15 @@ const measureNodePackedStoreInteractions = async (
     .poll(async () => {
       const summary = (await filterSummary.textContent()) ?? "";
       const match = summary.match(
-        /^Showing ([\d,]+) of 70,000 transactions\.$/,
+        new RegExp(
+          `^Showing ([\\d,]+) of ${formattedTransactionCount} transactions\\.$`,
+        ),
       );
       return match === null
-        ? 70_000
+        ? transactionCount
         : Number((match[1] ?? "").replaceAll(",", ""));
     })
-    .toBeLessThan(70_000);
+    .toBeLessThan(transactionCount);
   const summary = (await filterSummary.textContent()) ?? "";
   const counts = filterSummaryCounts(summary);
   await expect(page.locator("#mempool-canvas")).toHaveAttribute(
@@ -1386,11 +1502,18 @@ const measureNodePackedStoreInteractions = async (
   if (
     counts.filtered <= 0 ||
     counts.filtered >= counts.total ||
-    counts.total !== 70_000
+    counts.total !== transactionCount
   ) {
     throw new Error("node interaction did not exercise the production fixture");
   }
-  return [feeAgeMeasurement, filterMeasurement];
+  return [
+    terrainMeasurement,
+    metricMeasurement,
+    classifierMeasurement,
+    labelMeasurement,
+    feeAgeMeasurement,
+    filterMeasurement,
+  ];
 };
 
 const measureComparisonPackedStoreInteraction = async (
@@ -1646,7 +1769,10 @@ const runScenario = async (
   const completeMemory = await measureMemory(page);
   const measuredInteractions =
     scenario === "node"
-      ? await measureNodePackedStoreInteractions(page)
+      ? await measureNodePackedStoreInteractions(
+          page,
+          selectedSnapshots[0]?.transaction_count ?? 0,
+        )
       : await measureComparisonPackedStoreInteraction(page);
   const bip110RuleNavigation =
     scenario === "node" ? await measureBip110RuleNavigation(page) : null;

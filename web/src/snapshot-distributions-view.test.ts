@@ -246,9 +246,9 @@ describe("createSnapshotDistributionsView", () => {
     expect(harness.pendingAnimationFrames()).toBe(1);
     harness.resizeObservers[0]?.trigger();
     expect(harness.pendingAnimationFrames()).toBe(1);
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
     expect(
       root.querySelector("#complexity-y-axis .joint-y-axis-title")?.textContent,
     ).toBe("Outputs");
@@ -372,8 +372,8 @@ describe("createSnapshotDistributionsView", () => {
       ),
     ).toHaveLength(2);
 
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
     const canvas = root.querySelector<HTMLCanvasElement>("#joint-canvas")!;
     expect(canvas.getAttribute("role")).toBe("button");
     expect(canvas.getAttribute("aria-label")).toContain("Fee rate:");
@@ -424,7 +424,7 @@ describe("createSnapshotDistributionsView", () => {
     );
 
     harness.resizeObservers[0]?.trigger();
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
 
     expect(canvas.getAttribute("data-distribution-inspection-key")).toBe(
       pinnedCell,
@@ -452,8 +452,8 @@ describe("createSnapshotDistributionsView", () => {
       active.observed_at_ms + 1_000,
     );
     await view.render(active, selection());
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
     const activeSpectrum = root.querySelector("#spectrum-chart svg");
     const activeDensity =
       root.querySelector<HTMLCanvasElement>("#joint-canvas")!;
@@ -486,8 +486,8 @@ describe("createSnapshotDistributionsView", () => {
       root.querySelector('#composition-bars button[data-segment="complete:1"]'),
     ).not.toBeNull();
 
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
     expect(activeDensity.getAttribute("role")).toBe("button");
     expect(activeDensity.hasAttribute("aria-hidden")).toBe(false);
   });
@@ -509,9 +509,9 @@ describe("createSnapshotDistributionsView", () => {
       active.observed_at_ms + 1_000,
     );
     await view.render(active, selection());
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
     expect(root.querySelector("#complexity-chart .empty-state")).not.toBeNull();
     const prepared = await view.prepare(candidate, selection());
 
@@ -521,9 +521,9 @@ describe("createSnapshotDistributionsView", () => {
     expect(
       root.querySelector("#complexity-canvas")?.getAttribute("aria-hidden"),
     ).toBe("true");
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
     expect(root.querySelector("#complexity-canvas")?.getAttribute("role")).toBe(
       "button",
     );

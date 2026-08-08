@@ -218,9 +218,9 @@ describe("createComparisonDistributionsView", () => {
     expect(harness.pendingAnimationFrames()).toBe(1);
     harness.resizeObservers[0]?.trigger();
     expect(harness.pendingAnimationFrames()).toBe(1);
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
     expect(
       root!.querySelector("#complexity-left-y-axis .joint-y-axis-title")
         ?.textContent,
@@ -300,7 +300,7 @@ describe("createComparisonDistributionsView", () => {
     const view = createComparisonDistributionsView(root);
     await view.render(comparison);
     for (let frame = 0; frame < 6; frame += 1) {
-      harness.flushAnimationFrames();
+      await harness.flushAnimationFrames();
     }
     const activeSpectrum = root.querySelector("#spectrum-left svg");
     const activeDensity =
@@ -349,8 +349,8 @@ describe("createComparisonDistributionsView", () => {
       "CANDIDATE-A node",
     );
     expect(root.querySelector("#spectrum-left svg")).not.toBe(activeSpectrum);
-    harness.flushAnimationFrames();
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
     expect(activeDensity.getAttribute("role")).toBe("button");
     expect(activeDensity.hasAttribute("aria-hidden")).toBe(false);
 
@@ -444,7 +444,7 @@ describe("createComparisonDistributionsView", () => {
     expect(root.querySelector("#spectrum-left .empty-state")).not.toBeNull();
     expect(harness.pendingAnimationFrames()).toBe(1);
 
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
     const obsoleteReset = view.render(largeComparison);
     view.reset();
     await obsoleteReset;

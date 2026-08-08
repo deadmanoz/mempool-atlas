@@ -1,9 +1,16 @@
+import { yieldCooperatively } from "./cooperative-work";
+
 export interface FrameSequenceRenderer {
   schedule(): void;
   cancel(): void;
 }
 
-/** Run at most one rendering step in each animation frame. */
+/**
+ * Give the browser one animation frame, then run at most one rendering step
+ * after yielding back to the task scheduler. Canvas/DOM work cannot inflate
+ * the animation-frame callback itself, and every step gets a paint opportunity
+ * before the next one is scheduled.
+ */
 export const createFrameSequenceRenderer = (
   steps: readonly (() => void)[],
 ): FrameSequenceRenderer => {
@@ -12,18 +19,23 @@ export const createFrameSequenceRenderer = (
 
   const requestFrame = (expectedRevision: number, index: number): void => {
     const callback = function sequenceRenderFrame() {
-      renderFrame(expectedRevision, index);
+      void renderFrame(expectedRevision, index);
     };
     Object.assign(callback, { __atlasPerfLabel: "frame-sequence" });
     pendingFrame = window.requestAnimationFrame(callback);
   };
 
-  const renderFrame = (expectedRevision: number, index: number): void => {
-    pendingFrame = null;
+  const renderFrame = async (
+    expectedRevision: number,
+    index: number,
+  ): Promise<void> => {
+    await yieldCooperatively();
     if (expectedRevision !== revision) return;
     if (index >= 0) steps[index]?.();
     if (index + 1 < steps.length) {
       requestFrame(expectedRevision, index + 1);
+    } else {
+      pendingFrame = null;
     }
   };
 

@@ -7,6 +7,7 @@ import type {
 import {
   bucketTerrainRegionCanShowLabel,
   createBucketTerrainLayout,
+  createBucketTerrainLayoutCooperatively,
 } from "./bucket-terrain";
 import {
   bip110RulePopulation,
@@ -22,6 +23,7 @@ import {
   classifierBuckets,
   classifierAllMatchCompatibility,
   classifierLabelPopulation,
+  classifierLabelRowMembership,
   classifierLabelQueryPopulation,
   precomputeClassifierBuckets,
   classifierTerrainGroups,
@@ -350,6 +352,12 @@ describe("classifier terrain", () => {
     const secondBuckets = classifierBuckets(transactions, secondDescriptor);
     const groups = classifierTerrainGroups(transactions, descriptor);
     const alpha = classifierLabelPopulation(transactions, descriptor, "alpha");
+    const alphaRows = classifierLabelRowMembership(
+      transactions,
+      descriptor,
+      "alpha",
+    );
+    const layout = createBucketTerrainLayout(groups, 1_000, 600, "vsize");
 
     expect(transactionAt).toHaveBeenCalledTimes(accessesAfterPrecompute);
     expect(classifierBuckets(transactions, descriptor)).toBe(firstBuckets);
@@ -364,9 +372,19 @@ describe("classifier terrain", () => {
       groups.reduce((total, group) => total + group.transactions.length, 0),
     ).toBe(70_000);
     expect(alpha?.count).toBe(35_000);
+    expect(alphaRows).toHaveLength(Math.ceil(70_000 / 8));
+    expect(alphaRows?.[0] ?? 0).toBe(0b1010_1010);
+    expect(layout.glyphs).toHaveLength(70_000);
+    expect(new Set(layout.glyphs.map(({ sourceRow }) => sourceRow)).size).toBe(
+      70_000,
+    );
     expect(classifierLabelPopulation(transactions, descriptor, "alpha")).toBe(
       alpha,
     );
+    expect(
+      classifierLabelRowMembership(transactions, descriptor, "alpha"),
+    ).toBe(alphaRows);
+    expect(transactionAt).toHaveBeenCalledTimes(accessesAfterPrecompute);
   });
 
   it("matches synchronous bucket metadata, ordering, and populations", async () => {
@@ -829,6 +847,36 @@ describe("classifier terrain", () => {
     expect(
       (complete?.rect.width ?? 0) / (unavailable?.rect.width ?? 1),
     ).toBeCloseTo(3, 1);
+  });
+
+  it("builds the same terrain cooperatively in bounded slices", async () => {
+    const transactions = Array.from({ length: 257 }, (_, index) =>
+      transaction(
+        index + 1,
+        100 + (index % 17),
+        result(index % 5 === 0 ? "partial" : "complete", [
+          index % 2 === 0 ? "alpha" : "beta",
+        ]),
+      ),
+    );
+    const groups = classifierTerrainGroups(transactions, descriptor);
+    const expected = createBucketTerrainLayout(groups, 1_000, 600, "vsize");
+    let yields = 0;
+    const actual = await createBucketTerrainLayoutCooperatively(
+      groups,
+      1_000,
+      600,
+      "vsize",
+      {
+        batchSize: 32,
+        yieldBetweenBatches: () => {
+          yields += 1;
+        },
+      },
+    );
+
+    expect(actual).toEqual(expected);
+    expect(yields).toBeGreaterThan(0);
   });
 
   it("avoids a duplicate nested bucket for singleton coverage sections", () => {

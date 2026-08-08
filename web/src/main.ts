@@ -30,7 +30,7 @@ import {
   bucketTerrainRegionCanShowLabel,
   hitTestBucketTerrain,
   paintBucketTerrainSelection,
-  renderBucketTerrain,
+  renderBucketTerrainCooperatively,
   type BucketTerrainLayout,
 } from "./bucket-terrain";
 import {
@@ -46,7 +46,9 @@ import {
   classifierBucketIsSummary,
   classifierBucketLabel,
   classifierLabelPopulation,
+  classifierLabelRowMembership,
   classifierBucketPopulation,
+  classifierTerrainPaint,
   classifierTerrainGroups,
   classifierUsesSummaryBuckets,
   type ClassifierLabelMatchMode,
@@ -286,6 +288,7 @@ let selectedInspector: InspectorSelection = {
   rule: "element_size",
 };
 let terrainMode: TerrainMode = "count";
+let terrainRenderController: AbortController | null = null;
 let policyTerrainLayout: TerrainLayout | null = null;
 let classifierTerrainLayout: ClassifierTerrainLayout | null = null;
 let pendingTerrainFrame: number | null = null;
@@ -357,6 +360,8 @@ const selectedClassifierIsBip110 = (): boolean =>
   selectedClassifierId === KNOTS_BIP110_CLASSIFIER_ID;
 
 const resetTerrainLayouts = (): void => {
+  terrainRenderController?.abort();
+  terrainRenderController = null;
   policyTerrainLayout = null;
   classifierTerrainLayout = null;
   terrainSelectionView.reset();
@@ -1579,69 +1584,58 @@ const renderTerrainFrame = (): void => {
   if (descriptor === null) {
     return;
   }
-  const hasFilter =
-    selectedClassifierBucketKey !== null || selectedClassifierLabel !== null;
-  const glyphMatchesSelectedLabel = (txid: string): boolean => {
-    if (
-      selectedClassifierBucketKey !== null ||
-      selectedClassifierLabel === null
-    ) {
-      return false;
-    }
-    const transaction = currentTransaction(txid);
-    return (
-      transaction !== undefined &&
-      (classificationResult(transaction, selectedClassifierId)?.labels.includes(
-        selectedClassifierLabel,
-      ) ??
-        false)
-    );
-  };
-  classifierTerrainLayout = renderBucketTerrain(
+  const selectedLabelMembership =
+    selectedClassifierBucketKey === null && selectedClassifierLabel !== null
+      ? classifierLabelRowMembership(
+          currentSnapshot.transactions,
+          descriptor,
+          selectedClassifierLabel,
+        )
+      : null;
+  const snapshot = currentSnapshot;
+  const controller = new AbortController();
+  terrainRenderController?.abort();
+  terrainRenderController = controller;
+  const presentation = classifierTerrainPaint(descriptor, {
+    selectedBucketKey: selectedClassifierBucketKey,
+    selectedLabel: selectedClassifierLabel,
+    selectedLabelMembership,
+  });
+  const previousLayout = classifierTerrainLayout;
+  void renderBucketTerrainCooperatively(
     terrainCanvas,
-    classifierTerrainGroups(currentSnapshot.transactions, descriptor),
+    classifierTerrainGroups(snapshot.transactions, descriptor),
     terrainMode,
-    {
-      color: (region) => classifierBucketColor(descriptor, region.signature),
-      selected: (region) =>
-        selectedClassifierBucketKey !== null
-          ? region.key === selectedClassifierBucketKey
-          : selectedClassifierLabel !== null &&
-            !classifierBucketIsSummary(region.signature) &&
-            classifierBucketContainsLabel(
-              region.signature,
-              selectedClassifierLabel,
-            ),
-      partial: (region) => region.signature.state === "partial",
-      glyphOpacity: (region, selected, glyph) =>
-        region.signature.state === "unavailable"
-          ? hasFilter
-            ? 0.2
-            : 0.82
-          : selected
-            ? 1
-            : selectedClassifierBucketKey !== null
-              ? 0.46
-              : selectedClassifierLabel !== null
-                ? glyphMatchesSelectedLabel(glyph.txid)
-                  ? 1
-                  : 0.2
-                : 0.82,
-    },
-    classifierTerrainLayout,
+    presentation,
+    previousLayout,
     null,
-  );
-  terrainSelectionView.capture(classifierTerrainLayout);
-  if (selectedTransactionId !== null && !paintCurrentTerrainSelection()) {
-    paintCurrentTerrainSelectionDirect();
-  }
-  renderClassifierTerrainRegions(classifierTerrainLayout, descriptor);
-  terrainCanvas.setAttribute(
-    "aria-label",
-    classifierUsesSummaryBuckets(descriptor)
-      ? `${descriptor.title} presentation groups for ${countFormat.format(currentSnapshot.transaction_count)} transactions. Every transaction appears once in a broad script-profile and coverage-state group; exact properties remain available per transaction. Group area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`
-      : `${descriptor.title} buckets for ${countFormat.format(currentSnapshot.transaction_count)} transactions. Every transaction appears once in its exact observed label-set and coverage-state bucket. Bucket area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`,
-  );
+    { batchSize: 500, signal: controller.signal },
+  )
+    .then((layout) => {
+      if (
+        controller.signal.aborted ||
+        currentSnapshot !== snapshot ||
+        currentClassifierDescriptor() !== descriptor
+      ) {
+        return;
+      }
+      terrainRenderController = null;
+      classifierTerrainLayout = layout;
+      terrainSelectionView.capture(layout);
+      if (selectedTransactionId !== null && !paintCurrentTerrainSelection()) {
+        paintCurrentTerrainSelectionDirect();
+      }
+      renderClassifierTerrainRegions(layout, descriptor);
+      terrainCanvas.setAttribute(
+        "aria-label",
+        classifierUsesSummaryBuckets(descriptor)
+          ? `${descriptor.title} presentation groups for ${countFormat.format(snapshot.transaction_count)} transactions. Every transaction appears once in a broad script-profile and coverage-state group; exact properties remain available per transaction. Group area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`
+          : `${descriptor.title} buckets for ${countFormat.format(snapshot.transaction_count)} transactions. Every transaction appears once in its exact observed label-set and coverage-state bucket. Bucket area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`,
+      );
+    })
+    .catch((error: unknown) => {
+      if (!controller.signal.aborted) throw error;
+    });
 };
 
 const scheduleTerrainRender = (): void => {

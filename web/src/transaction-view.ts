@@ -4,7 +4,11 @@ import {
   yieldCooperatively,
   type CooperativeWorkOptions,
 } from "./cooperative-work";
-import { comparePackedTransactionRowsByVsize } from "./packed-store";
+import {
+  comparePackedTransactionRowsByVsize,
+  packedTransactionRowTxid,
+  packedTransactionRowVsize,
+} from "./packed-store";
 
 interface TransactionViewMetadata {
   source: readonly MempoolTransaction[];
@@ -93,6 +97,57 @@ const compactRows = (rows: readonly number[] | Uint32Array): Uint32Array => {
 const metadataFor = (
   transactions: readonly MempoolTransaction[],
 ): TransactionViewMetadata | null => metadataByView.get(transactions) ?? null;
+
+export interface TransactionViewIdentity {
+  sourceRow: number;
+  txid: string;
+}
+
+const sourcePosition = (
+  transactions: readonly MempoolTransaction[],
+  index: number,
+): { source: readonly MempoolTransaction[]; row: number } | null => {
+  if (
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index >= transactions.length
+  ) {
+    return null;
+  }
+  const metadata = metadataFor(transactions);
+  const row = metadata?.rows[index] ?? index;
+  return row === undefined
+    ? null
+    : { source: metadata?.source ?? transactions, row };
+};
+
+/**
+ * Read the stable root row and txid for one view entry without materializing a
+ * packed transaction. Plain arrays retain the same observable fallback.
+ */
+export const transactionViewIdentityAt = (
+  transactions: readonly MempoolTransaction[],
+  index: number,
+): TransactionViewIdentity | null => {
+  const position = sourcePosition(transactions, index);
+  if (position === null) return null;
+  const txid =
+    packedTransactionRowTxid(position.source, position.row) ??
+    position.source[position.row]?.txid;
+  return txid === undefined ? null : { sourceRow: position.row, txid };
+};
+
+/** Read vsize directly from packed storage when the view supports it. */
+export const transactionViewVsizeAt = (
+  transactions: readonly MempoolTransaction[],
+  index: number,
+): number | undefined => {
+  const position = sourcePosition(transactions, index);
+  return position === null
+    ? undefined
+    : (packedTransactionRowVsize(position.source, position.row) ??
+        position.source[position.row]?.vsize);
+};
 
 export const transactionIndexView = (
   transactions: readonly MempoolTransaction[],

@@ -1,4 +1,12 @@
 import { prepareCanvasBacking } from "./canvas-backing";
+import {
+  yieldCooperatively,
+  type CooperativeWorkOptions,
+} from "./cooperative-work";
+import {
+  transactionViewIdentityAt,
+  transactionViewVsizeAt,
+} from "./transaction-view";
 import type { MempoolTransaction } from "./types";
 
 export type BucketTerrainMode = "count" | "vsize";
@@ -63,6 +71,7 @@ export interface BucketTerrainGlyph<
   RegionKey extends string,
 > {
   txid: string;
+  sourceRow: number;
   regionKey: RegionKey;
   sectionKey: SectionKey;
   rect: BucketTerrainRect;
@@ -148,6 +157,10 @@ interface BucketTerrainRasterCache {
 }
 
 const rasterCacheByLayout = new WeakMap<object, BucketTerrainRasterCache>();
+const stagingCanvasByCanvas = new WeakMap<
+  HTMLCanvasElement,
+  HTMLCanvasElement
+>();
 
 const glyphDensity = <SectionKey extends string, RegionKey extends string>(
   glyph: BucketTerrainGlyph<SectionKey, RegionKey>,
@@ -264,16 +277,33 @@ const splitWeightedRegions = <Key extends string>(
   return result;
 };
 
-const sumVsize = (transactions: readonly MempoolTransaction[]): number =>
-  transactions.reduce((total, transaction) => total + transaction.vsize, 0);
+interface PopulationMeasurement {
+  count: number;
+  totalVsize: number;
+  vsizes: Float64Array;
+}
 
-const metric = (
+const measurePopulation = (
   transactions: readonly MempoolTransaction[],
+): PopulationMeasurement => {
+  const vsizes = new Float64Array(transactions.length);
+  let totalVsize = 0;
+  for (let index = 0; index < transactions.length; index += 1) {
+    const vsize = transactionViewVsizeAt(transactions, index) ?? 0;
+    vsizes[index] = vsize;
+    totalVsize += vsize;
+  }
+  return { count: transactions.length, totalVsize, vsizes };
+};
+
+const measuredWeight = (
+  measurement: PopulationMeasurement,
   mode: BucketTerrainMode,
-): number => (mode === "count" ? transactions.length : sumVsize(transactions));
+): number => (mode === "count" ? measurement.count : measurement.totalVsize);
 
 const transactionGlyph = <SectionKey extends string, RegionKey extends string>(
-  transaction: MempoolTransaction,
+  identity: { sourceRow: number; txid: string },
+  vsize: number,
   rect: BucketTerrainRect,
   regionKey: RegionKey,
   sectionKey: SectionKey,
@@ -284,11 +314,12 @@ const transactionGlyph = <SectionKey extends string, RegionKey extends string>(
     rect.height * 0.035,
   );
   return {
-    txid: transaction.txid,
+    txid: identity.txid,
+    sourceRow: identity.sourceRow,
     regionKey,
     sectionKey,
     rect: insetRect(rect, adaptiveGap),
-    vsize: transaction.vsize,
+    vsize,
   };
 };
 
@@ -297,6 +328,7 @@ const packCountTransactions = <
   RegionKey extends string,
 >(
   transactions: readonly MempoolTransaction[],
+  vsizes: Float64Array,
   rect: BucketTerrainRect,
   regionKey: RegionKey,
   sectionKey: SectionKey,
@@ -310,29 +342,37 @@ const packCountTransactions = <
   const completeRowHeight = (rect.height * columns) / transactions.length;
   const finalRowCount = transactions.length - columns * (rows - 1);
   const finalRowHeight = (rect.height * finalRowCount) / transactions.length;
-  return transactions.map((transaction, index) => {
+  const glyphs: BucketTerrainGlyph<SectionKey, RegionKey>[] = [];
+  for (let index = 0; index < transactions.length; index += 1) {
+    const identity = transactionViewIdentityAt(transactions, index);
+    if (identity === null) continue;
     const column = index % columns;
     const row = Math.floor(index / columns);
     const finalRow = row === rows - 1;
     const rowColumns = finalRow ? finalRowCount : columns;
     const cellWidth = rect.width / rowColumns;
     const cellHeight = finalRow ? finalRowHeight : completeRowHeight;
-    return transactionGlyph(
-      transaction,
-      {
-        x: rect.x + column * cellWidth,
-        y: rect.y + row * completeRowHeight,
-        width: cellWidth,
-        height: cellHeight,
-      },
-      regionKey,
-      sectionKey,
+    glyphs.push(
+      transactionGlyph(
+        identity,
+        vsizes[index] ?? 0,
+        {
+          x: rect.x + column * cellWidth,
+          y: rect.y + row * completeRowHeight,
+          width: cellWidth,
+          height: cellHeight,
+        },
+        regionKey,
+        sectionKey,
+      ),
     );
-  });
+  }
+  return glyphs;
 };
 
 const packTransactions = <SectionKey extends string, RegionKey extends string>(
   transactions: readonly MempoolTransaction[],
+  vsizes: Float64Array,
   rect: BucketTerrainRect,
   regionKey: RegionKey,
   sectionKey: SectionKey,
@@ -342,11 +382,16 @@ const packTransactions = <SectionKey extends string, RegionKey extends string>(
     return [];
   }
   if (mode === "count") {
-    return packCountTransactions(transactions, rect, regionKey, sectionKey);
+    return packCountTransactions(
+      transactions,
+      vsizes,
+      rect,
+      regionKey,
+      sectionKey,
+    );
   }
-  const weights = transactions.map((transaction) => transaction.vsize);
   const prefix = [0];
-  for (const weight of weights) {
+  for (const weight of vsizes) {
     prefix.push((prefix.at(-1) ?? 0) + weight);
   }
   const glyphs: BucketTerrainGlyph<SectionKey, RegionKey>[] = [];
@@ -362,10 +407,16 @@ const packTransactions = <SectionKey extends string, RegionKey extends string>(
       continue;
     }
     if (current.end - current.start === 1) {
-      const transaction = transactions[current.start];
-      if (transaction !== undefined) {
+      const identity = transactionViewIdentityAt(transactions, current.start);
+      if (identity !== null) {
         glyphs.push(
-          transactionGlyph(transaction, current.rect, regionKey, sectionKey),
+          transactionGlyph(
+            identity,
+            vsizes[current.start] ?? 0,
+            current.rect,
+            regionKey,
+            sectionKey,
+          ),
         );
       }
       continue;
@@ -409,20 +460,25 @@ const packTransactions = <SectionKey extends string, RegionKey extends string>(
   return glyphs;
 };
 
-const sectionLayoutWeights = <
+interface MeasuredRegion<
   SectionKey extends string,
   RegionKey extends string,
   Signature,
->(
-  groups: readonly BucketTerrainSectionGroup<
-    SectionKey,
-    RegionKey,
-    Signature
-  >[],
-  mode: BucketTerrainMode,
-): number[] => {
-  return groups.map((group) => metric(group.transactions, mode));
-};
+> {
+  group: BucketTerrainRegionGroup<SectionKey, RegionKey, Signature>;
+  measurement: PopulationMeasurement;
+}
+
+interface MeasuredSection<
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+> {
+  group: BucketTerrainSectionGroup<SectionKey, RegionKey, Signature>;
+  regions: MeasuredRegion<SectionKey, RegionKey, Signature>[];
+  count: number;
+  totalVsize: number;
+}
 
 export const createBucketTerrainLayout = <
   SectionKey extends string,
@@ -440,11 +496,29 @@ export const createBucketTerrainLayout = <
 ): BucketTerrainLayout<SectionKey, RegionKey, Signature> => {
   const safeWidth = Math.max(1, width);
   const safeHeight = Math.max(1, height);
-  const layoutWeights = sectionLayoutWeights(groups, mode);
+  const measuredSections: MeasuredSection<SectionKey, RegionKey, Signature>[] =
+    groups.map((group) => {
+      const regions = group.regions.map((region) => ({
+        group: region,
+        measurement: measurePopulation(region.transactions),
+      }));
+      return {
+        group,
+        regions,
+        count: regions.reduce(
+          (total, region) => total + region.measurement.count,
+          0,
+        ),
+        totalVsize: regions.reduce(
+          (total, region) => total + region.measurement.totalVsize,
+          0,
+        ),
+      };
+    });
   const sectionRects = splitWeightedRegions(
-    groups.map((group, index) => ({
+    measuredSections.map(({ group, count, totalVsize }) => ({
       key: group.key,
-      weight: layoutWeights[index] ?? 1,
+      weight: mode === "count" ? count : totalVsize,
     })),
     { x: 0, y: 0, width: safeWidth, height: safeHeight },
   );
@@ -453,7 +527,8 @@ export const createBucketTerrainLayout = <
   const regions: BucketTerrainRegion<SectionKey, RegionKey, Signature>[] = [];
   const glyphs: BucketTerrainGlyph<SectionKey, RegionKey>[] = [];
 
-  for (const group of groups) {
+  for (const measuredSection of measuredSections) {
+    const { group } = measuredSection;
     const rawRect = sectionRects.get(group.key) ?? {
       x: 0,
       y: 0,
@@ -479,23 +554,27 @@ export const createBucketTerrainLayout = <
       key: group.key,
       rect,
       contentRect,
-      transactionCount: group.transactions.length,
-      totalVsize: sumVsize(group.transactions),
-      weight: metric(group.transactions, mode),
+      transactionCount: measuredSection.count,
+      totalVsize: measuredSection.totalVsize,
+      weight:
+        mode === "count" ? measuredSection.count : measuredSection.totalVsize,
       labelHeight: sectionLabelHeight,
     });
 
-    const regionWeights = group.regions.map((region) => ({
-      key: region.key,
-      weight: metric(region.transactions, mode),
-    }));
+    const regionWeights = measuredSection.regions.map(
+      ({ group, measurement }) => ({
+        key: group.key,
+        weight: measuredWeight(measurement, mode),
+      }),
+    );
     const regionRects = group.nested
       ? splitWeightedRegions(regionWeights, contentRect)
       : new Map<RegionKey, BucketTerrainRect>([
           [group.regions[0]?.key as RegionKey, contentRect],
         ]);
 
-    for (const regionGroup of group.regions) {
+    for (const measuredRegion of measuredSection.regions) {
+      const { group: regionGroup, measurement } = measuredRegion;
       const rawRegionRect = regionRects.get(regionGroup.key) ?? contentRect;
       const regionRect = group.nested
         ? adaptiveInsetRect(rawRegionRect, REGION_GAP / 2)
@@ -518,13 +597,14 @@ export const createBucketTerrainLayout = <
         signature: regionGroup.signature,
         rect: regionRect,
         contentRect: regionContentRect,
-        transactionCount: regionGroup.transactions.length,
-        totalVsize: sumVsize(regionGroup.transactions),
-        weight: metric(regionGroup.transactions, mode),
+        transactionCount: measurement.count,
+        totalVsize: measurement.totalVsize,
+        weight: measuredWeight(measurement, mode),
         labelHeight: regionLabelHeight,
       });
       for (const glyph of packTransactions(
         regionGroup.transactions,
+        measurement.vsizes,
         regionContentRect,
         regionGroup.key,
         group.key,
@@ -535,6 +615,328 @@ export const createBucketTerrainLayout = <
     }
   }
 
+  return {
+    width: safeWidth,
+    height: safeHeight,
+    mode,
+    sections,
+    regions,
+    glyphs,
+  };
+};
+
+const cooperativePopulationMeasurement = async (
+  transactions: readonly MempoolTransaction[],
+  options: CooperativeWorkOptions,
+): Promise<PopulationMeasurement> => {
+  const batchSize = cooperativeBatchSize(options);
+  const vsizes = new Float64Array(transactions.length);
+  let totalVsize = 0;
+  for (let start = 0; start < transactions.length; start += batchSize) {
+    const end = Math.min(transactions.length, start + batchSize);
+    for (let index = start; index < end; index += 1) {
+      const vsize = transactionViewVsizeAt(transactions, index) ?? 0;
+      vsizes[index] = vsize;
+      totalVsize += vsize;
+    }
+    if (end < transactions.length) await yieldCooperatively(options);
+  }
+  return { count: transactions.length, totalVsize, vsizes };
+};
+
+const packCountTransactionsCooperatively = async <
+  SectionKey extends string,
+  RegionKey extends string,
+>(
+  transactions: readonly MempoolTransaction[],
+  vsizes: Float64Array,
+  rect: BucketTerrainRect,
+  regionKey: RegionKey,
+  sectionKey: SectionKey,
+  options: CooperativeWorkOptions,
+): Promise<BucketTerrainGlyph<SectionKey, RegionKey>[]> => {
+  const batchSize = cooperativeBatchSize(options);
+  const aspectRatio = rect.width / Math.max(rect.height, 1);
+  const columns = Math.min(
+    transactions.length,
+    Math.max(1, Math.ceil(Math.sqrt(transactions.length * aspectRatio))),
+  );
+  const rows = Math.ceil(transactions.length / columns);
+  const completeRowHeight = (rect.height * columns) / transactions.length;
+  const finalRowCount = transactions.length - columns * (rows - 1);
+  const finalRowHeight = (rect.height * finalRowCount) / transactions.length;
+  const glyphs: BucketTerrainGlyph<SectionKey, RegionKey>[] = [];
+  for (let start = 0; start < transactions.length; start += batchSize) {
+    const end = Math.min(transactions.length, start + batchSize);
+    for (let index = start; index < end; index += 1) {
+      const identity = transactionViewIdentityAt(transactions, index);
+      if (identity === null) continue;
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      const finalRow = row === rows - 1;
+      const rowColumns = finalRow ? finalRowCount : columns;
+      const cellWidth = rect.width / rowColumns;
+      const cellHeight = finalRow ? finalRowHeight : completeRowHeight;
+      glyphs.push(
+        transactionGlyph(
+          identity,
+          vsizes[index] ?? 0,
+          {
+            x: rect.x + column * cellWidth,
+            y: rect.y + row * completeRowHeight,
+            width: cellWidth,
+            height: cellHeight,
+          },
+          regionKey,
+          sectionKey,
+        ),
+      );
+    }
+    if (end < transactions.length) await yieldCooperatively(options);
+  }
+  return glyphs;
+};
+
+const packTransactionsCooperatively = async <
+  SectionKey extends string,
+  RegionKey extends string,
+>(
+  transactions: readonly MempoolTransaction[],
+  vsizes: Float64Array,
+  rect: BucketTerrainRect,
+  regionKey: RegionKey,
+  sectionKey: SectionKey,
+  mode: BucketTerrainMode,
+  options: CooperativeWorkOptions,
+): Promise<BucketTerrainGlyph<SectionKey, RegionKey>[]> => {
+  if (transactions.length === 0 || rect.width <= 0 || rect.height <= 0) {
+    return [];
+  }
+  if (mode === "count") {
+    return packCountTransactionsCooperatively(
+      transactions,
+      vsizes,
+      rect,
+      regionKey,
+      sectionKey,
+      options,
+    );
+  }
+  const batchSize = cooperativeBatchSize(options);
+  const prefix = new Float64Array(vsizes.length + 1);
+  for (let start = 0; start < vsizes.length; start += batchSize) {
+    const end = Math.min(vsizes.length, start + batchSize);
+    for (let index = start; index < end; index += 1) {
+      prefix[index + 1] = (prefix[index] ?? 0) + (vsizes[index] ?? 0);
+    }
+    if (end < vsizes.length) await yieldCooperatively(options);
+  }
+  const glyphs: BucketTerrainGlyph<SectionKey, RegionKey>[] = [];
+  const stack: Array<{
+    start: number;
+    end: number;
+    rect: BucketTerrainRect;
+  }> = [{ start: 0, end: transactions.length, rect }];
+  let operations = 0;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined || current.start >= current.end) continue;
+    if (current.end - current.start === 1) {
+      const identity = transactionViewIdentityAt(transactions, current.start);
+      if (identity !== null) {
+        glyphs.push(
+          transactionGlyph(
+            identity,
+            vsizes[current.start] ?? 0,
+            current.rect,
+            regionKey,
+            sectionKey,
+          ),
+        );
+      }
+    } else {
+      const total = (prefix[current.end] ?? 0) - (prefix[current.start] ?? 0);
+      const halfway = (prefix[current.start] ?? 0) + total / 2;
+      let low = current.start + 1;
+      let high = current.end - 1;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if ((prefix[middle] ?? 0) < halfway) low = middle + 1;
+        else high = middle;
+      }
+      const split = Math.min(current.end - 1, Math.max(current.start + 1, low));
+      const firstWeight = (prefix[split] ?? 0) - (prefix[current.start] ?? 0);
+      const ratio = total === 0 ? 0.5 : firstWeight / total;
+      const splitVertically = current.rect.width >= current.rect.height;
+      const firstRect: BucketTerrainRect = splitVertically
+        ? { ...current.rect, width: current.rect.width * ratio }
+        : { ...current.rect, height: current.rect.height * ratio };
+      const secondRect: BucketTerrainRect = splitVertically
+        ? {
+            x: current.rect.x + firstRect.width,
+            y: current.rect.y,
+            width: current.rect.width - firstRect.width,
+            height: current.rect.height,
+          }
+        : {
+            x: current.rect.x,
+            y: current.rect.y + firstRect.height,
+            width: current.rect.width,
+            height: current.rect.height - firstRect.height,
+          };
+      stack.push({ start: split, end: current.end, rect: secondRect });
+      stack.push({ start: current.start, end: split, rect: firstRect });
+    }
+    operations += 1;
+    if (operations >= batchSize && stack.length > 0) {
+      operations = 0;
+      await yieldCooperatively(options);
+    }
+  }
+  return glyphs;
+};
+
+export const createBucketTerrainLayoutCooperatively = async <
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+>(
+  groups: readonly BucketTerrainSectionGroup<
+    SectionKey,
+    RegionKey,
+    Signature
+  >[],
+  width: number,
+  height: number,
+  mode: BucketTerrainMode,
+  options: CooperativeWorkOptions = {},
+): Promise<BucketTerrainLayout<SectionKey, RegionKey, Signature>> => {
+  options.signal?.throwIfAborted();
+  const safeWidth = Math.max(1, width);
+  const safeHeight = Math.max(1, height);
+  const measuredSections: MeasuredSection<SectionKey, RegionKey, Signature>[] =
+    [];
+  for (const group of groups) {
+    const regions: MeasuredRegion<SectionKey, RegionKey, Signature>[] = [];
+    for (const region of group.regions) {
+      regions.push({
+        group: region,
+        measurement: await cooperativePopulationMeasurement(
+          region.transactions,
+          options,
+        ),
+      });
+    }
+    measuredSections.push({
+      group,
+      regions,
+      count: regions.reduce(
+        (total, region) => total + region.measurement.count,
+        0,
+      ),
+      totalVsize: regions.reduce(
+        (total, region) => total + region.measurement.totalVsize,
+        0,
+      ),
+    });
+  }
+  const sectionRects = splitWeightedRegions(
+    measuredSections.map(({ group, count, totalVsize }) => ({
+      key: group.key,
+      weight: mode === "count" ? count : totalVsize,
+    })),
+    { x: 0, y: 0, width: safeWidth, height: safeHeight },
+  );
+  const sections: BucketTerrainSection<SectionKey>[] = [];
+  const regions: BucketTerrainRegion<SectionKey, RegionKey, Signature>[] = [];
+  const glyphs: BucketTerrainGlyph<SectionKey, RegionKey>[] = [];
+
+  for (const measuredSection of measuredSections) {
+    const { group } = measuredSection;
+    const rawRect = sectionRects.get(group.key) ?? {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    };
+    const rect = adaptiveInsetRect(rawRect, SECTION_GAP / 2);
+    const sectionLabelHeight = adaptiveLabelHeight(
+      rect.height,
+      SECTION_LABEL_HEIGHT,
+      0.16,
+    );
+    const contentRect = adaptiveInsetRect(
+      {
+        x: rect.x,
+        y: rect.y + sectionLabelHeight,
+        width: rect.width,
+        height: Math.max(0, rect.height - sectionLabelHeight),
+      },
+      2,
+    );
+    sections.push({
+      key: group.key,
+      rect,
+      contentRect,
+      transactionCount: measuredSection.count,
+      totalVsize: measuredSection.totalVsize,
+      weight:
+        mode === "count" ? measuredSection.count : measuredSection.totalVsize,
+      labelHeight: sectionLabelHeight,
+    });
+    const regionWeights = measuredSection.regions.map(
+      ({ group: region, measurement }) => ({
+        key: region.key,
+        weight: measuredWeight(measurement, mode),
+      }),
+    );
+    const regionRects = group.nested
+      ? splitWeightedRegions(regionWeights, contentRect)
+      : new Map<RegionKey, BucketTerrainRect>([
+          [group.regions[0]?.key as RegionKey, contentRect],
+        ]);
+    for (const measuredRegion of measuredSection.regions) {
+      const { group: regionGroup, measurement } = measuredRegion;
+      const rawRegionRect = regionRects.get(regionGroup.key) ?? contentRect;
+      const regionRect = group.nested
+        ? adaptiveInsetRect(rawRegionRect, REGION_GAP / 2)
+        : rawRegionRect;
+      const regionLabelHeight = group.nested
+        ? adaptiveLabelHeight(regionRect.height, REGION_LABEL_HEIGHT, 0.2)
+        : 0;
+      const regionContentRect = adaptiveInsetRect(
+        {
+          x: regionRect.x,
+          y: regionRect.y + regionLabelHeight,
+          width: regionRect.width,
+          height: Math.max(0, regionRect.height - regionLabelHeight),
+        },
+        3,
+      );
+      regions.push({
+        key: regionGroup.key,
+        sectionKey: group.key,
+        signature: regionGroup.signature,
+        rect: regionRect,
+        contentRect: regionContentRect,
+        transactionCount: measurement.count,
+        totalVsize: measurement.totalVsize,
+        weight: measuredWeight(measurement, mode),
+        labelHeight: regionLabelHeight,
+      });
+      const packedGlyphs = await packTransactionsCooperatively(
+        regionGroup.transactions,
+        measurement.vsizes,
+        regionContentRect,
+        regionGroup.key,
+        group.key,
+        mode,
+        options,
+      );
+      for (const glyph of packedGlyphs) glyphs.push(glyph);
+    }
+  }
+  options.signal?.throwIfAborted();
   return {
     width: safeWidth,
     height: safeHeight,
@@ -972,6 +1374,148 @@ export const paintBucketTerrain = <
   if (selectedGlyph !== null) paintSelectedTerrainGlyph(context, selectedGlyph);
 };
 
+const cooperativeBatchSize = (options: CooperativeWorkOptions): number => {
+  const batchSize = options.batchSize ?? 750;
+  if (!Number.isSafeInteger(batchSize) || batchSize <= 0) {
+    throw new RangeError("Terrain paint batch size must be a positive integer");
+  }
+  return batchSize;
+};
+
+const stagingCanvas = (canvas: HTMLCanvasElement): HTMLCanvasElement => {
+  let staging = stagingCanvasByCanvas.get(canvas);
+  if (staging === undefined) {
+    staging = document.createElement("canvas");
+    stagingCanvasByCanvas.set(canvas, staging);
+  }
+  if (staging.width !== canvas.width || staging.height !== canvas.height) {
+    staging.width = canvas.width;
+    staging.height = canvas.height;
+  }
+  return staging;
+};
+
+/**
+ * Paint a complete terrain into a retained offscreen canvas in bounded slices,
+ * then commit it to the visible canvas in one draw. Users never see a partly
+ * rastered population, and common 70k-row interactions do not monopolise an
+ * animation-frame callback.
+ */
+export const paintBucketTerrainCooperatively = async <
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+>(
+  canvas: HTMLCanvasElement,
+  context: CanvasRenderingContext2D,
+  layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
+  presentation: BucketTerrainPaint<SectionKey, RegionKey, Signature>,
+  selectedTxid: string | null = null,
+  options: CooperativeWorkOptions = {},
+): Promise<void> => {
+  const batchSize = cooperativeBatchSize(options);
+  options.signal?.throwIfAborted();
+  const staging = stagingCanvas(canvas);
+  const layer = staging.getContext("2d");
+  if (layer === null) throw new Error("Canvas 2D rendering is unavailable");
+  layer.setTransform(
+    staging.width / layout.width,
+    0,
+    0,
+    staging.height / layout.height,
+    0,
+    0,
+  );
+  layer.clearRect(0, 0, layout.width, layout.height);
+  layer.fillStyle = "#071018";
+  layer.fillRect(0, 0, layout.width, layout.height);
+  for (const section of layout.sections) {
+    layer.fillStyle = "#0a161e";
+    layer.fillRect(
+      section.rect.x,
+      section.rect.y,
+      section.rect.width,
+      section.rect.height,
+    );
+    layer.strokeStyle = "#2a3b48";
+    layer.lineWidth = 1;
+    layer.strokeRect(
+      section.rect.x,
+      section.rect.y,
+      section.rect.width,
+      section.rect.height,
+    );
+  }
+
+  const regionsByKey = new Map(
+    layout.regions.map((region) => [region.key, region]),
+  );
+  for (const region of layout.regions) {
+    const selected = presentation.selected(region);
+    layer.fillStyle = presentation.color(region);
+    layer.globalAlpha = selected ? 0.12 : 0.025;
+    layer.fillRect(
+      region.contentRect.x,
+      region.contentRect.y,
+      region.contentRect.width,
+      region.contentRect.height,
+    );
+    layer.globalAlpha = 1;
+    layer.strokeStyle = selected
+      ? "#6ef2f0"
+      : presentation.partial(region)
+        ? "#9a7735"
+        : "#243744";
+    layer.lineWidth = selected ? 1.75 : 1;
+    layer.strokeRect(
+      region.rect.x,
+      region.rect.y,
+      region.rect.width,
+      region.rect.height,
+    );
+  }
+
+  let selectedGlyph: BucketTerrainGlyph<SectionKey, RegionKey> | null = null;
+  let paintedRegionKey: RegionKey | null = null;
+  let paintedRegionSelected = false;
+  for (let start = 0; start < layout.glyphs.length; start += batchSize) {
+    const end = Math.min(layout.glyphs.length, start + batchSize);
+    for (let index = start; index < end; index += 1) {
+      const glyph = layout.glyphs[index];
+      if (glyph === undefined) continue;
+      const region = regionsByKey.get(glyph.regionKey);
+      if (region === undefined) continue;
+      if (paintedRegionKey !== glyph.regionKey) {
+        paintedRegionSelected = presentation.selected(region);
+        layer.fillStyle = presentation.color(region);
+        paintedRegionKey = glyph.regionKey;
+      }
+      layer.globalAlpha = Math.min(
+        paintedRegionSelected ? 0.86 : 0.68,
+        presentation.glyphOpacity(region, paintedRegionSelected, glyph) *
+          glyphDensity(glyph),
+      );
+      layer.fillRect(
+        glyph.rect.x,
+        glyph.rect.y,
+        glyph.rect.width,
+        glyph.rect.height,
+      );
+      if (glyph.txid === selectedTxid) selectedGlyph = glyph;
+    }
+    if (end < layout.glyphs.length) await yieldCooperatively(options);
+  }
+  layer.globalAlpha = 1;
+  if (selectedGlyph !== null) paintSelectedTerrainGlyph(layer, selectedGlyph);
+  options.signal?.throwIfAborted();
+
+  context.save();
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(staging, 0, 0);
+  context.restore();
+};
+
 export const renderBucketTerrain = <
   SectionKey extends string,
   RegionKey extends string,
@@ -997,5 +1541,51 @@ export const renderBucketTerrain = <
       ? previousLayout
       : createBucketTerrainLayout(groups, width, height, mode);
   paintBucketTerrain(context, layout, presentation, selectedTxid);
+  return layout;
+};
+
+export const renderBucketTerrainCooperatively = async <
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+>(
+  canvas: HTMLCanvasElement,
+  groups: readonly BucketTerrainSectionGroup<
+    SectionKey,
+    RegionKey,
+    Signature
+  >[],
+  mode: BucketTerrainMode,
+  presentation: BucketTerrainPaint<SectionKey, RegionKey, Signature>,
+  previousLayout: BucketTerrainLayout<SectionKey, RegionKey, Signature> | null,
+  selectedTxid: string | null = null,
+  options: CooperativeWorkOptions = {},
+): Promise<BucketTerrainLayout<SectionKey, RegionKey, Signature>> => {
+  const { context, width, height } = prepareCanvasBacking(canvas, "subpixel");
+  // Leave the scheduling animation frame before layout construction. The
+  // retained visible bitmap remains intact until the new terrain is complete.
+  await yieldCooperatively(options);
+  const layout =
+    previousLayout !== null &&
+    previousLayout.width === width &&
+    previousLayout.height === height &&
+    previousLayout.mode === mode
+      ? previousLayout
+      : await createBucketTerrainLayoutCooperatively(
+          groups,
+          width,
+          height,
+          mode,
+          options,
+        );
+  options.signal?.throwIfAborted();
+  await paintBucketTerrainCooperatively(
+    canvas,
+    context,
+    layout,
+    presentation,
+    selectedTxid,
+    options,
+  );
   return layout;
 };
