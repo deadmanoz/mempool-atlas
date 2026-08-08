@@ -425,6 +425,39 @@ test.describe("comparison page", () => {
     expect(inputBox.height).toBeGreaterThanOrEqual(40);
   });
 
+  test("promotes different chain tips and reframes the shared population", async ({
+    page,
+  }) => {
+    await page.goto(
+      "/compare/?left=vps-core-01&right=fixture-stale-01&region=common",
+    );
+    await waitForSnapshot(page, "comparison-status");
+
+    await expect(page.locator("#comparison-status")).toHaveAttribute(
+      "data-state",
+      "different",
+    );
+    await expect(page.locator("#comparison-status-title")).toContainText(
+      "Different chain tips at heights",
+    );
+    await expect(page.locator("#comparison-status-detail")).toContainText(
+      "may reflect lag or chain divergence",
+    );
+    await expect(page.locator("#comparison-status-detail")).toContainText(
+      "retained their last complete snapshot",
+    );
+    await expect(page.locator("#sampling-panel")).toHaveAttribute(
+      "data-chain-state",
+      "different",
+    );
+    await expect(page.locator("#sampling-note")).toContainText(
+      "can reflect node lag or chain divergence",
+    );
+    await expect(
+      page.locator('#comparison-regions button[data-region="common"] span'),
+    ).toHaveText("Observed on both reported chain tips");
+  });
+
   test("presents Node and Compare as the primary view switch", async ({
     page,
   }) => {
@@ -475,6 +508,9 @@ test.describe("comparison page", () => {
     await expect(
       page.getByText("Sample transactions", { exact: true }),
     ).toHaveCount(0);
+    await expect(page.locator(".comparison-policy-matrix-note")).toContainText(
+      "not verdicts reported by the nodes",
+    );
     await expect(page.locator("#comparison-distributions")).toHaveAttribute(
       "aria-label",
       "Node-by-node distributions",
@@ -593,6 +629,8 @@ test.describe("comparison page", () => {
     await expect(sourceDetails).toHaveCount(2);
     for (const label of [
       "wtxid",
+      "Virtual size",
+      "Base fee",
       "Weight",
       "Ancestors",
       "Descendants",

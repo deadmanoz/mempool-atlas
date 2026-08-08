@@ -34,14 +34,16 @@ export const createComparisonSamplingView = ({
         left.snapshot.chain_tip.hash === right.snapshot.chain_tip.hash;
       const leftTip = left.snapshot.chain_tip;
       const rightTip = right.snapshot.chain_tip;
+      const sameHeight = leftTip.height === rightTip.height;
       const compactHash = (hash: string): string => `${hash.slice(0, 10)}…`;
+      panel.dataset.chainState = sameTip ? "same" : "different";
       chainSummary.dataset.state = sameTip ? "same" : "different";
       chainSummary.title = sameTip
         ? `Source A and Source B: height ${countFormat.format(leftTip.height)}, block ${leftTip.hash}`
         : `Source A: height ${countFormat.format(leftTip.height)}, block ${leftTip.hash}\nSource B: height ${countFormat.format(rightTip.height)}, block ${rightTip.hash}`;
       if (sameTip) {
         chainSummary.textContent = `Same chain tip · ${countFormat.format(leftTip.height)} · ${compactHash(leftTip.hash)}`;
-      } else if (leftTip.height === rightTip.height) {
+      } else if (sameHeight) {
         chainSummary.textContent = `Different chain tips at height ${countFormat.format(leftTip.height)} · A ${compactHash(leftTip.hash)} / B ${compactHash(rightTip.hash)}`;
       } else {
         chainSummary.textContent = `Different chain tips · A ${countFormat.format(leftTip.height)} · ${compactHash(leftTip.hash)} / B ${countFormat.format(rightTip.height)} · ${compactHash(rightTip.hash)}`;
@@ -56,14 +58,20 @@ export const createComparisonSamplingView = ({
           left.snapshot.collection_started_at_ms,
           right.snapshot.collection_started_at_ms,
         );
-      if (overlap >= 0) {
-        note.textContent = `The collection windows overlapped by ${formatDuration(overlap)}. Membership still comes from independent node observations.`;
-      } else {
-        note.textContent = `The collection windows were separated by ${formatDuration(Math.abs(overlap))}. Membership changes during that interval can contribute to regions observed in only one snapshot.`;
-      }
+      const chainContext = sameTip
+        ? ""
+        : sameHeight
+          ? "The sources reported different blocks at the same height. Transactions observed in both snapshots were present across both reported chain tips. "
+          : "The sources reported different blocks at different heights. This can reflect node lag or chain divergence; Atlas does not infer which. ";
+      const timingContext =
+        overlap >= 0
+          ? `The collection windows overlapped by ${formatDuration(overlap)}. Membership still comes from independent node observations.`
+          : `The collection windows were separated by ${formatDuration(Math.abs(overlap))}. Membership changes during that interval can contribute to regions observed in only one snapshot.`;
+      note.textContent = `${chainContext}${timingContext}`;
     },
     reset(): void {
       panel.hidden = true;
+      delete panel.dataset.chainState;
     },
   };
 };

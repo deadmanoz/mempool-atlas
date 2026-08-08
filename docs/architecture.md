@@ -335,6 +335,15 @@ restyle the wider terrain. Fee rate by age remains a secondary view.
 The comparison page fetches two independent snapshots and merge-joins their
 sorted `txid` arrays in the browser. It derives present-in-both and two
 observed-only regions without creating a server-side comparison object. One
+A difference between the reported tips promotes the comparison status and
+timing panel to an amber warning. At equal height it names the chain divergence
+directly; at different heights it preserves lag as an alternative explanation.
+The shared region then describes cross-tip observation without predicting
+confirmation.
+Transaction detail exposes source-local base fee, virtual size, and base fee
+rate so differing witness variants quantify their actual size and fee-rate
+effect. Atlas applies the same BIP-110 evaluator to both source-local fact sets;
+the UI never presents those results as verdicts reported by either node. One
 policy projection pass builds per-node aggregate rows, including separate left
 and right policy views for transactions common to both snapshots. Exact and
 partial violation signatures remain separate, marginal rule counts may

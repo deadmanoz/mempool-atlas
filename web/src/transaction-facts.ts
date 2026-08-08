@@ -7,6 +7,10 @@ export const ancestorFeeRate = (transaction: MempoolTransaction): number =>
     ? transaction.ancestor_fee_sats / transaction.ancestor_vsize
     : 0;
 
+/** Base transaction fee divided by source-reported virtual size. */
+export const baseFeeRate = (transaction: MempoolTransaction): number =>
+  transaction.vsize > 0 ? transaction.fee_sats / transaction.vsize : 0;
+
 /**
  * Label and value pairs for one transaction's membership and structure facts,
  * shared by the node inspector and the comparison detail panels.
@@ -15,6 +19,11 @@ export const transactionFactPairs = (
   transaction: MempoolTransaction,
 ): [string, string][] => {
   const pairs: [string, string][] = [
+    ["Virtual size", formatVsize(transaction.vsize)],
+    [
+      "Base fee",
+      `${formatSats(transaction.fee_sats)} · ${decimalFormat.format(baseFeeRate(transaction))} sat/vB`,
+    ],
     ["Weight", `${countFormat.format(transaction.weight)} wu`],
     [
       "Ancestors",
@@ -58,6 +67,7 @@ export const transactionFactSummary = (
   transaction: MempoolTransaction,
 ): string => {
   const parts = [
+    `${formatVsize(transaction.vsize)} · ${formatSats(transaction.fee_sats)} @ ${decimalFormat.format(baseFeeRate(transaction))} sat/vB`,
     `${countFormat.format(transaction.weight)} wu`,
     `ancestors ${countFormat.format(transaction.ancestor_count)} tx · ${formatVsize(transaction.ancestor_vsize)} @ ${decimalFormat.format(ancestorFeeRate(transaction))} sat/vB`,
     `descendants ${countFormat.format(transaction.descendant_count)}`,

@@ -88,8 +88,12 @@ describe("comparison sampling view", () => {
     view().render(compareCurrentSnapshots(left, right));
 
     expect(element("chain-summary").dataset.state).toBe("different");
+    expect(element("sampling-panel").dataset.chainState).toBe("different");
     expect(element("chain-summary").textContent).toBe(
       "Different chain tips · A 900,000 · 0000000000… / B 899,999 · 1111111111…",
+    );
+    expect(element("sampling-note").textContent).toContain(
+      "can reflect node lag or chain divergence",
     );
     expect(element("chain-summary").title).toContain(
       `Source B: height 899,999, block ${"11".repeat(32)}`,
@@ -108,6 +112,12 @@ describe("comparison sampling view", () => {
 
     expect(element("chain-summary").textContent).toBe(
       "Different chain tips at height 900,000 · A 0000000000… / B 1111111111…",
+    );
+    expect(element("sampling-note").textContent).toContain(
+      "different blocks at the same height",
+    );
+    expect(element("sampling-note").textContent).toContain(
+      "present across both reported chain tips",
     );
   });
 });

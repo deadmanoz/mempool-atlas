@@ -71,13 +71,14 @@ import { markAtlasReadiness, markAtlasReadinessAfterPaint } from "./readiness";
 import {
   countFormat,
   compactTxid,
+  decimalFormat,
   formatTime,
   formatTxidCount,
   formatVsize,
   percentageFormat,
 } from "./format";
 import { createSourceCardView, setAtlasLoadPhase } from "./source-summary-view";
-import { transactionFactPairs } from "./transaction-facts";
+import { baseFeeRate, transactionFactPairs } from "./transaction-facts";
 import {
   createMempoolSpaceTransactionLink,
   createTransactionDetailValue,
@@ -217,7 +218,7 @@ let activeLoads = 0;
 const TXID_PATTERN = /^[0-9a-f]{64}$/i;
 
 const setStatus = (
-  state: "waiting" | "ready" | "stale" | "error",
+  state: "waiting" | "ready" | "different" | "stale" | "error",
   title: string,
   detail: string,
 ): void => {
@@ -234,21 +235,30 @@ const sourceLabel = (sourceId: string): string =>
 const selectedPairTitle = (): string =>
   `${sourceLabel(leftSourceId)} ↔ ${sourceLabel(rightSourceId)}`;
 
+const hasDifferentChainTips = (current: CurrentComparison): boolean =>
+  current.left.snapshot.chain_tip.hash !==
+  current.right.snapshot.chain_tip.hash;
+
 const showHealthyStatus = (current: CurrentComparison): void => {
   const leftLabel = current.left.snapshot.source_label;
   const rightLabel = current.right.snapshot.source_label;
   const leftTip = current.left.snapshot.chain_tip;
   const rightTip = current.right.snapshot.chain_tip;
-  const tipSummary =
-    leftTip.hash === rightTip.hash
-      ? `same chain tip ${countFormat.format(leftTip.height)}`
-      : leftTip.height === rightTip.height
-        ? `different chain tips at height ${countFormat.format(leftTip.height)}`
-        : `different chain tips ${countFormat.format(leftTip.height)} / ${countFormat.format(rightTip.height)}`;
+  if (hasDifferentChainTips(current)) {
+    const sameHeight = leftTip.height === rightTip.height;
+    setStatus(
+      "different",
+      sameHeight
+        ? `Different chain tips at height ${countFormat.format(leftTip.height)}`
+        : `Different chain tips at heights ${countFormat.format(leftTip.height)} and ${countFormat.format(rightTip.height)}`,
+      `${leftLabel} and ${rightLabel} reported different blocks. ${countFormat.format(current.totals.common_count)} shared · ${countFormat.format(current.totals.left_only_count)} only on ${leftLabel} · ${countFormat.format(current.totals.right_only_count)} only on ${rightLabel}; ${sameHeight ? "this is a chain divergence" : "this may reflect lag or chain divergence"}.`,
+    );
+    return;
+  }
   setStatus(
     "ready",
     `${leftLabel} ↔ ${rightLabel}`,
-    `${countFormat.format(current.totals.common_count)} shared · ${countFormat.format(current.totals.left_only_count)} only on ${leftLabel} · ${countFormat.format(current.totals.right_only_count)} only on ${rightLabel} · ${tipSummary}.`,
+    `${countFormat.format(current.totals.common_count)} shared · ${countFormat.format(current.totals.left_only_count)} only on ${leftLabel} · ${countFormat.format(current.totals.right_only_count)} only on ${rightLabel} · same chain tip ${countFormat.format(leftTip.height)}.`,
   );
 };
 
@@ -432,7 +442,9 @@ const regionLabel = (
   key: ComparisonRegionKey,
 ): string => {
   if (key === "common") {
-    return "Present in both sampled snapshots";
+    return hasDifferentChainTips(current)
+      ? "Observed on both reported chain tips"
+      : "Present in both sampled snapshots";
   }
   const source = key === "left_only" ? current.left : current.right;
   return `Observed only in ${source.snapshot.source_label} snapshot`;
@@ -443,7 +455,9 @@ const regionDescriptionText = (
   key: ComparisonRegionKey,
 ): string => {
   if (key === "common") {
-    return "Transaction IDs observed in both independently sampled mempools. Each source keeps its own witness variant and policy assessment.";
+    return hasDifferentChainTips(current)
+      ? "Transaction IDs observed in both independently sampled mempools while the sources reported different chain tips. Cross-tip presence is an observation, not a prediction that a transaction will confirm on either chain."
+      : "Transaction IDs observed in both independently sampled mempools. Each source keeps its own witness variant; Atlas applies the same BIP-110 evaluator to both source-local fact sets.";
   }
   const owner = key === "left_only" ? current.left : current.right;
   const other = key === "left_only" ? current.right : current.left;
@@ -628,7 +642,12 @@ const applyResolvedLoadedView = (
     );
     clearDetailPanel("Not present in the current snapshots");
   } else if (resolved.region === "common") {
-    setTransactionSearchStatus("found", "Present in both current snapshots.");
+    setTransactionSearchStatus(
+      "found",
+      hasDifferentChainTips(current)
+        ? "Observed in both snapshots across different reported chain tips."
+        : "Present in both current snapshots.",
+    );
     clearDetailPanel("Loading source detail…");
   } else {
     const source =
@@ -1169,8 +1188,12 @@ const loadSelectedTransactionDetail = async (
   if (entry.witness_relation === "different") {
     const warning = document.createElement("p");
     warning.className = "variant-warning";
+    const left = entry.left;
+    const right = entry.right;
     warning.textContent =
-      "The same txid carries different witness variants. Policy assessments remain tied to their reporting node.";
+      left !== null && right !== null
+        ? `The same txid carries different witness variants. ${current.left.snapshot.source_label}: ${formatVsize(left.vsize)} at ${decimalFormat.format(baseFeeRate(left))} sat/vB. ${current.right.snapshot.source_label}: ${formatVsize(right.vsize)} at ${decimalFormat.format(baseFeeRate(right))} sat/vB. Atlas applies the same BIP-110 evaluator to each source-local variant; neither node reports these verdicts.`
+        : "The same txid carries different witness variants. Atlas applies the same BIP-110 evaluator to each source-local variant; neither node reports these verdicts.";
     identity.append(warning);
   }
   detailContainer.replaceChildren(
@@ -1234,7 +1257,12 @@ const renderComparison = async (
     const stale =
       current.left.source.availability === "stale" ||
       current.right.source.availability === "stale";
-    if (stale) {
+    if (hasDifferentChainTips(current)) {
+      showHealthyStatus(current);
+      if (stale) {
+        statusDetail.textContent = `${statusDetail.textContent ?? ""} One or both sources retained their last complete snapshot after a poll failure.`;
+      }
+    } else if (stale) {
       setStatus(
         "stale",
         "Comparing a retained snapshot",

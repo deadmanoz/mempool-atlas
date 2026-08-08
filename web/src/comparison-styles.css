@@ -290,6 +290,11 @@
   pointer-events: none;
 }
 
+.sampling-panel[data-chain-state="different"] {
+  border-top-color: rgba(225, 170, 75, 0.62);
+  background: rgba(45, 32, 10, 0.72);
+}
+
 .sampling-heading {
   display: flex;
   align-items: flex-start;
@@ -313,6 +318,11 @@
 
 .sampling-heading > span[data-state="different"] {
   color: var(--amber);
+  font-weight: 700;
+}
+
+.sampling-panel[data-chain-state="different"] > p {
+  color: #d9c497;
 }
 
 .sampling-panel > p {

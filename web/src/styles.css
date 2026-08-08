@@ -389,6 +389,17 @@ h3 {
   box-shadow: 0 0 0 3px rgba(225, 170, 75, 0.12);
 }
 
+.status-strip[data-state="different"] {
+  border-color: rgba(225, 170, 75, 0.58);
+  background: rgba(45, 32, 10, 0.94);
+  color: #d9c497;
+}
+
+.status-strip[data-state="different"] .status-light {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px rgba(225, 170, 75, 0.18);
+}
+
 .status-strip[data-state="error"] .status-light {
   background: var(--red);
   box-shadow: 0 0 0 3px rgba(244, 111, 147, 0.12);
