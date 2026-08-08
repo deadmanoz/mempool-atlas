@@ -7,6 +7,7 @@ import {
   loadPackedPublication,
   parseManifest,
   publicationId,
+  retryDelay,
   resultTuple,
   signedColumn,
   validateManifestRoots,
@@ -976,5 +977,25 @@ describe("v2 coherent publication loading", () => {
     await vi.runAllTimersAsync();
     await rejected;
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("clamps a future Retry-After HTTP date to five seconds", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-08T00:00:00.000Z"));
+    const response = new Response(null, {
+      headers: { "Retry-After": "Sat, 08 Aug 2026 00:00:30 GMT" },
+    });
+
+    expect(retryDelay(response, 0)).toBe(5_000);
+  });
+
+  it("floors a past Retry-After HTTP date at zero", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-08T00:00:30.000Z"));
+    const response = new Response(null, {
+      headers: { "Retry-After": "Sat, 08 Aug 2026 00:00:00 GMT" },
+    });
+
+    expect(retryDelay(response, 0)).toBe(0);
   });
 });

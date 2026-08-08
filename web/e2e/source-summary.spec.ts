@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import type { Page, Route, TestInfo } from "@playwright/test";
 
+import type { AtlasWorkerRequest } from "../src/atlas-worker-protocol";
+
 const GOOD_CLS_THRESHOLD = 0.1;
 
 interface ManifestGate {
@@ -50,6 +52,11 @@ type ComparisonPaintGateWindow = Window &
   typeof globalThis & {
     __atlasComparisonPaintGateSeen?: number;
     __atlasComparisonPaintGateRelease?: () => void;
+  };
+
+type WorkerRequestWindow = Window &
+  typeof globalThis & {
+    __atlasWorkerRequests?: AtlasWorkerRequest[];
   };
 
 interface LayoutShiftMetric {
@@ -394,6 +401,36 @@ const installComparisonPaintGate = async (
         ).__atlasComparisonPaintGateRelease?.();
       }),
   };
+};
+
+const installWorkerRequestObserver = async (page: Page): Promise<void> => {
+  await page.addInitScript(() => {
+    const target = window as WorkerRequestWindow;
+    target.__atlasWorkerRequests = [];
+    const postMessage = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (
+      message: unknown,
+      transferOrOptions?: StructuredSerializeOptions | Transferable[],
+    ): void {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        (message.type === "load" || message.type === "cancel")
+      ) {
+        target.__atlasWorkerRequests?.push(
+          structuredClone(message) as AtlasWorkerRequest,
+        );
+      }
+      Reflect.apply(
+        postMessage,
+        this,
+        transferOrOptions === undefined
+          ? [message]
+          : [message, transferOrOptions],
+      );
+    };
+  });
 };
 
 const waitForCandidateCommit = async (
@@ -1274,6 +1311,118 @@ test.describe("atomic publication replacement", () => {
       "true",
     );
     await expect(page.locator("#comparison-refresh")).toBeEnabled();
+  });
+
+  test("retains a complete comparison and cancels its sibling load after a completion-stage failure", async ({
+    page,
+  }) => {
+    await installWorkerRequestObserver(page);
+    const pageErrors: Error[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error));
+    await page.goto("/compare/?left=vps-core-01&right=vps-knots-01");
+    const status = page.locator("#comparison-status");
+    await expect(status).toHaveAttribute(
+      "data-readiness",
+      "complete-feature-ready",
+    );
+    const sourceIds = await page
+      .locator(".source-card > code")
+      .allTextContents();
+    const unionCount = (await page.locator("#union-count").textContent()) ?? "";
+    await page.evaluate(() => {
+      (window as WorkerRequestWindow).__atlasWorkerRequests = [];
+    });
+
+    let markSiblingStarted = (): void => undefined;
+    const siblingStarted = new Promise<void>((resolve) => {
+      markSiblingStarted = resolve;
+    });
+    let releaseSibling = (): void => undefined;
+    const siblingRelease = new Promise<void>((resolve) => {
+      releaseSibling = resolve;
+    });
+    let siblingStageHeld = false;
+    let injected = false;
+    await page.route(
+      /\/api\/v2\/sources\/vps-core-01\/mempool\/stages\/membership\//,
+      async (route) => {
+        siblingStageHeld = true;
+        markSiblingStarted();
+        await siblingRelease;
+        await route.continue().catch(() => undefined);
+      },
+    );
+    await page.route(
+      /\/api\/v2\/sources\/vps-knots-01\/mempool\/stages\/membership\//,
+      async (route) => {
+        await siblingStarted;
+        if (injected) {
+          await route.continue();
+          return;
+        }
+        injected = true;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: '{"error":"injected completion-stage failure"}',
+        });
+      },
+    );
+
+    try {
+      await page.locator("#comparison-refresh").click();
+      await expect(status).toHaveAttribute("data-state", "error");
+      await expect(page.locator("#comparison-status-title")).toHaveText(
+        "Comparison unavailable",
+      );
+      await expect(page.locator("#comparison-status-detail")).toContainText(
+        "Showing the last browser copy",
+      );
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const requests =
+              (window as WorkerRequestWindow).__atlasWorkerRequests ?? [];
+            const siblingLoad = requests.find(
+              (request) =>
+                request.type === "load" && request.sourceId === "vps-core-01",
+            );
+            return (
+              siblingLoad !== undefined &&
+              requests.some(
+                (request) =>
+                  request.type === "cancel" &&
+                  request.requestId === siblingLoad.requestId,
+              )
+            );
+          }),
+        )
+        .toBe(true);
+
+      expect(injected).toBe(true);
+      expect(siblingStageHeld).toBe(true);
+      await expect(status).toHaveAttribute("data-phase", "interactive");
+      await expect(page.locator(".source-card > code")).toHaveText(sourceIds);
+      await expect(page.locator("#union-count")).toHaveText(unionCount);
+      await expect(page.locator("#comparison-stage")).toBeVisible();
+      await expect(page.locator("#left-source")).toBeEnabled();
+      await expect(page.locator("#right-source")).toBeEnabled();
+      const commonRegion = page.locator(
+        '#comparison-regions button[data-region="common"]',
+      );
+      await expect(commonRegion).toBeEnabled();
+      await commonRegion.click();
+      await expect(commonRegion).toHaveAttribute("aria-pressed", "true");
+      await page.locator("#dist-scope-common").click();
+      await expect(page.locator("#dist-scope-common")).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      await expect(page.locator("#comparison-refresh")).toBeEnabled();
+      expect(pageErrors).toEqual([]);
+    } finally {
+      releaseSibling();
+    }
   });
 });
 

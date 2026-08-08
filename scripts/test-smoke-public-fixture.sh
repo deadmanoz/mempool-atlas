@@ -7,8 +7,10 @@ if [[ "$script_dir" == "$script_path" ]]; then
     script_dir=.
 fi
 repo_root=$(cd "$script_dir/.." && pwd)
+# shellcheck source=lib/smoke-public-helpers.sh
+source "$script_dir/lib/smoke-public-helpers.sh"
 
-for required_tool in grep jq mktemp node rm sleep; do
+for required_tool in awk grep head jq mktemp node openssl rm sleep xxd; do
     command -v "$required_tool" >/dev/null 2>&1 || {
         printf 'offline public smoke tests require %s on PATH; install it and retry\n' \
             "$required_tool" >&2
@@ -48,7 +50,8 @@ start_fixture_server() {
     local cloudflare_headers=$1
     local detail_status=$2
     local omit_header=${3:-}
-    local log_path="$test_tmp_dir/server-$cloudflare_headers-$detail_status-${omit_header:-none}.log"
+    local repeat_header=${4:-}
+    local log_path="$test_tmp_dir/server-$cloudflare_headers-$detail_status-${omit_header:-none}-${repeat_header:-none}.log"
     local line=
     local attempt=0
 
@@ -56,6 +59,7 @@ start_fixture_server() {
         ATLAS_FIXTURE_CLOUDFLARE_HEADERS="$cloudflare_headers" \
         ATLAS_FIXTURE_DETAIL_STATUS="$detail_status" \
         ATLAS_FIXTURE_OMIT_HEADER="$omit_header" \
+        ATLAS_FIXTURE_REPEAT_HEADER="$repeat_header" \
         node "$fixture_server" >"$log_path" 2>&1 &
     server_pid=$!
 
@@ -120,6 +124,17 @@ detail_txid=$(jq --exit-status --raw-output --arg source_id "$source_id" '
 ' "$fixture_manifest") ||
     fail "functional fixture has no canonical transaction detail for source '$source_id'"
 
+large_population="$test_tmp_dir/population-70000.json"
+node -e '
+    const rows = 70_000;
+    const txids = Buffer.alloc(rows * 32, 0x5a);
+    for (let index = 0; index < 32; index += 1) txids[index] = index;
+    process.stdout.write(JSON.stringify({ txids_base64: txids.toString("base64") }));
+' >"$large_population"
+expected_first_txid=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+[[ $(atlas_smoke_first_txid "$large_population") == "$expected_first_txid" ]] ||
+    fail "bounded first-txid extraction failed for a 70,000-row population"
+
 if "$smoke_script" \
     "http://127.0.0.1:1" "$source_id" \
     >"$test_tmp_dir/public-http.stdout" \
@@ -161,6 +176,30 @@ grep -F 'public v2-only Cloudflare smoke checks passed' \
     fail "smoke script did not report success without Cloudflare headers"
 stop_fixture_server
 
+# Multiple Vary fields are one ordered comma-list for token matching.
+start_fixture_server 0 200 "" vary
+ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
+    "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
+    >"$test_tmp_dir/repeated-vary.stdout"
+grep -F 'public v2-only Cloudflare smoke checks passed' \
+    "$test_tmp_dir/repeated-vary.stdout" >/dev/null ||
+    fail "smoke script did not accept Accept-Encoding in a repeated Vary field"
+stop_fixture_server
+
+# Multiple Cache-Control fields are also joined. An additional directive must
+# not pass any exact route policy by hiding in another field line.
+start_fixture_server 0 200 "" cache-control
+if ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
+    "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
+    >"$test_tmp_dir/repeated-cache-control.stdout" \
+    2>"$test_tmp_dir/repeated-cache-control.stderr"; then
+    fail "smoke script accepted a repeated weakening Cache-Control field"
+fi
+grep -F 'source discovery must remain non-cacheable' \
+    "$test_tmp_dir/repeated-cache-control.stderr" >/dev/null ||
+    fail "smoke script did not report the repeated Cache-Control policy"
+stop_fixture_server
+
 # A missing required header must stop at the exact header contract. In
 # particular, command substitutions inside comparisons must not continue into
 # a second, generic cache-policy failure.
@@ -184,7 +223,7 @@ stop_fixture_server
 # Exercise the expected non-success detail outcomes against the same full
 # publication contract. The smoke script must validate each exact error body
 # and still require the non-cacheable edge path.
-for detail_status in 404 503 503-unavailable; do
+for detail_status in 404 503; do
     start_fixture_server 1 "$detail_status"
     ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
         "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \

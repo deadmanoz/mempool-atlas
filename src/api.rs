@@ -99,11 +99,13 @@ async fn readiness(State(registry): State<SourceRegistry>) -> Response {
 
 async fn sources(
     State(registry): State<SourceRegistry>,
-) -> ([(&'static str, &'static str); 1], Json<SourcesResponse>) {
-    (
+    RawQuery(query): RawQuery,
+) -> Result<([(&'static str, &'static str); 1], Json<SourcesResponse>), ApiError> {
+    reject_query(query)?;
+    Ok((
         [(header::CACHE_CONTROL.as_str(), NO_STORE)],
         Json(registry.sources_response().await),
-    )
+    ))
 }
 
 async fn source_manifest(
@@ -267,7 +269,9 @@ fn weak_etag(value: &str) -> &str {
 async fn transaction_detail(
     State(registry): State<SourceRegistry>,
     Path((source_id, txid)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
+    reject_query(query)?;
     let canonical_txid = bitcoin::Txid::from_str(&txid)
         .map_err(|_| ApiError::invalid_txid(&txid))?
         .to_string();
@@ -1242,6 +1246,104 @@ mod tests {
                 .expect("body")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn discovery_and_transaction_queries_are_rejected_without_caching() {
+        let source = runtime();
+        source
+            .record_success(classified_observation())
+            .await
+            .expect("publish observation");
+        let application = application(source);
+        let detail_path = format!("/api/v2/sources/core/transactions/{}", "00".repeat(32));
+
+        for path in ["/api/v2/sources", detail_path.as_str()] {
+            let response = application
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                NO_STORE,
+                "{path}"
+            );
+        }
+
+        for path in [
+            "/api/v2/sources?".to_owned(),
+            "/api/v2/sources?variant=old".to_owned(),
+            format!("{detail_path}?"),
+            format!("{detail_path}?variant=old"),
+        ] {
+            let response = application
+                .clone()
+                .oneshot(Request::get(&path).body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                NO_STORE,
+                "{path}"
+            );
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert!(!response.headers().contains_key(header::ETAG), "{path}");
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).expect("error JSON"),
+                json!({
+                    "error": "query-dependent v2 representations are not supported"
+                }),
+                "{path}"
+            );
+        }
+
+        for path in [
+            "/api/v2/sources?variant=old".to_owned(),
+            format!("{detail_path}?variant=old"),
+        ] {
+            let response = application
+                .clone()
+                .oneshot(Request::head(&path).body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                NO_STORE,
+                "{path}"
+            );
+            assert!(!response.headers().contains_key(header::ETAG), "{path}");
+            assert!(
+                to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("response body")
+                    .is_empty(),
+                "{path}"
+            );
+        }
+
+        for path in [
+            "/api/v2/sources?variant=old".to_owned(),
+            format!("{detail_path}?variant=old"),
+        ] {
+            let response = application
+                .clone()
+                .oneshot(Request::post(&path).body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                NO_STORE,
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]

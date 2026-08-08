@@ -17,7 +17,8 @@ classifies every configured source even when nobody is viewing it.
 
 ## Deployment inputs
 
-Record these values in the private deployment system before installation:
+Record these values in the deployment system outside this repository before
+installation:
 
 - the Cloudflare zone and public hostname;
 - the Cloudflare plan and features available to that zone;
@@ -49,8 +50,11 @@ tracker uses a separate origin, add that exact HTTPS origin to `script-src` and
 `connect-src` in the edge Content Security Policy. A first-party reverse proxy
 can keep both directives at `'self'` instead.
 
-Install the release binary and `web/dist` under `/opt/mempool-atlas`. Create a
-dedicated `mempool-atlas` system account with no interactive shell. Copy
+For the example systemd layout, install the release binary and `web/dist` as one
+release unit at `/opt/mempool-atlas`, matching the supplied paths. For atomic
+upgrades, make that path a release pointer to a separately staged versioned
+directory. Create a dedicated `mempool-atlas` system account with no interactive
+shell. Copy
 [`deploy/systemd/mempool-atlas.service.example`](../deploy/systemd/mempool-atlas.service.example)
 to the host's systemd unit directory and review every path before enabling it.
 
@@ -307,79 +311,55 @@ The application package exposes `/api/v2` as its single public API contract.
 The edge configuration must contain no Atlas route, redirect, transform, cache
 rule, or rate-limit arm for any other API version.
 
-The deadmanoz production release is formalized in the private
-[`deadmanoz/mempool-atlas-deploy`](https://github.com/deadmanoz/mempool-atlas-deploy)
-repository. Its `mempool-atlas-src` flake input pins one reviewed application
-revision. The `packages.x86_64-linux.production` output builds the server and
-browser from that same input, and `nixosModules.viewer` injects the combined
-package into the Atlas service. The separate `nixos-config-deadmanoz` fleet
-flake pins the `mempool-atlas-deploy` input and remains the only authority that
-switches hosts. Production releases therefore switch one Nix store package;
-they do not copy or replace the server and browser artifacts separately under
-`/opt`.
+Treat the server binary and `web/dist` as one release unit built from the same
+reviewed application revision. A package manager, immutable image, or versioned
+installation directory can provide that unit. If using the example `/opt`
+layout above, stage each release in its own directory and atomically repoint
+`/opt/mempool-atlas`. Otherwise switch the service's binary and
+`ATLAS_WEB_ROOT` together. Never replace the live server and browser artifacts
+independently.
 
-1. Push the reviewed application revision. In `mempool-atlas-deploy`, update
-   and verify the application pin, then build the production package:
+Use this deployment-agnostic release sequence:
 
-   ```bash
-   just update-app       # nix flake update mempool-atlas-src
-   just verify-app-pin
-   just check
-   just test
-   just build
-   ```
+1. Pin the exact reviewed application revision in the operator's deployment
+   configuration. Record the expected Atlas version and verify that both the
+   server and browser build use that same pin.
+2. Build the complete release unit from a clean tree. Run the repository lint,
+   test, and production build gates before accepting the artifact. Evaluate and
+   build every affected host or image without switching live services yet.
+3. Preflight the Cloudflare configuration, including the v2 manifest and stage
+   cache rules, no-stale behavior, CSP worker allowance, method restriction,
+   WAF policy, rate limits, and hidden operational paths.
+4. Add a temporary fail-closed edge rule for the public hostname. Confirm that
+   the rule blocks public traffic before changing the origin.
+5. Apply source-side RPC configuration only when the reviewed release changes
+   it. Switch the presentation service last, atomically selecting the matched
+   server binary and browser root from the staged release unit.
+6. While the edge remains blocked, verify loopback source discovery, the
+   expected Atlas version, the current manifest, every declared stage,
+   transaction detail, cache headers, validators, and conditional responses.
+7. Purge the public `/api/v2` cache namespace and any changed static assets.
+   Recheck the edge rules, then remove the temporary block.
+8. Run `just smoke-public` through the public hostname. Exercise sequential
+   cold node loads, concurrent cold node loads, and a worst-case comparison
+   load within the launch budgets before declaring the release complete.
+9. Record the deployed application pin, release-unit identity, edge-rule
+   revision, verification results, and rollback target in the operator log.
 
-   Commit and push the resulting deploy-repository `flake.lock` only after all
-   five commands pass.
-
-2. In `nixos-config-deadmanoz`, update only its `mempool-atlas-deploy` flake
-   input to that reviewed deploy revision. Use the fleet repository's build
-   commands to evaluate all hosts and build the presentation and source hosts
-   before switching any of them. The deploy repository deliberately provides
-   the package and modules, not a host-switch command.
-3. From `mempool-atlas-deploy`, run `just verify-cloudflare`, then add a
-   temporary fail-closed edge rule for the Atlas hostname. Preflight the v2
-   always-revalidated manifest rule, one-year immutable stage rule, no-stale
-   behavior, CSP worker allowance, method rule, WAF policy, and rate limits
-   while the block remains active.
-4. Switch source hosts first only if their evaluated RPC configuration changes.
-   Switch the presentation host last; that NixOS switch changes the service
-   executable and `ATLAS_WEB_ROOT` to paths in the same production package.
-5. Verify loopback discovery, manifest, every declared stage, detail, and
-   validators. Purge the public `/api/v2` cache namespace, then remove the
-   temporary edge block.
-6. In `mempool-atlas-deploy`, run:
-
-   ```bash
-   just verify-live <presentation-host>
-   ```
-
-   From this application repository, run `just smoke-public`, ten cold
-   sequential node loads, five cold concurrent node loads, and the worst-case
-   comparison load through the public hostname.
-
-The deploy repository's
-[`production-deployment.md`](https://github.com/deadmanoz/mempool-atlas-deploy/blob/main/agent_docs/production-deployment.md)
-is the operator source of truth for the exact host sequence and acceptance
-checks.
-
-The edge and Nix control planes cannot change atomically. The temporary block
-makes the gap fail closed instead of serving mixed generations.
+The edge and origin deployment control planes cannot change atomically. The
+temporary block makes the gap fail closed instead of serving mixed generations.
 
 Rollback is limited to another reviewed v2 revision with the same edge
-contract. First restore the temporary edge block. In `nixos-config-deadmanoz`,
-pin the `mempool-atlas-deploy` input to the selected reviewed deploy revision;
-that revision's `flake.lock` selects the matching `mempool-atlas-src` revision,
-package, and Atlas modules. Build before switching, switch only affected source
-hosts, and switch the presentation host last. That switch restores the server
-executable and browser root together from the selected production package, so
-there is no manual artifact restore under `/opt`.
+contract. First restore the temporary edge block. Select the previously
+recorded application pin and matched release unit, build or fetch it before
+switching, apply only affected source-side configuration, and switch the
+presentation service last. Restore the server executable and browser root
+together.
 
 Restore the matching Cloudflare cache and security rules, purge the
 `atlas.example.com/api/v2` prefix, and verify the loopback v2 API. Only then
-remove the edge block and rerun `just verify-live` from
-`mempool-atlas-deploy` plus `just smoke-public` from this repository. A Nix
-rollback does not revert Cloudflare state by itself.
+remove the edge block and rerun `just smoke-public` from this repository. An
+origin rollback does not revert Cloudflare state by itself.
 
 ## Failure and rollback checks
 

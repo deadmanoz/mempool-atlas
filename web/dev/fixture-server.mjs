@@ -24,6 +24,7 @@ const FIXTURE_PORT_TEXT = process.env.ATLAS_FIXTURE_PORT ?? "3101";
 const EMULATE_CLOUDFLARE_HEADERS =
   process.env.ATLAS_FIXTURE_CLOUDFLARE_HEADERS === "1";
 const OMIT_HEADER = process.env.ATLAS_FIXTURE_OMIT_HEADER ?? "";
+const REPEAT_HEADER = process.env.ATLAS_FIXTURE_REPEAT_HEADER ?? "";
 const FIXTURE_DETAIL_STATUS_TEXT =
   process.env.ATLAS_FIXTURE_DETAIL_STATUS ?? "200";
 
@@ -36,7 +37,7 @@ if (FIXTURE_PORT > 65535) {
   writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_PORT\n");
   process.exit(2);
 }
-if (!/^(200|404|503|503-unavailable)$/.test(FIXTURE_DETAIL_STATUS_TEXT)) {
+if (!/^(200|404|503)$/.test(FIXTURE_DETAIL_STATUS_TEXT)) {
   writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_DETAIL_STATUS\n");
   process.exit(2);
 }
@@ -44,10 +45,11 @@ if (!/^(|cache-control|cf-cache-status|vary)$/.test(OMIT_HEADER)) {
   writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_OMIT_HEADER\n");
   process.exit(2);
 }
-const FIXTURE_DETAIL_STATUS =
-  FIXTURE_DETAIL_STATUS_TEXT === "503-unavailable"
-    ? 503
-    : Number(FIXTURE_DETAIL_STATUS_TEXT);
+if (!/^(|cache-control|vary)$/.test(REPEAT_HEADER)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_REPEAT_HEADER\n");
+  process.exit(2);
+}
+const FIXTURE_DETAIL_STATUS = Number(FIXTURE_DETAIL_STATUS_TEXT);
 
 const failFixtureLoad = () => {
   writeSync(process.stderr.fd, `${FIXTURE_ERROR}\n`);
@@ -246,11 +248,18 @@ const cloudflareHeaders = (cacheStatus) =>
       }
     : {};
 
+const repeatedFixtureValue = (name, value) => {
+  if (name.toLowerCase() !== REPEAT_HEADER) return value;
+  return name.toLowerCase() === "vary"
+    ? [value, "Origin"]
+    : ["public, max-age=3600", value];
+};
+
 const fixtureHeaders = (headers) =>
   Object.fromEntries(
-    Object.entries(headers).filter(
-      ([name]) => name.toLowerCase() !== OMIT_HEADER,
-    ),
+    Object.entries(headers)
+      .filter(([name]) => name.toLowerCase() !== OMIT_HEADER)
+      .map(([name, value]) => [name, repeatedFixtureValue(name, value)]),
   );
 
 const send = (
@@ -311,23 +320,6 @@ const server = createServer((request, response) => {
   const detailMatch = url.pathname.match(transactionDetailPath);
   if (detailMatch !== null && FIXTURE_DETAIL_STATUS !== 200) {
     const txid = detailMatch[1];
-    if (FIXTURE_DETAIL_STATUS_TEXT === "503-unavailable") {
-      send(
-        request,
-        response,
-        503,
-        Buffer.from(
-          JSON.stringify({
-            type: "v2_unavailable",
-            title: "Current v2 publication unavailable",
-            status: 503,
-            detail: "The source has not published a complete v2 snapshot yet.",
-          }),
-        ),
-        { "content-type": "application/problem+json" },
-      );
-      return;
-    }
     const detailError =
       FIXTURE_DETAIL_STATUS === 404
         ? `transaction "${txid}" is not in the current snapshot`

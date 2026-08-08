@@ -8,11 +8,14 @@ if [[ "$script_dir" == "$script_path" ]]; then
 fi
 # shellcheck source=lib/v2-manifest-stages.sh
 source "$script_dir/lib/v2-manifest-stages.sh"
+# shellcheck source=lib/smoke-public-helpers.sh
+source "$script_dir/lib/smoke-public-helpers.sh"
 
 # Test-only mode permits loopback HTTP and makes the Cloudflare header pair
 # optional. Every origin response, payload, validator, and cache-policy check
 # below remains active.
 local_fixture=0
+manifest_cache_control_expected='public, no-cache, must-revalidate'
 stage_cache_control_expected='public, max-age=31536000, immutable, must-revalidate'
 if [[ ${1:-} == --local-fixture ]]; then
     local_fixture=1
@@ -64,25 +67,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-header_value() {
-    local name=$1
-    local path=$2
-    awk -v wanted="$name" '
-        {
-            line = $0
-            sub(/\r$/, "", line)
-            separator = index(line, ":")
-            if (separator == 0) next
-            header = substr(line, 1, separator - 1)
-            if (tolower(header) == tolower(wanted)) {
-                value = substr(line, separator + 1)
-                sub(/^[[:space:]]*/, "", value)
-            }
-        }
-        END { print value }
-    ' "$path"
-}
-
 status_code() {
     awk '/^HTTP\// { code = $2 } END { print code }' "$1"
 }
@@ -91,7 +75,7 @@ require_header() {
     local name=$1
     local path=$2
     local value
-    value=$(header_value "$name" "$path")
+    value=$(atlas_smoke_header_value "$name" "$path")
     if [[ -z "$value" ]]; then
         printf 'missing %s header in %s\n' "$name" "$path" >&2
         return 1
@@ -119,8 +103,8 @@ require_cloudflare_cache_bypass() {
     local context=$2
     local cache_status
     if (( local_fixture )) &&
-        [[ -z $(header_value cf-ray "$path") ]] &&
-        [[ -z $(header_value cf-cache-status "$path") ]]; then
+        [[ -z $(atlas_smoke_header_value cf-ray "$path") ]] &&
+        [[ -z $(atlas_smoke_header_value cf-cache-status "$path") ]]; then
         return
     fi
     require_header cf-ray "$path" >/dev/null
@@ -140,8 +124,8 @@ require_cloudflare_cache_handling() {
     local context=$2
     local cache_status
     if (( local_fixture )) &&
-        [[ -z $(header_value cf-ray "$path") ]] &&
-        [[ -z $(header_value cf-cache-status "$path") ]]; then
+        [[ -z $(atlas_smoke_header_value cf-ray "$path") ]] &&
+        [[ -z $(atlas_smoke_header_value cf-cache-status "$path") ]]; then
         return
     fi
     require_header cf-ray "$path" >/dev/null
@@ -201,13 +185,10 @@ fi
 
 etag=$(require_header etag "$temp_dir/manifest.headers")
 cache_control=$(require_header cache-control "$temp_dir/manifest.headers")
-case "$cache_control" in
-    *public*no-cache*must-revalidate*) ;;
-    *)
-        printf 'unexpected manifest cache policy: %s\n' "$cache_control" >&2
-        exit 1
-        ;;
-esac
+[[ "$cache_control" == "$manifest_cache_control_expected" ]] || {
+    printf 'unexpected manifest cache policy: %s\n' "$cache_control" >&2
+    exit 1
+}
 
 require_header content-encoding "$temp_dir/manifest.headers" >/dev/null
 require_cloudflare_cache_handling "$temp_dir/manifest.headers" "manifest"
@@ -355,14 +336,11 @@ if [[ $(status_code "$temp_dir/conditional.headers") != 304 ]]; then
     exit 1
 fi
 conditional_manifest_cache_control=$(require_header cache-control "$temp_dir/conditional.headers")
-case "$conditional_manifest_cache_control" in
-    *public*no-cache*must-revalidate*) ;;
-    *)
-        printf 'conditional manifest returned an unexpected cache policy: %s\n' \
-            "$conditional_manifest_cache_control" >&2
-        exit 1
-        ;;
-esac
+[[ "$conditional_manifest_cache_control" == "$manifest_cache_control_expected" ]] || {
+    printf 'conditional manifest returned an unexpected cache policy: %s\n' \
+        "$conditional_manifest_cache_control" >&2
+    exit 1
+}
 require_cloudflare_cache_handling \
     "$temp_dir/conditional.headers" "conditional manifest"
 if [[ -s "$temp_dir/conditional.body" ]]; then
@@ -371,10 +349,7 @@ if [[ -s "$temp_dir/conditional.body" ]]; then
 fi
 
 if jq -e '.transaction_count > 0' "$temp_dir/manifest.json" >/dev/null; then
-    jq -r '.txids_base64' "$temp_dir/population.json" |
-        openssl base64 -d -A >"$temp_dir/txids.bin"
-    first_txid=$(head -c 32 "$temp_dir/txids.bin" | xxd -p -c 64)
-    [[ "$first_txid" =~ ^[0-9a-f]{64}$ ]] || {
+    first_txid=$(atlas_smoke_first_txid "$temp_dir/population.json") || {
         printf 'population did not decode to a canonical first txid\n' >&2
         exit 1
     }
@@ -396,8 +371,7 @@ if jq -e '.transaction_count > 0' "$temp_dir/manifest.json" >/dev/null; then
             ;;
         503)
             jq -e --arg txid "$detail_txid" '
-                .error == ("transaction \"" + $txid + "\" is present but has no policy assessment in the current snapshot") or
-                (.type == "v2_unavailable" and .status == 503)
+                .error == ("transaction \"" + $txid + "\" is present but has no policy assessment in the current snapshot")
             ' "$temp_dir/detail.json" >/dev/null || {
                 printf 'transaction detail returned an unexpected 503 response\n' >&2
                 exit 1

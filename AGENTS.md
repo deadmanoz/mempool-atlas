@@ -61,6 +61,9 @@ lenses, and serves source-local node and comparison views.
   measurement harness, and result merger. `release-result-validator.mjs` owns
   typed release-gate inputs and feasibility derivation. Generated profiles and
   results live under gitignored `web/.perf-fixtures/` and `web/.perf-results/`.
+- `scripts/smoke-public.sh` validates the deployed edge contract;
+  `scripts/lib/smoke-public-helpers.sh` owns repeated-header parsing and bounded
+  first-transaction extraction.
 - `docs/architecture.md` is the current system reference.
 - `docs/classification.md` is the behavioral specification for classifier
   contracts, rules, thresholds, and limitations.

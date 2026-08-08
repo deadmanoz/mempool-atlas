@@ -1814,6 +1814,7 @@ export {
   decodeStage,
   parseManifest,
   publicationId,
+  retryDelay,
   resultTuple,
   signedColumn,
   validateManifestRoots,

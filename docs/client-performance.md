@@ -20,6 +20,13 @@ captured public mempool is stored in the repository.
   origin, runs the desktop and constrained-mobile matrix, and writes
   `web/.perf-results/latest.json`.
 
+`just perf-web` is a manual pre-release operator step. CI does not run the full
+headed-browser performance matrix. CI enforces the checked staged-byte
+projection and the unit contracts for release gates, result validation,
+readiness, retry behavior, and performance helpers. Before a release, an
+operator must run `just perf-web` with the pinned Node.js version and review the
+merged browser result as additional release evidence.
+
 The exact Node patch pin is deliberate because Node ships the zlib
 implementation that produces the checked-in gzip byte evidence. A Node patch
 update is a reviewed release-evidence change: update the CI runtime and
@@ -88,6 +95,26 @@ The memory API depends on Chrome's Performance Manager, which is not present in
 headless Chromium. The performance matrix therefore uses a normal Chromium
 window with the documented `ForceEagerMeasureMemory` testing flag. A separate
 empty-worker scenario records the worker and page baseline.
+
+## Measurement hooks
+
+The production browser bundle deliberately reads two optional page globals:
+`window.__atlasCandidateReadyHook` can hold a fully prepared replacement before
+commit, and `window.__atlasPublicationAttemptHook` can hold a node or comparison
+publication attempt before candidate preparation. Functional and performance
+Playwright use these hooks to observe atomic replacement and retained memory at
+boundaries that cannot be sampled reliably from outside the page. When the
+globals are absent, production behavior is unchanged.
+
+The hook promises have no local timeout by design. A measurement may hold a
+boundary until its sample is complete, while the owning request's abort signal
+still releases a superseded or cancelled attempt. A timeout would make retained
+memory evidence depend on machine speed and could commit a candidate during a
+sample. The tradeoff is that any trusted script already executing in the page
+can assign one of these globals and stall publication progress. The hooks are
+test coordination points, not a security boundary. Keep the production CSP
+`script-src` allowlist narrow, review any analytics script origin as trusted
+code, and do not weaken CSP to expose or operate the hooks.
 
 ## Release gates
 
