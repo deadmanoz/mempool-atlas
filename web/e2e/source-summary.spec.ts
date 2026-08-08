@@ -1104,7 +1104,17 @@ test.describe("progressive v2 publications", () => {
       "complete-feature-ready",
     );
     await expect(page.locator(".lens-toolbar #mode-count")).toBeVisible();
-    await expect(page.locator("#apply-filters")).toHaveCount(0);
+    const filters = page.locator("#filters");
+    await expect(
+      filters.locator(
+        'button:not([type]), button[type="submit"], input[type="submit"], input[type="image"]',
+      ),
+    ).toHaveCount(0);
+    await expect(
+      filters.getByRole("button", { name: /^apply$/i, includeHidden: true }),
+    ).toHaveCount(0);
+    await expect(filters.locator("button")).toHaveCount(1);
+    await expect(filters.locator("button")).toHaveText("Reset");
     await expect(page.locator("#sample-disclosure")).toHaveCount(0);
     await expect(page.locator("#transaction-disclosure")).toBeVisible();
     await expect(page.locator("#detail-classifiers")).toHaveCount(0);
@@ -1217,8 +1227,8 @@ test.describe("progressive v2 publications", () => {
       const retainedSummary = await page
         .locator("#filter-summary")
         .textContent();
-      await page.locator("#filters").evaluate((form) => {
-        (form as HTMLFormElement).requestSubmit();
+      await page.locator("#maximum-age").evaluate((control) => {
+        control.dispatchEvent(new Event("change", { bubbles: true }));
       });
       await expect(page.locator("#status-title")).toHaveText(
         retainedStatus ?? "",

@@ -22,7 +22,7 @@ const nodeEvidence = () => {
       selected_lens: "fee-rate-by-age",
       rendered_transaction_count: 70_000,
     }),
-    measurement("node-filter-submit", 40, 80, 6, {
+    measurement("node-filter-input", 40, 80, 6, {
       minimum_fee_rate: 2,
       filtered_transaction_count: 60_000,
       source_transaction_count: 70_000,

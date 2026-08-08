@@ -20,7 +20,7 @@ const nonEmptyArray = (value, label) => {
 
 export const interactionLabelsForScenario = (scenario) => {
   if (scenario === "node") {
-    return ["node-fee-rate-by-age-activation", "node-filter-submit"];
+    return ["node-fee-rate-by-age-activation", "node-filter-input"];
   }
   if (scenario === "comparison") {
     return ["comparison-distribution-scope-switch"];
@@ -90,7 +90,7 @@ export const validateInteractionEvidence = (
   if (result.scenario === "node") {
     const filteredCount = finite(
       secondInteraction.outcome.filtered_transaction_count,
-      `${label}.node-filter-submit.filtered_transaction_count`,
+      `${label}.node-filter-input.filtered_transaction_count`,
       { positive: true },
     );
     if (

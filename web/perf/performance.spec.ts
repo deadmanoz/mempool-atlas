@@ -654,6 +654,33 @@ type ClickHandlerTiming = {
   durationMs: number;
 };
 
+const measureInputHandler = async (
+  page: Page,
+  selector: string,
+  value: string,
+): Promise<ClickHandlerTiming> => {
+  const intervalStartTimeMs = await page.evaluate(() => performance.now());
+  const handler = await page.evaluate(
+    ({ targetSelector, nextValue }) => {
+      const target = document.querySelector<HTMLInputElement>(targetSelector);
+      if (target === null) {
+        throw new Error(`interaction target ${targetSelector} is unavailable`);
+      }
+      const startTimeMs = performance.now();
+      target.value = nextValue;
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      const endTimeMs = performance.now();
+      return {
+        startTimeMs,
+        endTimeMs,
+        durationMs: endTimeMs - startTimeMs,
+      };
+    },
+    { targetSelector: selector, nextValue: value },
+  );
+  return { intervalStartTimeMs, ...handler };
+};
+
 const measureClickHandler = async (
   page: Page,
   selector: string,
@@ -1318,15 +1345,24 @@ const measureNodePackedStoreInteractions = async (
     },
   );
 
-  await page.locator("#minimum-fee-rate").fill("2");
-  const filterHandler = await measureClickHandler(
+  const filterHandler = await measureInputHandler(
     page,
-    '#filters button[type="submit"]',
+    "#minimum-fee-rate",
+    "2",
   );
-  await expect(page.locator("#filter-summary")).toHaveText(
-    /^Showing [\d,]+ of 70,000 transactions\.$/,
-  );
-  const summary = (await page.locator("#filter-summary").textContent()) ?? "";
+  const filterSummary = page.locator("#filter-summary");
+  await expect
+    .poll(async () => {
+      const summary = (await filterSummary.textContent()) ?? "";
+      const match = summary.match(
+        /^Showing ([\d,]+) of 70,000 transactions\.$/,
+      );
+      return match === null
+        ? 70_000
+        : Number((match[1] ?? "").replaceAll(",", ""));
+    })
+    .toBeLessThan(70_000);
+  const summary = (await filterSummary.textContent()) ?? "";
   const counts = filterSummaryCounts(summary);
   await expect(page.locator("#mempool-canvas")).toHaveAttribute(
     "aria-label",
@@ -1336,7 +1372,7 @@ const measureNodePackedStoreInteractions = async (
   );
   const filterSettledAtMs = await settleFrames(page);
   const filterMeasurement = measuredInteraction(
-    "node-filter-submit",
+    "node-filter-input",
     filterHandler,
     filterSettledAtMs,
     {

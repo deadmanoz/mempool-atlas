@@ -243,7 +243,6 @@ const inspectorOutcome = requiredElement<HTMLElement>("inspector-outcome");
 const detailStatus = requiredElement<HTMLElement>("detail-status");
 const detailTransaction = requiredElement<HTMLElement>("detail-transaction");
 const detailRules = requiredElement<HTMLOListElement>("detail-rules");
-const filtersForm = requiredElement<HTMLFormElement>("filters");
 const minimumFeeRate = requiredElement<HTMLInputElement>("minimum-fee-rate");
 const maximumAge = requiredElement<HTMLSelectElement>("maximum-age");
 const minimumVsize = requiredElement<HTMLInputElement>("minimum-vsize");
@@ -2641,11 +2640,6 @@ terrainCanvas.addEventListener("keydown", (event) => {
         ?.focus();
     }
   }
-});
-
-filtersForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  startFilterInteraction();
 });
 
 minimumFeeRate.addEventListener("input", () => {

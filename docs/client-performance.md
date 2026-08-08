@@ -232,9 +232,9 @@ label, rule, or bucket emphasis and adds one local highlight instead of using a
 whole-terrain restyle as a shortcut for the interaction gate.
 
 After the complete memory sample, each stable node run activates the fee-rate
-by age lens and waits for its 70,000-row canvas to paint, then submits a
-non-default fee-rate filter and waits for the filtered canvas to repaint. Each
-stable comparison run switches the source-local distributions from all
+by age lens and waits for its 70,000-row canvas to paint, then changes the
+minimum fee rate and waits for the automatically filtered canvas to repaint.
+Each stable comparison run switches the source-local distributions from all
 transactions to the common population and waits for both aggregate models to
 commit. A complete comparison candidate prepares that common source-local model
 before readiness and adopts only its aggregate arrays into the candidate-owned

@@ -208,6 +208,23 @@ test.describe("node page", () => {
     }
   });
 
+  test("uses automatic membership filters without an Apply control", async ({
+    page,
+  }) => {
+    await page.locator("#fee-age-tab").click();
+    const filters = page.locator("#filters");
+    await expect(
+      filters.locator(
+        'button:not([type]), button[type="submit"], input[type="submit"], input[type="image"]',
+      ),
+    ).toHaveCount(0);
+    await expect(filters.getByRole("button", { name: /^apply$/i })).toHaveCount(
+      0,
+    );
+    await expect(filters.getByRole("button")).toHaveCount(1);
+    await expect(filters.getByRole("button")).toHaveText("Reset");
+  });
+
   test("keeps the Classifications query usable at 390px", async ({ page }) => {
     test.skip(
       viewportWidth(page) !== 390,
