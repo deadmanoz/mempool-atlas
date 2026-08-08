@@ -31,6 +31,8 @@ lenses, and serves source-local node and comparison views.
   browser fixture bodies. Production builds do not enable `perf-fixtures`.
 - `src/bip110/` is the private pure seven-rule evaluator.
 - `web/` contains the node viewer and browser-derived comparison page.
+- `web/src/node-entry.ts` sends the stateless public entry to the default Core
+  versus Knots comparison and loads the node viewer for explicit node URL state.
 - `web/src/source-summary.ts` owns the strict source-summary wire validator
   shared by discovery parsing and staged-manifest parsing.
 - `web/src/atlas-worker.ts` owns staged publication fetch, bounded decoding,
@@ -49,7 +51,8 @@ lenses, and serves source-local node and comparison views.
   compact marginal indexes and deduplicated ANY/ALL query resolution.
 - `web/src/snapshot-distributions.ts` owns aggregate-only distribution models
   and caching. The two `*-distributions-view.ts` modules own their complete
-  node and comparison distribution DOM subtrees;
+  node and comparison distribution DOM subtrees, including panel-local
+  comparison lens, metric, bucket, and population state;
   `snapshot-distribution-view-state.ts` owns the node view's identity,
   selection, and variant state.
 - `web/src/distribution-interaction.ts` owns the section-local tooltip and pin
@@ -245,6 +248,10 @@ newer and npm 10 or newer.
 - Cache distribution and comparison-policy aggregates by their semantic input
   identity. Keep transaction selection direct rather than deriving parallel
   sample tables.
+- Keep the comparison distribution lens, Count/vsize metric, and population
+  scope inside the node-by-node distribution section. Composition-segment
+  selection changes only that section's shared lens and bucket; it never
+  changes the primary comparison membership region or policy focus.
 - Keep distribution inspection presentation-only. Spectra and densities use
   one tab stop per chart, pointer hit-testing, arrow-key region traversal, and
   one pinned region without rescanning transactions or creating per-bin DOM.
@@ -252,8 +259,10 @@ newer and npm 10 or newer.
   distributions layout without rebuilding aggregate models. Narrow viewports
   always render one readable column.
 - Position distribution ticks from their raw logarithmic domains and describe
-  exact bin bounds in inspectors. Do not present the 83-byte serialized
-  OP_RETURN script reference as an `op_return_bytes` payload threshold.
+  exact bin bounds in inspectors. Name both quantitative axes and show the
+  selected metric scale on every spectrum. Do not present the 83-byte
+  serialized OP_RETURN script reference as an `op_return_bytes` payload
+  threshold.
 - Keep `main.ts` and `comparison-main.ts` focused on page lifecycle and
   cross-view orchestration. Visible distribution subtrees own their lookup,
   rendering, event, resize, cache, and reset lifecycles.

@@ -184,7 +184,7 @@ export const OUTPUT_VALUE_TICKS: readonly AxisTick[] = logDomainTicks(
     { value: 100_000, label: "100k sat", priority: 2 },
     { value: 10_000_000, label: "10m sat", priority: 2 },
     { value: 100_000_000, label: "1 BTC", priority: 3 },
-    { value: 10_000_000_000, label: "100 BTC", priority: 2 },
+    { value: 10_000_000_000, label: "100 BTC", priority: 1 },
     { value: 100_000_000_000, label: "1k BTC+", priority: 3 },
   ],
 );

@@ -40,7 +40,10 @@ const svgElement = <K extends keyof SVGElementTagNameMap>(
   return element;
 };
 
-const axisTickRow = (ticks: readonly AxisTick[]): HTMLElement => {
+const axisTickRow = (
+  ticks: readonly AxisTick[],
+  axisLabel?: string,
+): HTMLElement => {
   const row = document.createElement("div");
   row.className = "panel-axis";
   const hasReferences = ticks.some(
@@ -78,6 +81,13 @@ const axisTickRow = (ticks: readonly AxisTick[]): HTMLElement => {
     }
     row.append(label);
   }
+  if (axisLabel !== undefined) {
+    row.dataset.hasTitle = "true";
+    const title = document.createElement("strong");
+    title.className = "panel-axis-title";
+    title.textContent = axisLabel;
+    row.append(title);
+  }
   return row;
 };
 
@@ -108,10 +118,13 @@ const seriesLegend = (
   return legend;
 };
 
-export const feeRateAxisRow = (): HTMLElement => axisTickRow(FEE_RATE_TICKS);
+export const feeRateAxisRow = (): HTMLElement =>
+  axisTickRow(FEE_RATE_TICKS, "Fee rate");
 
-export const panelAxisRow = (ticks: readonly AxisTick[]): HTMLElement =>
-  axisTickRow(ticks);
+export const panelAxisRow = (
+  ticks: readonly AxisTick[],
+  axisLabel?: string,
+): HTMLElement => axisTickRow(ticks, axisLabel);
 
 const JOINT_MARGIN = 26;
 const JOINT_GAP = 3;
@@ -296,7 +309,10 @@ export const renderJointChart = (
       }
       return label;
     });
-    options.yAxis.replaceChildren(...labels);
+    const title = document.createElement("strong");
+    title.className = "joint-y-axis-title";
+    title.textContent = options.yAxisLabel;
+    options.yAxis.replaceChildren(title, ...labels);
   }
   installJointChartInteraction(container, canvas, density, geometry, options);
   return geometry;
@@ -810,6 +826,39 @@ export const formatOutputValueAxisValue = (value: number): string =>
     ? `${decimalFormat.format(value / 100_000_000)} BTC`
     : `${decimalFormat.format(value)} sats`;
 
+const spectrumYAxis = (
+  maxValue: number,
+  formatValue: (value: number) => string,
+  axisLabel: string,
+): HTMLElement => {
+  const axis = document.createElement("div");
+  axis.className = "spectrum-y-axis";
+  axis.setAttribute("aria-hidden", "true");
+  const title = document.createElement("strong");
+  title.className = "spectrum-y-axis-title";
+  title.textContent = axisLabel;
+  axis.append(title);
+
+  const seen = new Set<string>();
+  for (const { value, position, priority } of [
+    { value: maxValue, position: 0, priority: 3 },
+    { value: maxValue / 2, position: 0.5, priority: 2 },
+    { value: 0, position: 1, priority: 3 },
+  ]) {
+    const label = formatValue(value);
+    if (seen.has(label)) continue;
+    seen.add(label);
+    const tick = document.createElement("span");
+    tick.textContent = label;
+    tick.dataset.priority = String(priority);
+    tick.style.top = `${position * 100}%`;
+    if (position === 0) tick.dataset.edge = "top";
+    if (position === 1) tick.dataset.edge = "bottom";
+    axis.append(tick);
+  }
+  return axis;
+};
+
 export const renderSpectrumChart = (
   container: HTMLElement,
   spectrum: FeeSpectrum,
@@ -834,6 +883,17 @@ export const renderSpectrumChart = (
       class: "chart-baseline",
     }),
   );
+  for (const position of [0, 0.5]) {
+    svg.append(
+      svgElement("line", {
+        x1: "0",
+        y1: (position * SPECTRUM_HEIGHT + 0.5).toFixed(2),
+        x2: String(SPECTRUM_WIDTH),
+        y2: (position * SPECTRUM_HEIGHT + 0.5).toFixed(2),
+        class: "chart-gridline chart-gridline-horizontal",
+      }),
+    );
+  }
   const binCount = spectrum.bins.length;
   const step = SPECTRUM_WIDTH / binCount;
   const barWidth = Math.max(1, step - 2);
@@ -1006,7 +1066,14 @@ export const renderSpectrumChart = (
       detail: percentageFormat.format(group.weight / spectrum.totalWeight),
     })),
   );
-  container.replaceChildren(svg, axisTickRow(options.ticks), legend);
+  const plot = document.createElement("div");
+  plot.className = "spectrum-plot-layout";
+  plot.append(
+    spectrumYAxis(spectrum.maxBin, options.metricFormat, options.metricLabel),
+    svg,
+    axisTickRow(options.ticks, options.axisLabel),
+  );
+  container.replaceChildren(plot, legend);
 };
 
 export interface MosaicRenderOptions {

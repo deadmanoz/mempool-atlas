@@ -17,7 +17,9 @@ happens in the browser; the server never combines mempools.
 
 Atlas also shows fee rate, age, virtual size, ancestor fee rate, ancestry,
 replaceability, structure facts, and transaction detail. The browser builds
-the distribution charts from the current snapshot.
+the distribution charts from the current snapshot. Node selection, current
+source facts, and transaction lookup share one source panel, matching the
+selector-to-details hierarchy used by Compare.
 
 In the default Classifications view, label cards are query controls. Select one
 or more labels from the active classifier, combine them with ANY or ALL, and
@@ -41,9 +43,17 @@ does not prove that a node rejected or filtered it.
 
 Hover or focus any plotted region for exact bin ranges and population shares.
 Click a spectrum or density cell to pin it while comparing panels; keyboard
-users can traverse chart bins with the arrow keys. Data-carriage references
+users can traverse chart bins with the arrow keys. Quantitative charts name
+both axes, and spectra show the active count or virtual-size scale vertically.
+Data-carriage references
 distinguish the historical 40-byte payload limit from the conventional
 80-byte payload that serializes to an 83-byte OP_RETURN script.
+
+On Compare, the node-by-node distribution section keeps its classifier lens,
+Count/vsize metric, and membership population controls beside the charts they
+govern. Selecting a composition segment changes the local lens and bucket for
+the other distribution panels without changing the primary membership or
+policy comparison.
 
 ![Composition, fee structure, ancestor fee rate, and fee-rate-by-size density](docs/assets/snapshot-distributions.png)
 
@@ -53,14 +63,29 @@ distinguish the historical 40-byte payload limit from the conventional
 
 ## Compare independent mempools
 
+Opening Atlas without URL state starts with the Bitcoin Core versus Bitcoin
+Knots comparison. Explicit `?source=...` URLs continue to open the single-node
+viewer, and the Node control in Compare opens its current left-hand source.
+
 The comparison page fetches two snapshots and derives three regions in the
 browser: present in both, observed only on the left, and observed only on the
-right. It shows the collection windows and their sampling skew.
+right. Snapshot timing states which source was observed later and whether the
+two collection windows overlapped. A prominent txid lookup immediately below
+that context opens one transaction across both current snapshots. The lookup
+and three membership populations share one transaction panel. Selected
+transaction IDs in both Node and Compare link to their transaction page on
+mempool.space.
 
 Both products render the lightweight current source metadata before their full
 snapshot bodies arrive. The comparison page keeps its primary membership
 workspace ahead of secondary distributions and the policy matrix, so those
 derived panels cannot displace the interactive view as they populate.
+The status strip below the Node/Compare switch remains visible: Node summarizes
+the current snapshot and chain tip, while Compare summarizes the selected pair,
+membership overlap, and whether both observations share a chain tip. Loading,
+stale, and failure states replace that summary with current operational context.
+Both browser products share a footer linking to the public source repository
+and the author's X and Nostr profiles.
 
 Each side keeps its own witness variant and policy assessment. Presence or
 absence describes the sampled mempools only. It does not prove that a node
@@ -184,6 +209,9 @@ See [Deploy behind Cloudflare](docs/deployment-cloudflare.md) for setup and the
 smoke test. A deployment can enable a self-hosted Umami tracker at build time;
 analytics is disabled by default. Keep deployment credentials, hostnames,
 private RPC addresses, and account identifiers out of this repository.
+The production HTML publishes canonical Node and Compare URLs, page-specific
+Open Graph and X cards, browser and touch icons, a web manifest, `robots.txt`,
+and a sitemap for `atlas.deadmanoz.xyz`.
 
 ## Contributing
 

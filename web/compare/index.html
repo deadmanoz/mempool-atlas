@@ -7,6 +7,57 @@
       name="description"
       content="Compare complete current mempool snapshots from two independently observed Bitcoin nodes."
     />
+    <meta name="author" content="deadmanoz" />
+    <meta name="application-name" content="Mempool Atlas" />
+    <meta name="theme-color" content="#071018" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Mempool Atlas" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="en_AU" />
+    <meta property="og:site_name" content="Mempool Atlas" />
+    <meta property="og:title" content="Mempool Atlas · Current Comparison" />
+    <meta
+      property="og:description"
+      content="Compare current mempool membership and transaction properties from two independently observed Bitcoin nodes."
+    />
+    <meta property="og:url" content="https://atlas.deadmanoz.xyz/compare/" />
+    <meta
+      property="og:image"
+      content="https://atlas.deadmanoz.xyz/social/mempool-atlas-compare-og.png"
+    />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Two Mempool Atlas transaction terrains beside the MA mark"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:creator" content="@ozdeadman" />
+    <meta name="twitter:title" content="Mempool Atlas · Current Comparison" />
+    <meta
+      name="twitter:description"
+      content="Compare current mempool membership and transaction properties from two independently observed Bitcoin nodes."
+    />
+    <meta
+      name="twitter:image"
+      content="https://atlas.deadmanoz.xyz/social/mempool-atlas-compare-og.png"
+    />
+    <meta
+      name="twitter:image:alt"
+      content="Two Mempool Atlas transaction terrains beside the MA mark"
+    />
+    <link rel="canonical" href="https://atlas.deadmanoz.xyz/compare/" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="me" href="https://x.com/ozdeadman" />
+    <link rel="me" href="https://primal.net/deadmanoz" />
     <title>Mempool Atlas · Current Comparison</title>
   </head>
   <body>
@@ -26,11 +77,15 @@
           <strong>Two independent snapshots</strong>
           <span>Current membership only. Each node keeps its own view.</span>
         </div>
-        <button id="comparison-refresh" class="refresh-button" type="button">
+        <button
+          id="comparison-refresh"
+          class="action-button action-button-primary refresh-button"
+          type="button"
+        >
           Refresh
         </button>
         <nav class="product-nav" aria-label="Atlas view">
-          <a href="../">
+          <a id="node-link" href="../?source=">
             <strong>Node</strong>
             <span>Single snapshot</span>
           </a>
@@ -75,7 +130,7 @@
           </label>
           <button
             id="swap-sources"
-            class="swap-sources"
+            class="action-button swap-sources"
             type="button"
             aria-label="Swap source A and source B"
           >
@@ -108,12 +163,50 @@
             <h3>Waiting</h3>
           </article>
         </div>
+        <div id="sampling-panel" class="sampling-panel" hidden>
+          <div class="sampling-heading">
+            <div>
+              <span class="toolbar-label">Snapshot timing</span>
+              <strong id="sampling-summary">Waiting</strong>
+            </div>
+            <span id="chain-summary">Chain tips unknown</span>
+          </div>
+          <p id="sampling-note"></p>
+        </div>
+      </section>
+
+      <section
+        class="comparison-transaction-panel"
+        aria-labelledby="comparison-transactions-heading"
+      >
+        <div class="comparison-transaction-panel-heading">
+          <div>
+            <p class="eyebrow">Current membership</p>
+            <h2 id="comparison-transactions-heading">Transactions</h2>
+          </div>
+          <p>
+            Inspect one transaction ID or choose a membership population to
+            explore.
+          </p>
+        </div>
         <form
           id="comparison-transaction-search"
           class="transaction-search comparison-transaction-search"
           role="search"
+          aria-labelledby="comparison-transaction-search-heading"
         >
-          <label for="comparison-transaction-search-input">Transaction</label>
+          <div class="comparison-transaction-search-heading">
+            <div>
+              <span class="toolbar-label">Transaction lookup</span>
+              <strong id="comparison-transaction-search-heading"
+                >Inspect a transaction</strong
+              >
+            </div>
+            <span>Search both current snapshots by txid.</span>
+          </div>
+          <label for="comparison-transaction-search-input"
+            >Transaction ID</label
+          >
           <div class="transaction-search-row">
             <input
               id="comparison-transaction-search-input"
@@ -122,47 +215,37 @@
               inputmode="text"
               autocomplete="off"
               spellcheck="false"
-              placeholder="Find a txid in either snapshot"
+              placeholder="Paste a 64-character txid"
             />
-            <button type="submit">Find</button>
+            <button class="action-button action-button-primary" type="submit">
+              Inspect
+            </button>
           </div>
           <span id="comparison-transaction-search-status" aria-live="polite"
             >Search the current membership union.</span
           >
         </form>
-        <div id="sampling-panel" class="sampling-panel" hidden>
-          <div class="sampling-heading">
-            <div>
-              <span class="toolbar-label">Sampling</span>
-              <strong id="sampling-summary">Waiting</strong>
-            </div>
-            <span id="chain-summary">Chain tips unknown</span>
-          </div>
-          <div id="sampling-timeline" class="sampling-timeline"></div>
-          <p id="sampling-note"></p>
-        </div>
-      </section>
-
-      <section
-        id="comparison-regions"
-        class="comparison-region-controls"
-        aria-label="Membership regions"
-      >
-        <button type="button" data-region="left_only" aria-pressed="false">
-          <span>Observed only in source A</span>
-          <strong>0</strong>
-          <small>0 vB</small>
-        </button>
-        <button type="button" data-region="common" aria-pressed="true">
-          <span>Present in both snapshots</span>
-          <strong>0</strong>
-          <small>0 vB in each source</small>
-        </button>
-        <button type="button" data-region="right_only" aria-pressed="false">
-          <span>Observed only in source B</span>
-          <strong>0</strong>
-          <small>0 vB</small>
-        </button>
+        <section
+          id="comparison-regions"
+          class="comparison-region-controls"
+          aria-label="Membership regions"
+        >
+          <button type="button" data-region="left_only" aria-pressed="false">
+            <span>Observed only in source A</span>
+            <strong>0</strong>
+            <small>0 vB</small>
+          </button>
+          <button type="button" data-region="common" aria-pressed="true">
+            <span>Present in both snapshots</span>
+            <strong>0</strong>
+            <small>0 vB in each source</small>
+          </button>
+          <button type="button" data-region="right_only" aria-pressed="false">
+            <span>Observed only in source B</span>
+            <strong>0</strong>
+            <small>0 vB</small>
+          </button>
+        </section>
       </section>
 
       <section
@@ -216,7 +299,7 @@
 
           <button
             id="clear-policy-filter"
-            class="comparison-policy-clear"
+            class="action-button comparison-policy-clear"
             type="button"
           >
             Show all policy results
@@ -229,7 +312,7 @@
             aria-labelledby="marginal-rules-heading"
           >
             <div class="section-heading">
-              <h3 id="marginal-rules-heading">Proven rule</h3>
+              <h3 id="marginal-rules-heading">BIP-110 rule</h3>
               <span>Marginal counts overlap</span>
             </div>
             <nav
@@ -313,9 +396,9 @@
               </div>
             </div>
             <p id="comparison-navigator-instructions">
-              Use arrow keys to visit every transaction in this region, Home or
-              End to jump, Page Up or Page Down to move by 100, and Enter to
-              inspect the current transaction.
+              Use arrow keys to inspect adjacent transactions, Home or End to
+              jump, and Page Up or Page Down to move by 100. Enter inspects the
+              transaction currently shown.
             </p>
           </div>
           <p id="comparison-visual-summary" class="visual-summary">
@@ -368,77 +451,107 @@
           <div>
             <p class="eyebrow">Node-by-node distributions</p>
             <h2>How does each current mempool look?</h2>
+            <p id="comparison-distribution-summary">
+              Shared axes use the selected lens and snapshot metric. Absence
+              from one node is not evidence of rejection.
+            </p>
           </div>
+        </div>
+        <div
+          class="comparison-distribution-controls"
+          aria-label="Distribution controls"
+        >
+          <label class="classification-lens-field distribution-lens-field">
+            <span>Distribution lens</span>
+            <select
+              id="dist-classifier"
+              aria-label="Distribution classifier lens"
+              disabled
+            ></select>
+          </label>
           <div
-            class="segmented compact distribution-scope"
+            class="toolbar-metric distribution-metric"
             role="group"
-            aria-label="Distribution population scope"
+            aria-label="Distribution snapshot metric"
           >
-            <button id="dist-scope-all" type="button" aria-pressed="true">
-              All
-            </button>
-            <button id="dist-scope-common" type="button" aria-pressed="false">
-              Present in both
-            </button>
-            <button id="dist-scope-left" type="button" aria-pressed="false">
-              Only A
-            </button>
-            <button id="dist-scope-right" type="button" aria-pressed="false">
-              Only B
-            </button>
+            <span class="toolbar-label">Snapshot metric</span>
+            <div class="segmented compact">
+              <button id="dist-metric-count" type="button" aria-pressed="false">
+                Count
+              </button>
+              <button id="dist-metric-vsize" type="button" aria-pressed="true">
+                vsize
+              </button>
+            </div>
           </div>
-          <p>
-            Each panel summarizes one node's selected population on shared axes,
-            weighted by virtual size. Absence from one node is not evidence of
-            rejection.
-          </p>
+          <div class="distribution-population">
+            <span class="toolbar-label">Population</span>
+            <div
+              class="segmented compact distribution-scope"
+              role="group"
+              aria-label="Distribution population scope"
+            >
+              <button id="dist-scope-all" type="button" aria-pressed="true">
+                All
+              </button>
+              <button id="dist-scope-common" type="button" aria-pressed="false">
+                Present in both
+              </button>
+              <button id="dist-scope-left" type="button" aria-pressed="false">
+                Only A
+              </button>
+              <button id="dist-scope-right" type="button" aria-pressed="false">
+                Only B
+              </button>
+            </div>
+          </div>
         </div>
         <div class="comparison-distribution-grid">
           <article class="distribution-card" data-side="left">
             <h3 id="dist-comp-left-title">Composition by lens · Source A</h3>
-            <p class="distribution-note">
+            <p id="dist-comp-left-note" class="distribution-note">
               Virtual-size share per independent classifier lens.
             </p>
             <div id="composition-left" class="composition-wrap"></div>
           </article>
           <article class="distribution-card" data-side="right">
             <h3 id="dist-comp-right-title">Composition by lens · Source B</h3>
-            <p class="distribution-note">
+            <p id="dist-comp-right-note" class="distribution-note">
               Virtual-size share per independent classifier lens.
             </p>
             <div id="composition-right" class="composition-wrap"></div>
           </article>
           <article class="distribution-card" data-side="left">
             <h3 id="dist-spectrum-left-title">Fee structure · Source A</h3>
-            <p class="distribution-note">
+            <p id="dist-spectrum-left-note" class="distribution-note">
               Stacked virtual size per log fee-rate bin by script-profile group.
             </p>
             <div id="spectrum-left" class="spectrum-wrap"></div>
           </article>
           <article class="distribution-card" data-side="right">
             <h3 id="dist-spectrum-right-title">Fee structure · Source B</h3>
-            <p class="distribution-note">
+            <p id="dist-spectrum-right-note" class="distribution-note">
               Stacked virtual size per log fee-rate bin by script-profile group.
             </p>
             <div id="spectrum-right" class="spectrum-wrap"></div>
           </article>
           <article class="distribution-card" data-side="left">
             <h3 id="dist-package-left-title">Ancestor fee rate · Source A</h3>
-            <p class="distribution-note">
+            <p id="dist-package-left-note" class="distribution-note">
               Delta-adjusted ancestor fees over ancestor virtual size.
             </p>
             <div id="package-left" class="spectrum-wrap"></div>
           </article>
           <article class="distribution-card" data-side="right">
             <h3 id="dist-package-right-title">Ancestor fee rate · Source B</h3>
-            <p class="distribution-note">
+            <p id="dist-package-right-note" class="distribution-note">
               Delta-adjusted ancestor fees over ancestor virtual size.
             </p>
             <div id="package-right" class="spectrum-wrap"></div>
           </article>
           <article class="distribution-card" data-side="left">
             <h3 id="dist-joint-left-title">Fee rate × size · Source A</h3>
-            <p class="distribution-note">
+            <p id="dist-joint-left-note" class="distribution-note">
               Virtual-size density with marginals, normalized within this
               source.
             </p>
@@ -459,7 +572,7 @@
           </article>
           <article class="distribution-card" data-side="right">
             <h3 id="dist-joint-right-title">Fee rate × size · Source B</h3>
-            <p class="distribution-note">
+            <p id="dist-joint-right-note" class="distribution-note">
               Virtual-size density with marginals, normalized within this
               source.
             </p>
@@ -480,7 +593,7 @@
           </article>
           <article class="distribution-card" data-side="left">
             <h3 id="dist-mosaic-left-title">Bucket × age · Source A</h3>
-            <p class="distribution-note">
+            <p id="dist-mosaic-left-note" class="distribution-note">
               Column width is each script-profile group's virtual-size share;
               cells split the group by age at observation.
             </p>
@@ -488,7 +601,7 @@
           </article>
           <article class="distribution-card" data-side="right">
             <h3 id="dist-mosaic-right-title">Bucket × age · Source B</h3>
-            <p class="distribution-note">
+            <p id="dist-mosaic-right-note" class="distribution-note">
               Column width is each script-profile group's virtual-size share;
               cells split the group by age at observation.
             </p>
@@ -496,7 +609,7 @@
           </article>
           <article class="distribution-card" data-side="left">
             <h3 id="dist-data-left-title">Data carriage · Source A</h3>
-            <p class="distribution-note">
+            <p id="dist-data-left-note" class="distribution-note">
               OP_RETURN carried bytes by data-protocols group, virtual-size
               weighted. References describe conventional pushed-payload forms;
               Atlas plots bytes summed across outputs, not serialized script
@@ -506,7 +619,7 @@
           </article>
           <article class="distribution-card" data-side="right">
             <h3 id="dist-data-right-title">Data carriage · Source B</h3>
-            <p class="distribution-note">
+            <p id="dist-data-right-note" class="distribution-note">
               OP_RETURN carried bytes by data-protocols group, virtual-size
               weighted. References describe conventional pushed-payload forms;
               Atlas plots bytes summed across outputs, not serialized script
@@ -516,7 +629,7 @@
           </article>
           <article class="distribution-card" data-side="left">
             <h3 id="dist-complexity-left-title">Inputs × outputs · Source A</h3>
-            <p class="distribution-note">
+            <p id="dist-complexity-left-note" class="distribution-note">
               Virtual-size density across input and output counts, normalized
               within this source.
             </p>
@@ -539,7 +652,7 @@
             <h3 id="dist-complexity-right-title">
               Inputs × outputs · Source B
             </h3>
-            <p class="distribution-note">
+            <p id="dist-complexity-right-note" class="distribution-note">
               Virtual-size density across input and output counts, normalized
               within this source.
             </p>
@@ -560,28 +673,28 @@
           </article>
           <article class="distribution-card" data-side="left">
             <h3 id="dist-entanglement-left-title">Entanglement · Source A</h3>
-            <p class="distribution-note">
+            <p id="dist-entanglement-left-note" class="distribution-note">
               Unconfirmed mempool relatives reported by this source.
             </p>
             <div id="entanglement-left" class="composition-wrap"></div>
           </article>
           <article class="distribution-card" data-side="right">
             <h3 id="dist-entanglement-right-title">Entanglement · Source B</h3>
-            <p class="distribution-note">
+            <p id="dist-entanglement-right-note" class="distribution-note">
               Unconfirmed mempool relatives reported by this source.
             </p>
             <div id="entanglement-right" class="composition-wrap"></div>
           </article>
           <article class="distribution-card" data-side="left">
             <h3 id="dist-value-left-title">Total output value · Source A</h3>
-            <p class="distribution-note">
+            <p id="dist-value-left-note" class="distribution-note">
               Total output value per transaction by script-profile group.
             </p>
             <div id="value-left" class="spectrum-wrap"></div>
           </article>
           <article class="distribution-card" data-side="right">
             <h3 id="dist-value-right-title">Total output value · Source B</h3>
-            <p class="distribution-note">
+            <p id="dist-value-right-note" class="distribution-note">
               Total output value per transaction by script-profile group.
             </p>
             <div id="value-right" class="spectrum-wrap"></div>
@@ -630,6 +743,30 @@
         </p>
       </section>
     </main>
+
+    <footer class="atlas-footer">
+      <p>Mempool Atlas · open source</p>
+      <nav aria-label="Mempool Atlas links">
+        <a
+          href="https://github.com/deadmanoz/mempool-atlas"
+          target="_blank"
+          rel="noopener noreferrer"
+          >GitHub</a
+        >
+        <a
+          href="https://x.com/ozdeadman"
+          target="_blank"
+          rel="noopener noreferrer"
+          >X @ozdeadman</a
+        >
+        <a
+          href="https://primal.net/deadmanoz"
+          target="_blank"
+          rel="noopener noreferrer"
+          >Nostr deadmanoz</a
+        >
+      </nav>
+    </footer>
 
     <script type="module" src="/src/comparison-main.ts"></script>
   </body>

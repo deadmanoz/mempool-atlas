@@ -1,15 +1,10 @@
-import { countFormat, formatDuration, formatTime } from "./format";
-import type {
-  ComparisonSide,
-  CurrentComparison,
-  LoadedSourceSnapshot,
-} from "./comparison-model";
+import { countFormat, formatDuration } from "./format";
+import type { CurrentComparison } from "./comparison-model";
 
 interface ComparisonSamplingElements {
   panel: HTMLElement;
   summary: HTMLElement;
   chainSummary: HTMLElement;
-  timeline: HTMLElement;
   note: HTMLElement;
 }
 
@@ -22,69 +17,35 @@ export const createComparisonSamplingView = ({
   panel,
   summary,
   chainSummary,
-  timeline,
   note,
 }: ComparisonSamplingElements): ComparisonSamplingView => {
-  const timelineRow = (
-    label: string,
-    side: ComparisonSide,
-    source: LoadedSourceSnapshot,
-    minimum: number,
-    span: number,
-  ): HTMLElement => {
-    const row = document.createElement("div");
-    row.className = "sampling-row";
-    const name = document.createElement("span");
-    name.textContent = label;
-    const track = document.createElement("div");
-    track.className = "sampling-track";
-    const bar = document.createElement("i");
-    bar.dataset.side = side;
-    const start = source.snapshot.collection_started_at_ms;
-    const duration = Math.max(1, source.snapshot.collection_duration_ms);
-    const startPercent = ((start - minimum) / span) * 100;
-    const widthScale = Math.max(0.012, duration / span);
-    bar.style.transform = `translateX(${startPercent}%) scaleX(${widthScale})`;
-    bar.title = `${formatTime(start)}–${formatTime(source.snapshot.collection_completed_at_ms)}`;
-    track.append(bar);
-    const time = document.createElement("time");
-    time.dateTime = new Date(
-      source.snapshot.collection_completed_at_ms,
-    ).toISOString();
-    time.textContent = formatTime(source.snapshot.collection_completed_at_ms);
-    row.append(name, track, time);
-    return row;
-  };
-
   return {
     render(current): void {
       panel.hidden = false;
       const { left, right } = current;
-      const earlierLabel =
-        current.earlier_side === null
-          ? "completed together"
-          : `${current[current.earlier_side].snapshot.source_label} completed earlier`;
-      summary.textContent = `${formatDuration(current.observed_skew_ms)} observation skew · ${earlierLabel}`;
+      if (current.earlier_side === null) {
+        summary.textContent = "Both snapshots were observed at the same time.";
+      } else {
+        const earlierName = current.earlier_side === "left" ? "A" : "B";
+        const laterName = current.earlier_side === "left" ? "B" : "A";
+        summary.textContent = `Source ${laterName} was observed ${formatDuration(current.observed_skew_ms)} after Source ${earlierName}.`;
+      }
       const sameTip =
         left.snapshot.chain_tip.hash === right.snapshot.chain_tip.hash;
+      const leftTip = left.snapshot.chain_tip;
+      const rightTip = right.snapshot.chain_tip;
+      const compactHash = (hash: string): string => `${hash.slice(0, 10)}…`;
       chainSummary.dataset.state = sameTip ? "same" : "different";
-      chainSummary.textContent = sameTip
-        ? `Same chain tip · ${countFormat.format(left.snapshot.chain_tip.height)}`
-        : `Different chain tips · ${countFormat.format(left.snapshot.chain_tip.height)} / ${countFormat.format(right.snapshot.chain_tip.height)}`;
-
-      const minimum = Math.min(
-        left.snapshot.collection_started_at_ms,
-        right.snapshot.collection_started_at_ms,
-      );
-      const maximum = Math.max(
-        left.snapshot.collection_completed_at_ms,
-        right.snapshot.collection_completed_at_ms,
-      );
-      const span = Math.max(1, maximum - minimum);
-      timeline.replaceChildren(
-        timelineRow("A", "left", left, minimum, span),
-        timelineRow("B", "right", right, minimum, span),
-      );
+      chainSummary.title = sameTip
+        ? `Source A and Source B: height ${countFormat.format(leftTip.height)}, block ${leftTip.hash}`
+        : `Source A: height ${countFormat.format(leftTip.height)}, block ${leftTip.hash}\nSource B: height ${countFormat.format(rightTip.height)}, block ${rightTip.hash}`;
+      if (sameTip) {
+        chainSummary.textContent = `Same chain tip · ${countFormat.format(leftTip.height)} · ${compactHash(leftTip.hash)}`;
+      } else if (leftTip.height === rightTip.height) {
+        chainSummary.textContent = `Different chain tips at height ${countFormat.format(leftTip.height)} · A ${compactHash(leftTip.hash)} / B ${compactHash(rightTip.hash)}`;
+      } else {
+        chainSummary.textContent = `Different chain tips · A ${countFormat.format(leftTip.height)} · ${compactHash(leftTip.hash)} / B ${countFormat.format(rightTip.height)} · ${compactHash(rightTip.hash)}`;
+      }
 
       const overlap =
         Math.min(
@@ -103,7 +64,6 @@ export const createComparisonSamplingView = ({
     },
     reset(): void {
       panel.hidden = true;
-      timeline.replaceChildren();
     },
   };
 };

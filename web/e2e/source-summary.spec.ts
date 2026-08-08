@@ -694,7 +694,7 @@ test.describe("early source metadata", () => {
   }) => {
     const gate = await installManifestGate(page);
     try {
-      await page.goto("/");
+      await page.goto("/?source=vps-core-01");
       await gate.waitForRequests(1);
 
       const summary = page.locator("#source-summary");
@@ -814,7 +814,7 @@ test.describe("progressive v2 publications", () => {
     const gate = await installPublicationAttemptGate(page, "node");
     const pageErrors: Error[] = [];
     page.on("pageerror", (error) => pageErrors.push(error));
-    await page.goto("/");
+    await page.goto("/?source=vps-core-01");
 
     const metrics = ["vsize", "count", "vsize", "count"] as const;
     for (let index = 0; index < metrics.length; index += 1) {
@@ -895,7 +895,7 @@ test.describe("progressive v2 publications", () => {
     const pageErrors: Error[] = [];
     page.on("pageerror", (error) => pageErrors.push(error));
     try {
-      await page.goto("/");
+      await page.goto("/?source=vps-core-01");
       await gate.waitForRequests(2);
 
       const status = page.locator("#page-status");
@@ -903,7 +903,7 @@ test.describe("progressive v2 publications", () => {
         "data-readiness",
         "primary-interactive",
       );
-      await expect(status).toHaveAttribute("data-state", /ready|stale/);
+      await expect(status).toHaveAttribute("data-state", /waiting|stale/);
       await expect(page.locator("#classification-lens-select")).toBeDisabled();
       await expect(page.locator("#fee-age-tab")).toBeDisabled();
       const classifierControls = page.locator("#classification-labels button");
@@ -926,7 +926,7 @@ test.describe("progressive v2 publications", () => {
         "aria-busy",
         "false",
       );
-      await expect(status).toHaveAttribute("data-state", /ready|stale/);
+      await expect(status).toHaveAttribute("data-state", /waiting|stale/);
       await expect(page.locator("#status-title")).toHaveText(
         "Snapshot classifications ready",
       );
@@ -1042,6 +1042,15 @@ test.describe("progressive v2 publications", () => {
     await expect(page.locator("#detail-transaction")).toContainText(
       selectedTxid,
     );
+    const explorerLink = page.locator(
+      "#detail-transaction .transaction-explorer-link",
+    );
+    await expect(explorerLink).toHaveAttribute(
+      "href",
+      `https://mempool.space/tx/${selectedTxid}`,
+    );
+    await expect(explorerLink).toHaveAttribute("target", "_blank");
+    await expect(explorerLink).toHaveAttribute("rel", "noopener noreferrer");
     await expect(page.locator("#detail-status")).toHaveText(
       /Complete result|Partial result/,
     );
@@ -1268,7 +1277,7 @@ test.describe("progressive v2 publications", () => {
         "data-readiness",
         "primary-interactive",
       );
-      await expect(status).toHaveAttribute("data-state", /ready|stale/);
+      await expect(status).toHaveAttribute("data-state", /waiting|stale/);
       await expect(page.locator("#comparison-policy-matrix")).toBeVisible();
       const commonRegion = page.locator(
         '#comparison-regions button[data-region="common"]',
@@ -1377,7 +1386,7 @@ test.describe("atomic publication replacement", () => {
   test("keeps the complete node view interactive until one coherent refresh commits", async ({
     page,
   }) => {
-    await page.goto("/");
+    await page.goto("/?source=vps-core-01");
     await expect(page.locator("#page-status")).toHaveAttribute(
       "data-readiness",
       "complete-feature-ready",
@@ -1414,7 +1423,7 @@ test.describe("atomic publication replacement", () => {
   test("retains node controls and filtered state when a superseding refresh fails", async ({
     page,
   }) => {
-    await page.goto("/");
+    await page.goto("/?source=vps-core-01");
     await expect(page.locator("#page-status")).toHaveAttribute(
       "data-readiness",
       "complete-feature-ready",

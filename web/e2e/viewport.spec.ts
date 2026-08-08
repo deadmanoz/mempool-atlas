@@ -3,10 +3,10 @@ import type { Locator, Page } from "@playwright/test";
 
 // These assertions encode a real regression: the responsive layer for shared
 // shell components once lived in `comparison-styles.css`, which only the
-// comparison page imports. The node page therefore clipped its whole
-// header-facts row and collapsed the txid search box to a few dozen pixels at
-// phone widths, while the comparison page looked fine. Anything asserted here
-// must hold on both pages.
+// comparison page imports. The node page therefore clipped its source facts
+// and collapsed the txid search box to a few dozen pixels at phone widths,
+// while the comparison page looked fine. Anything asserted here must hold on
+// both pages.
 
 // A control a finger has to hit. Below this, a target is a miss risk on a
 // touch screen.
@@ -76,9 +76,34 @@ const expectProminentViewSwitch = async (page: Page): Promise<void> => {
   }
 };
 
+const expectPublicFooter = async (page: Page): Promise<void> => {
+  const footer = page.locator(".atlas-footer");
+  await footer.scrollIntoViewIfNeeded();
+  await expect(footer).toBeVisible();
+  await expect(footer.locator("p")).toHaveText("Mempool Atlas · open source");
+  const links = footer.locator("nav a");
+  await expect(links).toHaveCount(3);
+  await expect(links.nth(0)).toHaveAttribute(
+    "href",
+    "https://github.com/deadmanoz/mempool-atlas",
+  );
+  await expect(links.nth(1)).toHaveAttribute("href", "https://x.com/ozdeadman");
+  await expect(links.nth(2)).toHaveAttribute(
+    "href",
+    "https://primal.net/deadmanoz",
+  );
+  for (const link of await links.all()) {
+    await expect(link).toHaveAttribute("target", "_blank");
+    await expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  }
+  expect((await boxOf(footer)).right).toBeLessThanOrEqual(
+    viewportWidth(page) + 1,
+  );
+};
+
 test.describe("node page", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/?source=vps-core-01");
     await waitForSnapshot(page, "page-status");
   });
 
@@ -96,8 +121,20 @@ test.describe("node page", () => {
     ).toContainText("Node");
   });
 
-  test("keeps every header fact on screen", async ({ page }) => {
-    const facts = page.locator(".header-facts > div");
+  test("links to the public project and author profiles", async ({ page }) => {
+    await expectPublicFooter(page);
+  });
+
+  test("keeps node facts in the source controls panel", async ({ page }) => {
+    const header = page.locator(".atlas-header");
+    const controls = page.locator(".node-controls");
+    const picker = controls.locator(".node-source-picker");
+    const summary = controls.locator("#source-summary");
+    const search = controls.locator("#transaction-search");
+    const facts = summary.locator(".source-summary-facts > div");
+
+    await expect(header.locator("#source-summary")).toHaveCount(0);
+    await expect(summary).toBeVisible();
     await expect(facts).toHaveCount(4);
 
     const limit = viewportWidth(page);
@@ -105,10 +142,37 @@ test.describe("node page", () => {
       const box = await boxOf(fact);
       expect(box.width).toBeGreaterThan(0);
       expect(box.height).toBeGreaterThan(0);
-      // `.atlas-header` sets `overflow: hidden`, so a fact that runs past the
-      // viewport is silently cut off rather than wrapped.
       expect(box.right).toBeLessThanOrEqual(limit + 1);
     }
+
+    const pickerBox = await boxOf(picker);
+    const summaryBox = await boxOf(summary);
+    const searchBox = await boxOf(search);
+    expect(pickerBox.bottom).toBeLessThanOrEqual(summaryBox.top + 1);
+    expect(summaryBox.bottom).toBeLessThanOrEqual(searchBox.top + 1);
+  });
+
+  test("keeps a useful snapshot summary below the view switch", async ({
+    page,
+  }) => {
+    const status = page.locator("#page-status");
+    await expect(status).toBeVisible();
+    await expect(status).toHaveAttribute("data-state", /ready|stale/);
+    await expect(page.locator("#status-title")).toHaveText(/ snapshot$/);
+    await expect(page.locator("#status-detail")).toHaveText(
+      /transactions .* observed .* chain tip/i,
+    );
+  });
+
+  test("uses shared button treatments for classification query actions", async ({
+    page,
+  }) => {
+    await expect(
+      page.locator(".classification-match-control > .segmented.compact"),
+    ).toHaveCount(1);
+    await expect(page.locator("#classification-clear")).toHaveClass(
+      /action-button/,
+    );
   });
 
   test("leaves the txid search box wide enough to read a txid prefix", async ({
@@ -255,6 +319,18 @@ test.describe("node page", () => {
       "data-distribution-inspection-detail",
       /83-byte OP_RETURN script/,
     );
+    await expect(
+      page.locator("#value-chart .spectrum-y-axis-title"),
+    ).toHaveText(/transaction count|virtual size/i);
+    await expect(page.locator("#value-chart .panel-axis-title")).toHaveText(
+      "Total output value",
+    );
+    await expect(
+      page.locator("#complexity-y-axis .joint-y-axis-title"),
+    ).toHaveText("Outputs");
+    await expect(
+      page.locator("#complexity-chart .panel-axis-title"),
+    ).toHaveText("Inputs");
 
     const density = page.locator("#joint-canvas");
     await density.scrollIntoViewIfNeeded();
@@ -277,6 +353,61 @@ test.describe("comparison page", () => {
     expect(await documentOverflow(page)).toBeLessThanOrEqual(0);
   });
 
+  test("states snapshot timing direction without a duplicate skew graphic", async ({
+    page,
+  }) => {
+    const sourcePanel = page.locator(".comparison-controls");
+    const transactionPanel = page.locator(".comparison-transaction-panel");
+    const timing = page.locator("#sampling-panel");
+    const search = page.locator("#comparison-transaction-search");
+    const regions = page.locator("#comparison-regions");
+    await expect(page.locator("#sampling-summary")).toHaveText(
+      /Source B was observed .* after Source A\./,
+    );
+    await expect(page.locator("#sampling-note")).toContainText(
+      /collection windows were (separated|overlapped)/i,
+    );
+    await expect(page.locator("#sampling-timeline")).toHaveCount(0);
+    await expect(page.locator("#comparison-status")).toBeVisible();
+    await expect(page.locator("#comparison-status")).toHaveAttribute(
+      "data-state",
+      /ready|stale/,
+    );
+    await expect(page.locator("#comparison-status-title")).toContainText("↔");
+    await expect(page.locator("#comparison-status-detail")).toHaveText(
+      /shared .* only on .* chain tip/i,
+    );
+    await expect(search.locator("input")).toHaveAttribute(
+      "placeholder",
+      "Paste a 64-character txid",
+    );
+    await expect(search.getByRole("button", { name: "Inspect" })).toBeVisible();
+    await expect(
+      sourcePanel.locator("#comparison-transaction-search"),
+    ).toHaveCount(0);
+    await expect(
+      transactionPanel.locator("#comparison-transaction-search"),
+    ).toHaveCount(1);
+    await expect(
+      transactionPanel.locator("#comparison-regions button"),
+    ).toHaveCount(3);
+    await expect(
+      transactionPanel.getByRole("heading", { level: 2 }),
+    ).toHaveText("Transactions");
+    const sourcePanelBox = await boxOf(sourcePanel);
+    const transactionPanelBox = await boxOf(transactionPanel);
+    const timingBox = await boxOf(timing);
+    const searchBox = await boxOf(search);
+    const regionsBox = await boxOf(regions);
+    const inputBox = await boxOf(search.locator("input"));
+    expect(sourcePanelBox.bottom).toBeLessThanOrEqual(
+      transactionPanelBox.top + 1,
+    );
+    expect(timingBox.bottom).toBeLessThanOrEqual(searchBox.top + 1);
+    expect(searchBox.bottom).toBeLessThanOrEqual(regionsBox.top + 1);
+    expect(inputBox.height).toBeGreaterThanOrEqual(40);
+  });
+
   test("presents Node and Compare as the primary view switch", async ({
     page,
   }) => {
@@ -284,6 +415,25 @@ test.describe("comparison page", () => {
     await expect(
       page.locator('.product-nav a[aria-current="page"]'),
     ).toContainText("Compare");
+  });
+
+  test("links to the public project and author profiles", async ({ page }) => {
+    await expectPublicFooter(page);
+  });
+
+  test("keeps the source-pair summary useful after Swap", async ({ page }) => {
+    const title = page.locator("#comparison-status-title");
+    const detail = page.locator("#comparison-status-detail");
+    const initialTitle = await title.textContent();
+    await page.locator("#swap-sources").click();
+    await expect(page.locator("#comparison-status")).toBeVisible();
+    await expect(page.locator("#comparison-status")).toHaveAttribute(
+      "data-state",
+      /ready|stale/,
+    );
+    await expect(title).not.toHaveText(initialTitle ?? "");
+    await expect(title).toContainText("↔");
+    await expect(detail).toHaveText(/shared .* only on .* chain tip/i);
   });
 
   test("keeps policy controls prominent and transaction details selection-driven", async ({
@@ -294,6 +444,16 @@ test.describe("comparison page", () => {
     await expect(toolbar).toBeVisible();
     await expect(toolbar.locator("#comparison-rule-list button")).toHaveCount(
       7,
+    );
+    const policyBuckets = toolbar.locator("#policy-buckets");
+    const bucketOverflow = await policyBuckets.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      overflowY: getComputedStyle(element).overflowY,
+      scrollHeight: element.scrollHeight,
+    }));
+    expect(bucketOverflow.overflowY).not.toMatch(/auto|scroll/);
+    expect(bucketOverflow.scrollHeight).toBeLessThanOrEqual(
+      bucketOverflow.clientHeight + 1,
     );
     await expect(
       page.getByText("Sample transactions", { exact: true }),
@@ -323,6 +483,85 @@ test.describe("comparison page", () => {
       "Select a transaction",
     );
     expect(await documentOverflow(page)).toBeLessThanOrEqual(0);
+  });
+
+  test("keeps distribution lens and metric controls with the charts and permits repeated segment selection", async ({
+    page,
+  }) => {
+    const distributions = page.locator("#comparison-distributions");
+    const lens = distributions.locator("#dist-classifier");
+    const countMetric = distributions.locator("#dist-metric-count");
+    const vsizeMetric = distributions.locator("#dist-metric-vsize");
+
+    await expect(distributions).toBeVisible();
+    await expect(lens).toBeEnabled();
+    await expect(vsizeMetric).toHaveAttribute("aria-pressed", "true");
+    await countMetric.click();
+    await expect(countMetric).toHaveAttribute("aria-pressed", "true");
+    await expect(vsizeMetric).toHaveAttribute("aria-pressed", "false");
+    await expect(
+      distributions.locator("#dist-spectrum-left-note"),
+    ).toContainText("transaction count");
+    await expect(
+      distributions.locator("#comparison-distribution-summary"),
+    ).toContainText("weighted by transaction count");
+
+    const propertySegments = distributions.locator(
+      '#composition-left button.composition-segment[data-classifier="transaction_properties"]',
+    );
+    expect(await propertySegments.count()).toBeGreaterThan(1);
+    const firstKey = await propertySegments.nth(0).getAttribute("data-segment");
+    const secondKey = await propertySegments
+      .nth(1)
+      .getAttribute("data-segment");
+    expect(firstKey).not.toBeNull();
+    expect(secondKey).not.toBeNull();
+    expect(secondKey).not.toBe(firstKey);
+
+    const segment = (key: string) =>
+      distributions.locator(
+        `#composition-left button.composition-segment[data-classifier="transaction_properties"][data-segment="${key}"]`,
+      );
+    await segment(firstKey!).click();
+    await expect(segment(firstKey!)).toHaveAttribute("aria-pressed", "true");
+    await segment(secondKey!).click();
+    await expect(segment(secondKey!)).toHaveAttribute("aria-pressed", "true");
+    await expect(segment(firstKey!)).toHaveAttribute("aria-pressed", "false");
+    await expect(lens).toHaveValue("transaction_properties");
+  });
+
+  test("keeps keyboard navigation, selection, and the canvas highlight in sync", async ({
+    page,
+  }) => {
+    const navigator = page.locator("#comparison-transaction-listbox");
+    const navigatorTxid = page.locator("#comparison-navigator-txid");
+    const canvas = page.locator("#comparison-canvas");
+
+    await navigator.focus();
+    const initialTxid = (await navigatorTxid.textContent()) ?? "";
+    await page.keyboard.press("ArrowRight");
+
+    await expect(navigatorTxid).not.toHaveText(initialTxid);
+    const selectedTxid = (await navigatorTxid.textContent()) ?? "";
+    await expect(canvas).toHaveAttribute(
+      "data-rendered-transaction",
+      selectedTxid,
+    );
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("txid"))
+      .toBe(selectedTxid);
+    const explorerLink = page.locator(
+      "#comparison-detail .transaction-explorer-link",
+    );
+    await expect(explorerLink).toHaveAttribute(
+      "href",
+      `https://mempool.space/tx/${selectedTxid}`,
+    );
+    await expect(explorerLink).toHaveAttribute("target", "_blank");
+    await expect(explorerLink).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(page.locator("#comparison-detail-status")).not.toHaveText(
+      "Select a transaction",
+    );
   });
 
   test("scrolls the policy matrix inside its own container", async ({

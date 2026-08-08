@@ -68,6 +68,7 @@ import {
   setAtlasLoadPhase,
 } from "./source-summary-view";
 import { transactionFactPairs } from "./transaction-facts";
+import { createTransactionDetailValue as detailValue } from "./transaction-explorer";
 import { createTerrainSummaryView } from "./terrain-summary-view";
 import { TerrainSelectionView } from "./terrain-selection-view";
 import {
@@ -575,17 +576,6 @@ const clearDetail = (
   if (selectedLens === "overview") {
     classificationQueryView.paintSelection(null);
   }
-};
-
-const detailValue = (label: string, value: string): HTMLElement => {
-  const wrapper = document.createElement("div");
-  const term = document.createElement("span");
-  term.textContent = label;
-  const code = document.createElement("code");
-  code.textContent = value;
-  code.title = value;
-  wrapper.append(term, code);
-  return wrapper;
 };
 
 const compactJson = (value: unknown[]): string => {
@@ -1982,7 +1972,11 @@ const renderResponse = async (
     completeFilteredTransactions = preparedFilteredTransactions;
   }
 
-  pageStatus.dataset.state = source.availability;
+  pageStatus.dataset.state = complete
+    ? source.availability
+    : source.availability === "stale"
+      ? "stale"
+      : "waiting";
   sourceSelect.value = source.source_id;
   sourceSummaryView.renderSnapshot(source, snapshot);
   filterController?.abort();
@@ -2048,8 +2042,8 @@ const renderResponse = async (
     statusTitle.textContent = "Showing the last good snapshot";
     statusDetail.textContent = `Observed ${new Date(snapshot.observed_at_ms).toLocaleString()}. Latest poll failed: ${source.last_error ?? "unknown error"}`;
   } else {
-    statusTitle.textContent = "Snapshot healthy";
-    statusDetail.textContent = `Observed ${new Date(snapshot.observed_at_ms).toLocaleString()}. Browser refresh does not trigger a node poll.`;
+    statusTitle.textContent = `${snapshot.source_label} snapshot`;
+    statusDetail.textContent = `${countFormat.format(snapshot.transaction_count)} transactions · ${formatVsize(snapshot.total_vsize)} · observed ${new Date(snapshot.observed_at_ms).toLocaleString()} · chain tip ${countFormat.format(snapshot.chain_tip.height)}.`;
   }
   scheduleTerrainRender();
   replaceViewUrl();
@@ -2107,8 +2101,8 @@ const discoverSources = async (): Promise<void> => {
   sourceSummaryView.renderMetadata(selectedSource);
   markAtlasReadiness(pageStatus, "node", "metadata-usable");
   pageStatus.dataset.state = "waiting";
-  statusTitle.textContent = "Source metadata ready";
-  statusDetail.textContent = `Loading the complete snapshot for ${selectedSource.source_label}.`;
+  statusTitle.textContent = `${selectedSource.source_label} snapshot`;
+  statusDetail.textContent = "Loading the latest snapshot from Atlas memory.";
   setAtlasLoadPhase(pageStatus, "metadata-ready");
 };
 
@@ -2120,9 +2114,17 @@ const loadSnapshot = async (): Promise<void> => {
   const ticket = snapshotLifecycle.begin();
   const retainActivePublication =
     currentSnapshot !== null && snapshotIsComplete(currentSnapshot);
+  const requestedSource = configuredSources.find(
+    ({ source_id: source }) => source === requestedSourceId,
+  );
   refreshButton.disabled = true;
   refreshButton.textContent = "Loading…";
   sourceSummaryView.setBusy(true);
+  pageStatus.dataset.state = "waiting";
+  statusTitle.textContent = `${requestedSource?.source_label ?? requestedSourceId} snapshot`;
+  statusDetail.textContent = retainActivePublication
+    ? "Refreshing from Atlas memory. The current complete snapshot remains interactive until its replacement is ready."
+    : "Loading the latest complete snapshot from Atlas memory.";
   setAtlasLoadPhase(pageStatus, "loading-snapshot");
   try {
     const response = await fetchSourcePublication(
@@ -2311,8 +2313,8 @@ const prepareForSourceLoad = (source: SourceSummary): void => {
   clearDetail("Select a transaction");
   renderInspector();
   pageStatus.dataset.state = "waiting";
-  statusTitle.textContent = "Loading node snapshot";
-  statusDetail.textContent = `Source metadata is ready. Reading the latest complete snapshot for ${source.source_label}.`;
+  statusTitle.textContent = `${source.source_label} snapshot`;
+  statusDetail.textContent = "Loading the latest snapshot from Atlas memory.";
   setAtlasLoadPhase(pageStatus, "metadata-ready");
   replaceViewUrl();
 };

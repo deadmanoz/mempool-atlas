@@ -215,6 +215,22 @@ describe("createSnapshotDistributionsView", () => {
       false,
     );
     expect(root.querySelector("#spectrum-chart svg")).not.toBeNull();
+    expect(
+      root.querySelector("#complexity-chart .panel-axis-title")?.textContent,
+    ).toBe("Inputs");
+    expect(
+      root.querySelector("#joint-chart .panel-axis-title")?.textContent,
+    ).toBe("Fee rate");
+    expect(
+      root.querySelector("#value-chart .panel-axis-title")?.textContent,
+    ).toBe("Total output value");
+    expect(
+      root.querySelector("#value-chart .spectrum-y-axis-title")?.textContent,
+    ).toBe("transaction count");
+    expect(root.querySelectorAll(".spectrum-y-axis")).toHaveLength(4);
+    expect(
+      root.querySelector("#value-chart .spectrum-y-axis")?.textContent,
+    ).toContain("tx");
     expect(document.body.firstElementChild?.textContent).toBe(
       "outside sentinel",
     );
@@ -232,6 +248,13 @@ describe("createSnapshotDistributionsView", () => {
     expect(harness.pendingAnimationFrames()).toBe(1);
     harness.flushAnimationFrames();
     harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
+    expect(
+      root.querySelector("#complexity-y-axis .joint-y-axis-title")?.textContent,
+    ).toBe("Outputs");
+    expect(
+      root.querySelector("#joint-y-axis .joint-y-axis-title")?.textContent,
+    ).toBe("Virtual size");
     expect(harness.canvasContext.setTransform).toHaveBeenCalled();
   });
 

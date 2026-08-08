@@ -23,14 +23,23 @@
   flex: 0 0 13rem;
 }
 
-.comparison-controls {
-  margin: 0.65rem 0;
+.comparison-controls,
+.comparison-transaction-panel {
   border: 1px solid var(--border);
   background: var(--panel);
   box-shadow: var(--shadow);
 }
 
-.comparison-controls-heading {
+.comparison-controls {
+  margin: 0.65rem 0;
+}
+
+.comparison-transaction-panel {
+  margin: 0 0 0.65rem;
+}
+
+.comparison-controls-heading,
+.comparison-transaction-panel-heading {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -39,7 +48,8 @@
   border-bottom: 1px solid var(--border);
 }
 
-.comparison-controls-heading > p {
+.comparison-controls-heading > p,
+.comparison-transaction-panel-heading > p {
   max-width: 32rem;
   margin: 0;
   color: var(--faint);
@@ -220,13 +230,50 @@
 }
 
 .comparison-transaction-search {
-  padding: 0.7rem 0.85rem;
-  border-top: 1px solid var(--border);
-  background: #09161e;
+  gap: 0.45rem;
+  padding: 0.8rem 0.85rem 0.85rem;
+  background:
+    linear-gradient(90deg, rgba(83, 217, 212, 0.08), transparent 18rem), #091820;
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+.comparison-transaction-search-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.15rem;
+}
+
+.comparison-transaction-search-heading > div {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.comparison-transaction-search-heading strong {
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.comparison-transaction-search-heading > span {
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+.comparison-transaction-search input {
+  min-height: 2.75rem;
+  border-color: rgba(83, 217, 212, 0.5);
+  background: #07141c;
+  font-size: 0.78rem;
+}
+
+.comparison-transaction-search .transaction-search-row button {
+  min-width: 6.25rem;
+  min-height: 2.75rem;
 }
 
 .sampling-panel {
-  min-block-size: 6.8rem;
+  min-block-size: 4.65rem;
   padding: 0.65rem 0.85rem;
   border-top: 1px solid var(--border);
   background: #08141b;
@@ -261,45 +308,6 @@
 
 .sampling-heading > span[data-state="different"] {
   color: var(--amber);
-}
-
-.sampling-timeline {
-  display: grid;
-  gap: 0.34rem;
-  margin-top: 0.55rem;
-}
-
-.sampling-row {
-  display: grid;
-  grid-template-columns: 1.2rem minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.45rem;
-  color: var(--faint);
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 0.57rem;
-}
-
-.sampling-track {
-  position: relative;
-  height: 0.48rem;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background: #0c1b24;
-}
-
-.sampling-track i {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 100%;
-  min-width: 2px;
-  background: #7f9be2;
-  transform-origin: left center;
-}
-
-.sampling-track i[data-side="right"] {
-  background: #d97ab8;
 }
 
 .sampling-panel > p {
@@ -500,8 +508,7 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
   min-block-size: 4.2rem;
   gap: 1px;
-  margin-bottom: 0.65rem;
-  border: 1px solid var(--border);
+  border-top: 1px solid var(--border);
   background: var(--border);
 }
 
@@ -748,8 +755,6 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.34rem;
-  max-height: 9.15rem;
-  overflow: auto;
   padding: 0.45rem 0.85rem 0.55rem;
 }
 
@@ -817,6 +822,11 @@
   white-space: nowrap;
 }
 
+.comparison-detail-identity > .transaction-explorer-link,
+.comparison-detail > .transaction-explorer-link {
+  font-size: 0.58rem;
+}
+
 .variant-warning {
   margin: 0;
   padding: 0.45rem 0.55rem;
@@ -873,6 +883,7 @@
   }
 
   .comparison-controls-heading,
+  .comparison-transaction-panel-heading,
   .comparison-policy-toolbar-heading,
   .comparison-policy-matrix-heading {
     align-items: flex-start;
@@ -880,6 +891,7 @@
   }
 
   .comparison-controls-heading > p,
+  .comparison-transaction-panel-heading > p,
   .comparison-policy-toolbar-heading > p,
   .comparison-policy-matrix-heading > p {
     max-width: none;
@@ -934,11 +946,15 @@
   }
 
   .sampling-panel {
-    min-block-size: 8rem;
+    min-block-size: 6rem;
   }
 
   .sampling-heading {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .comparison-transaction-search-heading {
     flex-direction: column;
   }
 
@@ -1001,21 +1017,42 @@
 }
 
 .comparison-distributions-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
   padding: 0.72rem 0.85rem;
   border-bottom: 1px solid var(--border);
 }
 
-.comparison-distributions-heading > p {
-  max-width: 32rem;
-  margin: 0;
+.comparison-distributions-heading > div > p:last-child {
+  max-width: 44rem;
+  margin: 0.35rem 0 0;
   color: var(--faint);
   font-size: 0.68rem;
   line-height: 1.45;
-  text-align: right;
+}
+
+.comparison-distribution-controls {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) auto auto;
+  align-items: end;
+  gap: 0.75rem;
+  padding: 0.72rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+  background: #091820;
+}
+
+.comparison-distribution-controls .distribution-lens-field {
+  width: 100%;
+  max-width: 26rem;
+  min-width: 0;
+}
+
+.comparison-distribution-controls .distribution-metric,
+.comparison-distribution-controls .distribution-population {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.comparison-distribution-controls .distribution-scope {
+  align-self: end;
 }
 
 .comparison-distribution-grid {
@@ -1053,19 +1090,33 @@
     grid-template-columns: 1fr;
   }
 
-  .comparison-distributions-heading {
-    flex-direction: column;
+  .comparison-distribution-controls {
+    grid-template-columns: minmax(14rem, 1fr) auto;
   }
 
-  .comparison-distributions-heading > p {
-    max-width: none;
-    text-align: left;
+  .comparison-distribution-controls .distribution-population {
+    grid-column: 1 / -1;
   }
 }
 
-.comparison-distributions-heading .distribution-scope {
-  flex: 0 0 auto;
-  align-self: center;
+@media (max-width: 620px) {
+  .comparison-distribution-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .comparison-distribution-controls .distribution-population {
+    grid-column: auto;
+  }
+
+  .comparison-distribution-controls .segmented {
+    display: flex;
+    width: 100%;
+  }
+
+  .comparison-distribution-controls .segmented button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
 }
 
 .comparison-detail-facts {

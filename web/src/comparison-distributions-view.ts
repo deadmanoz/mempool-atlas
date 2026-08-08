@@ -2,8 +2,9 @@ import {
   buildComparisonDistributionSideModel,
   comparisonDistributionVariant,
   comparisonSnapshotIdentity,
+  PREPARED_COMPARISON_VIEW,
   sameComparisonSnapshotIdentity,
-  type ComparisonSnapshotIdentity,
+  type PreparedComparisonDistributions,
 } from "./comparison-distribution-model";
 import {
   commitComparisonDistributionSide,
@@ -17,6 +18,12 @@ import {
   type ComparisonDistributionScope,
 } from "./comparison-distribution-population";
 import type { ComparisonSide, CurrentComparison } from "./comparison-model";
+import {
+  COMPARISON_DISTRIBUTION_SCOPES,
+  createComparisonDistributionControls,
+  sameComparisonDistributionSelection,
+  type ComparisonDistributionSelection,
+} from "./comparison-distribution-controls";
 import { prepareJointChartCanvas } from "./detail-panels";
 import type { JointDensity } from "./fee-distribution";
 import { createSectionDistributionInspector } from "./distribution-interaction";
@@ -30,6 +37,7 @@ export {
   comparisonDistributionTransactions,
   type ComparisonDistributionScope,
 } from "./comparison-distribution-population";
+export type { PreparedComparisonDistributions } from "./comparison-distribution-model";
 
 export interface ComparisonDistributionsView {
   prepare(
@@ -48,44 +56,7 @@ export interface ComparisonDistributionsView {
   reset(): void;
 }
 
-const PREPARED_COMPARISON_VIEW = Symbol("prepared-comparison-view");
-
-export interface PreparedComparisonDistributions {
-  readonly current: CurrentComparison;
-  readonly scope: ComparisonDistributionScope;
-  readonly models: Readonly<Record<ComparisonSide, SnapshotDistributionModel>>;
-  readonly prefetchedModels: Readonly<
-    Partial<
-      Record<
-        ComparisonDistributionScope,
-        Readonly<Record<ComparisonSide, SnapshotDistributionModel>>
-      >
-    >
-  >;
-  readonly variants: Readonly<Record<ComparisonSide, string>>;
-  readonly leftIdentity: ComparisonSnapshotIdentity;
-  readonly rightIdentity: ComparisonSnapshotIdentity;
-  readonly [PREPARED_COMPARISON_VIEW]: object;
-}
-
 const COMPARISON_SIDES = ["left", "right"] as const;
-const DISTRIBUTION_SCOPES: readonly ComparisonDistributionScope[] = [
-  "all",
-  "common",
-  "left_only",
-  "right_only",
-];
-const requiredDescendant = <T extends HTMLElement>(
-  root: HTMLElement,
-  id: string,
-): T => {
-  const element = root.querySelector(`#${id}`);
-  if (!(element instanceof HTMLElement)) {
-    throw new Error(`Missing required comparison distribution element #${id}`);
-  }
-  return element as T;
-};
-
 export const createComparisonDistributionsView = (
   root: HTMLElement,
 ): ComparisonDistributionsView => {
@@ -94,12 +65,11 @@ export const createComparisonDistributionsView = (
     root,
     ":scope > .comparison-distributions-heading",
   );
-  const scopeButtons: Record<ComparisonDistributionScope, HTMLButtonElement> = {
-    all: requiredDescendant<HTMLButtonElement>(root, "dist-scope-all"),
-    common: requiredDescendant<HTMLButtonElement>(root, "dist-scope-common"),
-    left_only: requiredDescendant<HTMLButtonElement>(root, "dist-scope-left"),
-    right_only: requiredDescendant<HTMLButtonElement>(root, "dist-scope-right"),
-  };
+  let currentComparison: CurrentComparison | null = null;
+  let renderFromControls = (): void => {};
+  const controls = createComparisonDistributionControls(root, () => {
+    renderFromControls();
+  });
 
   const cache = new SnapshotDistributionCache();
   const viewToken = {};
@@ -111,8 +81,6 @@ export const createComparisonDistributionsView = (
     left: null,
     right: null,
   };
-  let currentComparison: CurrentComparison | null = null;
-  let scope: ComparisonDistributionScope = "all";
   let pendingDensityFrame: number | null = null;
   let renderController: AbortController | null = null;
   let renderRevision = 0;
@@ -147,6 +115,7 @@ export const createComparisonDistributionsView = (
         side,
         density,
         complexity,
+        controls.metric(),
       );
     }
     if (taskIndex + 1 < COMPARISON_SIDES.length * 2) {
@@ -187,18 +156,10 @@ export const createComparisonDistributionsView = (
     }
   };
 
-  const syncScopeButtons = (): void => {
-    for (const candidate of DISTRIBUTION_SCOPES) {
-      scopeButtons[candidate].setAttribute(
-        "aria-pressed",
-        String(candidate === scope),
-      );
-    }
-  };
-
   const preparedComparison = (
     current: CurrentComparison,
     renderScope: ComparisonDistributionScope,
+    renderSelection: ComparisonDistributionSelection,
     models: Record<ComparisonSide, SnapshotDistributionModel>,
     prefetchedModels: Partial<
       Record<
@@ -209,11 +170,22 @@ export const createComparisonDistributionsView = (
   ): PreparedComparisonDistributions => ({
     current,
     scope: renderScope,
+    selection: { ...renderSelection },
     models,
     prefetchedModels,
     variants: {
-      left: comparisonDistributionVariant("left", renderScope),
-      right: comparisonDistributionVariant("right", renderScope),
+      left: comparisonDistributionVariant(
+        "left",
+        renderScope,
+        renderSelection.classifierId,
+        renderSelection.metric,
+      ),
+      right: comparisonDistributionVariant(
+        "right",
+        renderScope,
+        renderSelection.classifierId,
+        renderSelection.metric,
+      ),
     },
     leftIdentity: comparisonSnapshotIdentity(current, "left"),
     rightIdentity: comparisonSnapshotIdentity(current, "right"),
@@ -225,7 +197,9 @@ export const createComparisonDistributionsView = (
     signal?: AbortSignal,
   ): Promise<PreparedComparisonDistributions> => {
     signal?.throwIfAborted();
-    const renderScope = scope;
+    const controlSnapshot = controls.snapshot(current);
+    const renderScope = controlSnapshot.scope;
+    const renderSelection = controlSnapshot.selection;
     const renderSignal = signal ?? new AbortController().signal;
     const buildScopeModels = async (
       targetScope: ComparisonDistributionScope,
@@ -236,6 +210,8 @@ export const createComparisonDistributionsView = (
           current,
           side,
           targetScope,
+          renderSelection.classifierId,
+          renderSelection.metric,
           renderSignal,
         );
       }
@@ -252,7 +228,13 @@ export const createComparisonDistributionsView = (
       prefetchedModels.common = await buildScopeModels("common");
     }
     signal?.throwIfAborted();
-    return preparedComparison(current, renderScope, models, prefetchedModels);
+    return preparedComparison(
+      current,
+      renderScope,
+      renderSelection,
+      models,
+      prefetchedModels,
+    );
   };
 
   const commitPrepared = (
@@ -268,27 +250,42 @@ export const createComparisonDistributionsView = (
     inspector.reset();
     invalidateComparisonDistributionDensities(panels);
     committedRevision = null;
+    controls.commit(current, {
+      scope: prepared.scope,
+      selection: prepared.selection,
+    });
     for (const side of COMPARISON_SIDES) {
       const { snapshot } = current[side];
       const model = prepared.models[side];
+      const descriptor = snapshot.classifier_catalog.find(
+        ({ id }) => id === prepared.selection.classifierId,
+      );
       cache.adopt(current, prepared.variants[side], model);
-      commitComparisonDistributionSide(
-        panels[side],
+      commitComparisonDistributionSide({
+        panels: panels[side],
         model,
         side,
-        snapshot.source_label,
-        comparisonDistributionScopeSuffix(prepared.scope),
-      );
+        sourceLabel: snapshot.source_label,
+        scopeSuffix: comparisonDistributionScopeSuffix(prepared.scope),
+        selection: prepared.selection,
+        descriptor: descriptor ?? null,
+        onSelectBucket: controls.selectBucket,
+      });
       jointDensities[side] = model.jointDensity;
       complexityDensities[side] = model.complexityDensity;
     }
-    for (const prefetchedScope of DISTRIBUTION_SCOPES) {
+    for (const prefetchedScope of COMPARISON_DISTRIBUTION_SCOPES) {
       const models = prepared.prefetchedModels[prefetchedScope];
       if (models === undefined || prefetchedScope === prepared.scope) continue;
       for (const side of COMPARISON_SIDES) {
         cache.adopt(
           current,
-          comparisonDistributionVariant(side, prefetchedScope),
+          comparisonDistributionVariant(
+            side,
+            prefetchedScope,
+            prepared.selection.classifierId,
+            prepared.selection.metric,
+          ),
           models[side],
         );
       }
@@ -316,14 +313,20 @@ export const createComparisonDistributionsView = (
   const canCommit = (
     prepared: PreparedComparisonDistributions,
     current: CurrentComparison,
-  ): boolean =>
-    !(
+  ): boolean => {
+    const controlSnapshot = controls.snapshot(current);
+    return !(
       prepared[PREPARED_COMPARISON_VIEW] !== viewToken ||
       prepared.current !== current ||
-      prepared.scope !== scope ||
+      prepared.scope !== controlSnapshot.scope ||
+      !sameComparisonDistributionSelection(
+        prepared.selection,
+        controlSnapshot.selection,
+      ) ||
       !sameComparisonSnapshotIdentity(current, "left", prepared.leftIdentity) ||
       !sameComparisonSnapshotIdentity(current, "right", prepared.rightIdentity)
     );
+  };
 
   const commit = (
     prepared: PreparedComparisonDistributions,
@@ -343,7 +346,9 @@ export const createComparisonDistributionsView = (
     const controller = new AbortController();
     renderController = controller;
     const revision = ++renderRevision;
-    const renderScope = scope;
+    const controlSnapshot = controls.snapshot(current);
+    const renderScope = controlSnapshot.scope;
+    const renderSelection = controlSnapshot.selection;
     currentComparison = current;
     cache.replaceOwner(current);
     cancelDensityRender();
@@ -358,13 +363,22 @@ export const createComparisonDistributionsView = (
       renderController === controller &&
       renderRevision === revision &&
       currentComparison === current &&
-      scope === renderScope &&
+      renderScope === controls.snapshot(current).scope &&
+      sameComparisonDistributionSelection(
+        renderSelection,
+        controls.snapshot(current).selection,
+      ) &&
       !controller.signal.aborted;
 
     try {
       const models = {} as Record<ComparisonSide, SnapshotDistributionModel>;
       for (const side of COMPARISON_SIDES) {
-        const variant = comparisonDistributionVariant(side, renderScope);
+        const variant = comparisonDistributionVariant(
+          side,
+          renderScope,
+          renderSelection.classifierId,
+          renderSelection.metric,
+        );
         models[side] = await cache.getAsync(
           current,
           variant,
@@ -373,6 +387,8 @@ export const createComparisonDistributionsView = (
               current,
               side,
               renderScope,
+              renderSelection.classifierId,
+              renderSelection.metric,
               signal,
             ),
           controller.signal,
@@ -380,7 +396,7 @@ export const createComparisonDistributionsView = (
       }
       if (!isCurrentRender()) return;
       commitPrepared(
-        preparedComparison(current, renderScope, models),
+        preparedComparison(current, renderScope, renderSelection, models),
         current,
         revision,
       );
@@ -395,12 +411,8 @@ export const createComparisonDistributionsView = (
     }
   };
 
-  const setScope = (nextScope: ComparisonDistributionScope): void => {
-    scope = nextScope;
-    syncScopeButtons();
-    if (currentComparison !== null) {
-      void render(currentComparison);
-    }
+  renderFromControls = () => {
+    if (currentComparison !== null) void render(currentComparison);
   };
 
   const reset = (): void => {
@@ -413,8 +425,7 @@ export const createComparisonDistributionsView = (
     inspector.reset();
     root.hidden = true;
     root.setAttribute("aria-busy", "false");
-    scope = "all";
-    syncScopeButtons();
+    controls.reset();
     cancelDensityRender();
     for (const side of COMPARISON_SIDES) {
       jointDensities[side] = null;
@@ -423,11 +434,6 @@ export const createComparisonDistributionsView = (
     }
   };
 
-  for (const candidate of DISTRIBUTION_SCOPES) {
-    scopeButtons[candidate].addEventListener("click", () => {
-      setScope(candidate);
-    });
-  }
   const densityResizeObserver = new ResizeObserver(scheduleDensityRender);
   densityResizeObserver.observe(panels.left.joint.container);
   densityResizeObserver.observe(panels.right.joint.container);

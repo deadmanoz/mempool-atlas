@@ -74,6 +74,29 @@ button:hover:not(:disabled) {
   background: #17303b;
 }
 
+.action-button {
+  border-color: var(--border-strong);
+  background: #0d202a;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.1;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.action-button-primary {
+  border-color: rgba(102, 227, 232, 0.62);
+  background: #12333c;
+  color: #dfffff;
+  box-shadow: inset 0 -2px 0 rgba(102, 227, 232, 0.72);
+}
+
+.action-button-primary:hover:not(:disabled) {
+  background: #17434c;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
@@ -106,6 +129,74 @@ canvas:focus-visible,
   width: min(1540px, calc(100% - 1.5rem));
   margin: 0 auto;
   padding: 0.75rem 0 2.5rem;
+}
+
+.atlas-footer {
+  display: flex;
+  width: min(1540px, calc(100% - 1.5rem));
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 auto 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border);
+  background: rgba(8, 17, 24, 0.96);
+  box-shadow: var(--shadow);
+  color: var(--faint);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.64rem;
+}
+
+.atlas-footer p {
+  margin: 0;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.atlas-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.15rem 0.85rem;
+}
+
+.atlas-footer a {
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--muted);
+  text-decoration-color: rgba(145, 164, 174, 0.45);
+  text-underline-offset: 0.18em;
+}
+
+.atlas-footer a::after {
+  content: "↗";
+  color: var(--cyan);
+}
+
+.atlas-footer a:hover {
+  color: var(--cyan);
+  text-decoration-color: currentColor;
+}
+
+.atlas-footer a:focus-visible {
+  border-radius: 0.1rem;
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+@media (max-width: 620px) {
+  .atlas-footer {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .atlas-footer nav {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 
 .atlas-header {
@@ -258,13 +349,8 @@ h3 {
 .refresh-button {
   min-width: 6.5rem;
   border: 0;
+  border-left: 1px solid var(--border);
   border-radius: 0;
-  background: #11313a;
-  color: #dfffff;
-  font-size: 0.76rem;
-  font-weight: 750;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 
 .status-strip {
@@ -309,11 +395,7 @@ h3 {
 }
 
 .exploration-bar {
-  display: grid;
-  grid-template-columns: minmax(210px, 0.55fr) minmax(0, 1.45fr);
-  gap: 0.75rem;
   margin: 0.65rem 0;
-  padding: 0.65rem 0.75rem;
   border: 1px solid var(--border);
   background: rgba(10, 21, 29, 0.95);
 }
@@ -654,25 +736,12 @@ h3 {
   text-transform: uppercase;
 }
 
-.classification-match-control button {
+.classification-match-control .segmented {
+  flex: 0 0 auto;
+}
+
+.classification-match-control .segmented button {
   min-width: 3.6rem;
-  border-radius: 0;
-}
-
-.classification-match-control button:first-of-type {
-  border-radius: 0.25rem 0 0 0.25rem;
-}
-
-.classification-match-control button:last-of-type {
-  margin-left: -1px;
-  border-radius: 0 0.25rem 0.25rem 0;
-}
-
-.classification-match-control button[aria-pressed="true"] {
-  border-color: var(--cyan);
-  background: var(--cyan-soft);
-  color: var(--cyan);
-  box-shadow: inset 0 -2px 0 var(--cyan);
 }
 
 .classification-clear {
@@ -1562,6 +1631,43 @@ tr.selected td {
   white-space: nowrap;
 }
 
+.transaction-explorer-link {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--cyan);
+  text-decoration-color: rgba(102, 227, 232, 0.45);
+  text-underline-offset: 0.18em;
+}
+
+.transaction-explorer-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.transaction-explorer-link:focus-visible {
+  border-radius: 0.1rem;
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.transaction-explorer-link code {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transaction-explorer-link::after {
+  content: "↗";
+  flex: 0 0 auto;
+  color: var(--cyan);
+  font-size: 0.72rem;
+}
+
 /* Shared shell, header, toolbar, and terrain responsiveness. Every page that
    loads this stylesheet gets the same narrow-viewport behavior; page-specific
    stylesheets only adjust their own selectors. */
@@ -1622,10 +1728,6 @@ tr.selected td {
   .classification-lifecycle {
     justify-content: flex-start;
     text-align: left;
-  }
-
-  .exploration-bar {
-    grid-template-columns: 1fr;
   }
 
   /* The toolbar stacks here, so the classifier field's 15rem flex basis would
@@ -1745,6 +1847,10 @@ tr.selected td {
 
   .classification-match-control > span {
     min-width: 3.5rem;
+  }
+
+  .classification-match-control .segmented {
+    flex: 1 1 auto;
   }
 
   .classification-match-control button {
@@ -1900,7 +2006,7 @@ tr.selected td {
   border-left-color: var(--amber);
 }
 
-/* Live status pulse and header stat emphasis */
+/* Loading status pulse and header stat emphasis */
 
 @keyframes status-pulse {
   0%,
@@ -1915,12 +2021,13 @@ tr.selected td {
   }
 }
 
-.status-strip[data-state="ready"] .status-light {
+.status-strip[data-state="waiting"] .status-light {
+  background: var(--cyan);
   animation: status-pulse 1.8s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .status-strip[data-state="ready"] .status-light {
+  .status-strip[data-state="waiting"] .status-light {
     animation: none;
   }
 }

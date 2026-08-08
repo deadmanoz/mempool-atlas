@@ -115,6 +115,50 @@ describe("passive distribution aggregates", () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
+  it("allows each interactive composition segment to be selected", () => {
+    const panel = document.querySelector<HTMLElement>("#panel")!;
+    const selected: string[] = [];
+    renderCompositionBars(
+      panel,
+      [
+        {
+          classifierId: "shape",
+          title: "Shape",
+          segments: [
+            {
+              key: "small",
+              label: "Small",
+              color: "#111111",
+              count: 1,
+              vsize: 100,
+              share: 0.25,
+              bucketCount: 1,
+            },
+            {
+              key: "large",
+              label: "Large",
+              color: "#222222",
+              count: 3,
+              vsize: 300,
+              share: 0.75,
+              bucketCount: 1,
+            },
+          ],
+        },
+      ],
+      {
+        metricLabel: "count",
+        emptyMessage: "Empty",
+        onSegmentSelect: (_bar, segment) => selected.push(segment.key),
+      },
+    );
+
+    panel.querySelector<HTMLButtonElement>('[data-segment="small"]')?.click();
+    panel.querySelector<HTMLButtonElement>('[data-segment="large"]')?.click();
+
+    expect(selected).toEqual(["small", "large"]);
+  });
+
   it("uses one keyboard stop to inspect mosaic columns", () => {
     const panel = document.querySelector<HTMLElement>("#panel")!;
     renderMosaicChart(

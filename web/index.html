@@ -7,11 +7,68 @@
       name="description"
       content="Explore independent transaction classifications across one periodically observed Bitcoin node mempool."
     />
+    <meta name="author" content="deadmanoz" />
+    <meta name="application-name" content="Mempool Atlas" />
+    <meta name="theme-color" content="#071018" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Mempool Atlas" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="en_AU" />
+    <meta property="og:site_name" content="Mempool Atlas" />
+    <meta
+      property="og:title"
+      content="Mempool Atlas · Transaction Classifications"
+    />
+    <meta
+      property="og:description"
+      content="Explore current Bitcoin mempool membership and independent transaction classifications from one node."
+    />
+    <meta property="og:url" content="https://atlas.deadmanoz.xyz/" />
+    <meta
+      property="og:image"
+      content="https://atlas.deadmanoz.xyz/social/mempool-atlas-og.png"
+    />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Mempool Atlas transaction terrain with the MA mark"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:creator" content="@ozdeadman" />
+    <meta
+      name="twitter:title"
+      content="Mempool Atlas · Transaction Classifications"
+    />
+    <meta
+      name="twitter:description"
+      content="Explore current Bitcoin mempool membership and independent transaction classifications from one node."
+    />
+    <meta
+      name="twitter:image"
+      content="https://atlas.deadmanoz.xyz/social/mempool-atlas-og.png"
+    />
+    <meta
+      name="twitter:image:alt"
+      content="Mempool Atlas transaction terrain with the MA mark"
+    />
+    <link rel="canonical" href="https://atlas.deadmanoz.xyz/" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="me" href="https://x.com/ozdeadman" />
+    <link rel="me" href="https://primal.net/deadmanoz" />
     <title>Mempool Atlas · Transaction Classifications</title>
   </head>
   <body>
     <main class="shell">
-      <header class="atlas-header">
+      <header class="atlas-header node-header">
         <div class="brand-block">
           <span class="brand-mark" aria-hidden="true">MA</span>
           <div>
@@ -23,44 +80,16 @@
           </div>
         </div>
 
-        <section
-          id="source-summary"
-          class="source-summary"
-          data-phase="discovering-sources"
-          data-state="waiting"
-          aria-label="Current source state"
-          aria-busy="true"
-        >
-          <dl class="header-facts" aria-label="Current snapshot">
-            <div>
-              <dt>Source</dt>
-              <dd>
-                <strong id="source-label">Loading</strong>
-                <code id="source-id">unknown</code>
-              </dd>
-            </div>
-            <div>
-              <dt>Snapshot</dt>
-              <dd id="observed-value">Waiting</dd>
-            </div>
-            <div>
-              <dt>Height</dt>
-              <dd id="tip-value">Unknown</dd>
-            </div>
-            <div>
-              <dt>Transactions</dt>
-              <dd>
-                <span id="transaction-count">Waiting</span>
-                <small id="total-vsize">Waiting</small>
-              </dd>
-            </div>
-          </dl>
-          <p id="source-classification-summary" data-state="waiting">
-            Classification waiting for source metadata.
-          </p>
-        </section>
+        <div class="node-heading-copy">
+          <strong>One independent snapshot</strong>
+          <span>Current membership and classifications from one node.</span>
+        </div>
 
-        <button id="refresh" class="refresh-button" type="button">
+        <button
+          id="refresh"
+          class="action-button action-button-primary refresh-button"
+          type="button"
+        >
           Refresh
         </button>
 
@@ -99,13 +128,77 @@
         <p id="honesty-message"></p>
       </aside>
 
-      <section class="exploration-bar" aria-label="Explore current snapshot">
-        <label class="exploration-field">
-          <span>Node</span>
-          <select id="source-select" aria-label="Node source"></select>
-        </label>
-        <form id="transaction-search" class="transaction-search" role="search">
-          <label for="transaction-search-input">Transaction</label>
+      <section
+        class="exploration-bar node-controls"
+        aria-labelledby="node-controls-heading"
+      >
+        <div class="node-controls-heading">
+          <div>
+            <p class="eyebrow">Current source</p>
+            <h2 id="node-controls-heading">Explore one node snapshot</h2>
+          </div>
+          <p>
+            Browser refresh reads Atlas memory. It does not trigger a node poll.
+          </p>
+        </div>
+        <div class="node-source-picker">
+          <label class="exploration-field">
+            <span>Node</span>
+            <select id="source-select" aria-label="Node source"></select>
+          </label>
+        </div>
+        <section
+          id="source-summary"
+          class="source-summary"
+          data-phase="discovering-sources"
+          data-state="waiting"
+          aria-label="Current source state"
+          aria-busy="true"
+        >
+          <dl class="source-summary-facts" aria-label="Current snapshot">
+            <div>
+              <dt>Source</dt>
+              <dd>
+                <strong id="source-label">Loading</strong>
+                <code id="source-id">unknown</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Snapshot</dt>
+              <dd id="observed-value">Waiting</dd>
+            </div>
+            <div>
+              <dt>Height</dt>
+              <dd id="tip-value">Unknown</dd>
+            </div>
+            <div>
+              <dt>Transactions</dt>
+              <dd>
+                <span id="transaction-count">Waiting</span>
+                <small id="total-vsize">Waiting</small>
+              </dd>
+            </div>
+          </dl>
+          <p id="source-classification-summary" data-state="waiting">
+            Classification waiting for source metadata.
+          </p>
+        </section>
+        <form
+          id="transaction-search"
+          class="transaction-search node-transaction-search"
+          role="search"
+          aria-labelledby="node-transaction-search-heading"
+        >
+          <div class="node-transaction-search-heading">
+            <div>
+              <span class="toolbar-label">Transaction lookup</span>
+              <strong id="node-transaction-search-heading"
+                >Inspect a transaction</strong
+              >
+            </div>
+            <span>Search this current snapshot by txid.</span>
+          </div>
+          <label for="transaction-search-input">Transaction ID</label>
           <div class="transaction-search-row">
             <input
               id="transaction-search-input"
@@ -114,9 +207,11 @@
               inputmode="text"
               autocomplete="off"
               spellcheck="false"
-              placeholder="Paste a transaction ID"
+              placeholder="Paste a 64-character txid"
             />
-            <button type="submit">Find</button>
+            <button class="action-button action-button-primary" type="submit">
+              Inspect
+            </button>
           </div>
           <span id="transaction-search-status" aria-live="polite"
             >Search this snapshot by txid.</span
@@ -254,32 +349,34 @@
               >
                 Choose labels to reveal their transactions.
               </p>
-              <div
-                class="classification-match-control"
-                role="group"
-                aria-label="Match selected labels"
-              >
+              <div class="classification-match-control">
                 <span>Match</span>
-                <button
-                  id="classification-match-any"
-                  type="button"
-                  aria-pressed="true"
-                  disabled
+                <div
+                  class="segmented compact"
+                  role="group"
+                  aria-label="Match selected labels"
                 >
-                  ANY
-                </button>
-                <button
-                  id="classification-match-all"
-                  type="button"
-                  aria-pressed="false"
-                  disabled
-                >
-                  ALL
-                </button>
+                  <button
+                    id="classification-match-any"
+                    type="button"
+                    aria-pressed="true"
+                    disabled
+                  >
+                    ANY
+                  </button>
+                  <button
+                    id="classification-match-all"
+                    type="button"
+                    aria-pressed="false"
+                    disabled
+                  >
+                    ALL
+                  </button>
+                </div>
               </div>
               <button
                 id="classification-clear"
-                class="classification-clear"
+                class="action-button classification-clear"
                 type="button"
                 disabled
               >
@@ -700,6 +797,30 @@
       </section>
     </main>
 
-    <script type="module" src="/src/main.ts"></script>
+    <footer class="atlas-footer">
+      <p>Mempool Atlas · open source</p>
+      <nav aria-label="Mempool Atlas links">
+        <a
+          href="https://github.com/deadmanoz/mempool-atlas"
+          target="_blank"
+          rel="noopener noreferrer"
+          >GitHub</a
+        >
+        <a
+          href="https://x.com/ozdeadman"
+          target="_blank"
+          rel="noopener noreferrer"
+          >X @ozdeadman</a
+        >
+        <a
+          href="https://primal.net/deadmanoz"
+          target="_blank"
+          rel="noopener noreferrer"
+          >Nostr deadmanoz</a
+        >
+      </nav>
+    </footer>
+
+    <script type="module" src="/src/node-entry.ts"></script>
   </body>
 </html>

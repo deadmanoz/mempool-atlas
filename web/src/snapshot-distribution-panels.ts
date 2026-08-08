@@ -131,7 +131,7 @@ export const createSnapshotDistributionPanelElements = (
   new ResizeObserver(scheduleJointRender).observe(elements.jointChart);
   new ResizeObserver(scheduleJointRender).observe(elements.complexityChart);
   elements.jointChart.append(feeRateAxisRow());
-  elements.complexityChart.append(panelAxisRow(IO_COUNT_TICKS));
+  elements.complexityChart.append(panelAxisRow(IO_COUNT_TICKS, "Inputs"));
   return elements;
 };
 

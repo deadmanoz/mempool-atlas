@@ -96,6 +96,7 @@ export class ComparisonCanvasView {
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
     delete this.canvas.dataset.renderedRegion;
+    delete this.canvas.dataset.renderedTransaction;
   }
 
   prepareCandidate(comparison: CurrentComparison): PreparedComparisonCanvas {
@@ -135,6 +136,7 @@ export class ComparisonCanvasView {
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
     delete this.canvas.dataset.renderedRegion;
+    delete this.canvas.dataset.renderedTransaction;
   }
 
   private baseMatches(
@@ -186,6 +188,11 @@ export class ComparisonCanvasView {
       activeTransactionId,
     );
     this.paintedTransactionId = activeTransactionId;
+    if (activeTransactionId === null) {
+      delete this.canvas.dataset.renderedTransaction;
+    } else {
+      this.canvas.dataset.renderedTransaction = activeTransactionId;
+    }
   }
 
   render(

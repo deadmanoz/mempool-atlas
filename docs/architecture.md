@@ -230,6 +230,10 @@ stages from different manifests. Packed columns, bitsets, and first-seen result
 dictionaries remain worker-owned, with presentation adapters exposing rows only
 on demand rather than retaining the former full-row object graph.
 
+The root browser entry redirects requests without node URL state to Compare.
+Compare prefers the available Bitcoin Core and Bitcoin Knots sources for its
+initial pair, while explicit `?source=...` state loads the single-node product.
+
 The shared header presents Node and Compare as an equal-width primary view
 switch on both products, with the active view explicit at every breakpoint.
 The node viewer renders one source snapshot. Its default Classifications view
@@ -298,7 +302,9 @@ always retain one readable column regardless of the stored desktop preference.
 The node distribution view delegates this presentation-only preference to
 `snapshot-distribution-layout-control.ts`.
 Axes derive positions from their raw logarithmic domains and preserve exact bin
-bounds in the inspector. Data-carriage reference ticks mark 40 pushed bytes and
+bounds in the inspector. Joint densities visibly name both domains, and every
+spectrum pairs its named logarithmic domain with a linear vertical scale for
+the selected count or virtual-size metric. Data-carriage reference ticks mark 40 pushed bytes and
 80 pushed bytes; the latter explains the conventional 83-byte serialized
 script without representing 83 as a carried-byte bin boundary.
 
@@ -341,18 +347,33 @@ selector. Mirrored distribution panels render each node's complete snapshot on
 shared fixed axes using the same browser-derived builders as the node viewer
 across all nine questions; the two populations are summarized independently
 and never merged.
-A population scope selector restricts every mirrored panel to the whole
-snapshot, the transactions present in both snapshots, or the transactions
-observed in only one source, using the same merge-join regions as the
-membership canvas. Each complete comparison candidate prepares the common
-scope and adopts only its aggregate arrays into the candidate-owned cache; the
-smaller source-only scopes remain lazy. A side with no members in the selected
-population says so rather than showing an empty chart as data.
+Panel-local controls select one classifier lens, the Count or vsize metric, and
+the population used by every mirrored chart. Selecting an exact composition
+segment changes that local lens and bucket, regrouping both sources without
+changing the primary membership region or policy focus. The population scope
+restricts every mirrored panel to the whole snapshot, the transactions present
+in both snapshots, or the transactions observed in only one source, using the
+same merge-join regions as the membership canvas. Each semantic combination of
+source pair, lens, metric, and population has its own aggregate cache variant.
+Each complete comparison candidate prepares the common scope and adopts only
+its aggregate arrays into the candidate-owned cache; the smaller source-only
+scopes remain lazy. A side with no members in the selected population says so
+rather than showing an empty chart as data.
 
 The membership regions and primary comparison workspace precede the secondary
 distribution and policy panels in document order. Stable source-card,
-sampling, workspace, and panel geometry prevents later derivation from
-displacing the interactive comparison as those sections populate.
+snapshot-timing, transaction-lookup, workspace, and panel geometry prevents
+later derivation from displacing the interactive comparison as those sections
+populate. Snapshot timing remains in the source-pair panel. A separate
+transaction panel groups txid lookup with the three merge-join membership
+regions, so search and population selection share one explicit interaction
+boundary beneath the context that defines the two observations.
+
+The node page follows the same control hierarchy: its source selector, current
+source facts, and txid lookup occupy one source panel below the product header.
+Snapshot metadata is therefore part of the active node workspace rather than
+the global header, while the underlying discovery and publication lifecycle
+remains unchanged.
 
 Both products keep source, classifier or policy selection, and optional
 transaction state in the URL. The node URL also keeps the selected
@@ -361,12 +382,14 @@ normalized against the selected catalog descriptor, and `match=all` is emitted
 only when applicable. Snapshot and detail requests use generation guards so
 obsolete responses cannot replace a newer source or pair selection.
 On the comparison page, changing only the selected transaction reuses the
-current population view. Repeating the same interactive selection is a true
-no-op, while a refreshed snapshot pair still reapplies state and reloads detail
-against the new comparison identity. Node-state and comparison-canvas
-coherence checks permit at most four candidate preparation attempts; if live
-input or geometry keeps changing, the current committed publication remains
-active instead of allowing an unbounded derivation loop.
+current population view. Keyboard movement commits each cursor position as the
+current transaction, keeping the navigator, URL, detail, and canvas highlight
+coherent while repainting only the active cell. Repeating the same interactive
+selection is a true no-op, while a refreshed snapshot pair still reapplies
+state and reloads detail against the new comparison identity. Node-state and
+comparison-canvas coherence checks permit at most four candidate preparation
+attempts; if live input or geometry keeps changing, the current committed
+publication remains active instead of allowing an unbounded derivation loop.
 
 ## Network and credential boundary
 

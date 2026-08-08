@@ -74,6 +74,7 @@ describe("ComparisonCanvasView", () => {
     expect(vi.mocked(context.drawImage).mock.calls).toHaveLength(
       baseCopies + 1,
     );
+    expect(canvas.dataset.renderedTransaction).toBe(txid(2));
 
     await view.render(comparison, "common", txid(2), "left", { kind: "all" });
     expect(vi.mocked(context.rect).mock.calls).toHaveLength(populationRects);
@@ -97,6 +98,13 @@ describe("ComparisonCanvasView", () => {
     expect(vi.mocked(context.rect).mock.calls).toHaveLength(
       focusedPopulationRects,
     );
+    expect(canvas.dataset.renderedTransaction).toBe(txid(1));
+
+    await view.render(comparison, "common", null, "left", {
+      kind: "status",
+      status: "compatible",
+    });
+    expect(canvas.dataset.renderedTransaction).toBeUndefined();
   });
 
   it("reports an aborted population render as superseded", async () => {

@@ -177,6 +177,14 @@
   height: 1.65rem;
 }
 
+.panel-axis[data-has-title="true"] {
+  height: 2rem;
+}
+
+.panel-axis[data-has-references="true"][data-has-title="true"] {
+  height: 2.7rem;
+}
+
 .panel-axis span {
   position: absolute;
   transform: translateX(-50%);
@@ -200,6 +208,23 @@
   height: 0.35rem;
   background: #8e793d;
   content: "";
+}
+
+.panel-axis-title {
+  position: absolute;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--muted);
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.panel-axis[data-has-references="true"] .panel-axis-title {
+  top: 1.72rem;
 }
 
 @container (max-width: 36rem) {
@@ -264,11 +289,26 @@
 
 .joint-y-axis {
   position: relative;
-  flex: 0 0 3.5rem;
+  flex: 0 0 4.25rem;
   color: var(--faint);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.6rem;
   text-align: right;
+}
+
+.joint-y-axis-title,
+.spectrum-y-axis-title {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  transform: translateY(-50%) rotate(180deg);
+  color: var(--muted);
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 0.55rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  writing-mode: vertical-rl;
 }
 
 .joint-y-axis span {
@@ -401,11 +441,57 @@ button.composition-segment[aria-pressed="true"] {
 /* Extended distribution panels */
 
 .spectrum-chart {
+  grid-column: 2;
+  grid-row: 1;
   display: block;
   width: 100%;
   height: auto;
   background: #0b121a;
   cursor: crosshair;
+}
+
+.spectrum-plot-layout {
+  display: grid;
+  grid-template-columns: 4.25rem minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 0.3rem;
+}
+
+.spectrum-plot-layout > .panel-axis {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.spectrum-y-axis {
+  position: relative;
+  grid-column: 1;
+  grid-row: 1;
+  color: var(--faint);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.6rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.spectrum-y-axis span {
+  position: absolute;
+  right: 0;
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+
+.spectrum-y-axis span[data-edge="top"] {
+  transform: none;
+}
+
+.spectrum-y-axis span[data-edge="bottom"] {
+  transform: translateY(-100%);
+}
+
+@container (max-width: 23rem) {
+  .spectrum-y-axis span[data-priority="2"] {
+    display: none;
+  }
 }
 
 .spectrum-wrap {
@@ -429,6 +515,10 @@ button.composition-segment[aria-pressed="true"] {
 .chart-gridline[data-reference="true"] {
   stroke: #8e793d;
   stroke-dasharray: 3 3;
+}
+
+.chart-gridline-horizontal {
+  opacity: 0.72;
 }
 
 .spectrum-inspection-highlight {

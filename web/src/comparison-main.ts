@@ -69,7 +69,6 @@ import { markAtlasReadiness, markAtlasReadinessAfterPaint } from "./readiness";
 import {
   countFormat,
   compactTxid,
-  formatDuration,
   formatTime,
   formatTxidCount,
   formatVsize,
@@ -77,6 +76,7 @@ import {
 } from "./format";
 import { createSourceCardView, setAtlasLoadPhase } from "./source-summary-view";
 import { transactionFactSummary } from "./transaction-facts";
+import { createMempoolSpaceTransactionLink } from "./transaction-explorer";
 import {
   TERRAIN_RULES,
   signatureLabel,
@@ -134,7 +134,6 @@ const samplingView = createComparisonSamplingView({
   panel: requiredElement<HTMLElement>("sampling-panel"),
   summary: requiredElement<HTMLElement>("sampling-summary"),
   chainSummary: requiredElement<HTMLElement>("chain-summary"),
-  timeline: requiredElement<HTMLElement>("sampling-timeline"),
   note: requiredElement<HTMLElement>("sampling-note"),
 });
 const policyMatrix = requiredElement<HTMLElement>("comparison-policy-matrix");
@@ -186,6 +185,7 @@ const detailContainer = requiredElement<HTMLElement>("comparison-detail");
 const comparisonDistributions = createComparisonDistributionsView(
   requiredElement<HTMLElement>("comparison-distributions"),
 );
+const nodeLink = requiredElement<HTMLAnchorElement>("node-link");
 
 const lifecycle = new ComparisonLifecycle();
 const discoveryLifecycle = new RequestLifecycle();
@@ -213,9 +213,35 @@ const setStatus = (
   title: string,
   detail: string,
 ): void => {
+  pageStatus.hidden = false;
   pageStatus.dataset.state = state;
   statusTitle.textContent = title;
   statusDetail.textContent = detail;
+};
+
+const sourceLabel = (sourceId: string): string =>
+  configuredSources.find(({ source_id: id }) => id === sourceId)
+    ?.source_label ?? sourceId;
+
+const selectedPairTitle = (): string =>
+  `${sourceLabel(leftSourceId)} ↔ ${sourceLabel(rightSourceId)}`;
+
+const showHealthyStatus = (current: CurrentComparison): void => {
+  const leftLabel = current.left.snapshot.source_label;
+  const rightLabel = current.right.snapshot.source_label;
+  const leftTip = current.left.snapshot.chain_tip;
+  const rightTip = current.right.snapshot.chain_tip;
+  const tipSummary =
+    leftTip.hash === rightTip.hash
+      ? `same chain tip ${countFormat.format(leftTip.height)}`
+      : leftTip.height === rightTip.height
+        ? `different chain tips at height ${countFormat.format(leftTip.height)}`
+        : `different chain tips ${countFormat.format(leftTip.height)} / ${countFormat.format(rightTip.height)}`;
+  setStatus(
+    "ready",
+    `${leftLabel} ↔ ${rightLabel}`,
+    `${countFormat.format(current.totals.common_count)} shared · ${countFormat.format(current.totals.left_only_count)} only on ${leftLabel} · ${countFormat.format(current.totals.right_only_count)} only on ${rightLabel} · ${tipSummary}.`,
+  );
 };
 
 const setTransactionSearchStatus = (
@@ -292,6 +318,10 @@ const populateSourceSelectors = (): void => {
   populateSourceSelect(leftSelect, leftSourceId, rightSourceId);
   populateSourceSelect(rightSelect, rightSourceId, leftSourceId);
   swapButton.disabled = leftSourceId.length === 0 || rightSourceId.length === 0;
+  nodeLink.href =
+    leftSourceId.length === 0
+      ? "../?source="
+      : `../?${new URLSearchParams({ source: leftSourceId }).toString()}`;
 };
 
 const activePolicySide = (): ComparisonSide =>
@@ -338,10 +368,18 @@ const chooseInitialSources = (requested: ComparisonViewState | null): void => {
     return;
   }
 
-  leftSourceId = available[0]?.source_id ?? "";
+  const sourceMatches = (source: SourceSummary, client: "core" | "knots") =>
+    source.source_id.toLowerCase().includes(client) ||
+    source.source_label.toLowerCase().includes(client);
+  const core = available.find((source) => sourceMatches(source, "core"));
+  const knots = available.find((source) => sourceMatches(source, "knots"));
+
+  leftSourceId = core?.source_id ?? available[0]?.source_id ?? "";
   rightSourceId =
+    (knots?.source_id !== leftSourceId ? knots?.source_id : undefined) ??
     available.find(({ source_id: sourceId }) => sourceId !== leftSourceId)
-      ?.source_id ?? "";
+      ?.source_id ??
+    "";
 };
 
 const updateQuery = (): void => {
@@ -1078,10 +1116,9 @@ const loadSelectedTransactionDetail = async (
     !snapshotIsComplete(current.right.snapshot)
   ) {
     clearDetailPanel("Membership details are still loading.");
-    const txid = document.createElement("code");
-    txid.textContent = entry.txid;
-    txid.title = entry.txid;
-    detailContainer.replaceChildren(txid);
+    detailContainer.replaceChildren(
+      createMempoolSpaceTransactionLink(entry.txid),
+    );
     return;
   }
   detailController?.abort();
@@ -1115,10 +1152,7 @@ const loadSelectedTransactionDetail = async (
   detailStatus.textContent = compactTxid(entry.txid);
   const identity = document.createElement("div");
   identity.className = "comparison-detail-identity";
-  const transactionId = document.createElement("code");
-  transactionId.textContent = entry.txid;
-  transactionId.title = entry.txid;
-  identity.append(transactionId);
+  identity.append(createMempoolSpaceTransactionLink(entry.txid));
   if (entry.same_wtxid === false) {
     const warning = document.createElement("p");
     warning.className = "variant-warning";
@@ -1165,7 +1199,7 @@ const renderComparison = async (
       ? "The one transaction ID appears once."
       : `Each of the ${formatTxidCount(current.totals.union_count)} appears once.`;
   visualSummary.textContent = complete
-    ? `${unionSentence} The snapshots were observed ${formatDuration(current.observed_skew_ms)} apart. ${formatTxidCount(differingVariants)} present in both ${differingVariants === 1 ? "carries" : "carry"} different witness variants.`
+    ? `${unionSentence} ${formatTxidCount(differingVariants)} present in both ${differingVariants === 1 ? "carries" : "carry"} different witness variants.`
     : `${formatTxidCount(current.totals.union_count)} transaction IDs are ready for membership-region and policy exploration. Witness variants, fee distributions, and transaction details are still loading.`;
   renderTransactionNavigator();
   renderInspector();
@@ -1180,21 +1214,22 @@ const renderComparison = async (
     const stale =
       current.left.source.availability === "stale" ||
       current.right.source.availability === "stale";
-    const sameTip =
-      current.left.snapshot.chain_tip.hash ===
-      current.right.snapshot.chain_tip.hash;
-    setStatus(
-      stale ? "stale" : "ready",
-      stale ? "Comparing a retained snapshot" : "Comparison ready",
-      `${formatDuration(current.observed_skew_ms)} observation skew. ${sameTip ? "Both snapshots report the same chain tip." : "The snapshots report different chain tips."}`,
-    );
+    if (stale) {
+      setStatus(
+        "stale",
+        "Comparing a retained snapshot",
+        "One or both sources retained their last complete snapshot after a poll failure.",
+      );
+    } else {
+      showHealthyStatus(current);
+    }
   } else {
     const stale =
       current.left.source.availability === "stale" ||
       current.right.source.availability === "stale";
     setStatus(
-      stale ? "stale" : "ready",
-      "Policy comparison ready",
+      stale ? "stale" : "waiting",
+      stale ? "Comparing a retained snapshot" : "Loading transaction facts",
       "Membership regions and BIP-110 policy are interactive while remaining transaction facts load.",
     );
   }
@@ -1358,8 +1393,10 @@ const loadComparison = async (
   setAtlasLoadPhase(pageStatus, "metadata-ready");
   setStatus(
     "waiting",
-    "Loading current snapshots",
-    "Reading each source independently from Atlas memory.",
+    selectedPairTitle(),
+    retainActiveComparison
+      ? "Refreshing both snapshots from Atlas memory. The current comparison remains interactive until both replacements are ready."
+      : "Loading both current snapshots independently from Atlas memory.",
   );
   setAtlasLoadPhase(pageStatus, "loading-snapshot");
   let leftPrimary: LoadedSourcePublication | null = null;
@@ -1705,8 +1742,13 @@ const handleTransactionNavigation = (event: KeyboardEvent): void => {
       move,
     );
     if (nextIndex !== null) {
-      keyboardTransactionIndex = nextIndex;
-      renderTransactionNavigator();
+      const entry = entries[nextIndex];
+      if (entry !== undefined) {
+        transitionComparisonView({
+          ...currentViewState(),
+          txid: entry.txid,
+        });
+      }
     }
     return;
   }

@@ -30,6 +30,19 @@ const transaction = (
     ancestor_vsize: 100 + value,
     ancestor_fee_sats: 200 + value,
     descendant_vsize: 100 + value,
+    bip110: {
+      status: "compatible",
+      primary_rule: null,
+      violated_rules: [],
+      unknown_rules: [],
+    },
+    structure: {
+      input_count: value,
+      output_count: value + 1,
+      op_return_bytes: 0,
+      output_sats: value * 10_000,
+      witness_bytes: value * 10,
+    },
   });
 
 const comparison = compareCurrentSnapshots(
@@ -110,7 +123,7 @@ const comparisonDistributionMarkup = (): string => {
     .flatMap(([title, container]) =>
       (["left", "right"] as const).map(
         (side) =>
-          `<h3 id="dist-${title}-${side}-title"></h3><div id="${container}-${side}"></div>`,
+          `<h3 id="dist-${title}-${side}-title"></h3><p id="dist-${title}-${side}-note"></p><div id="${container}-${side}"></div>`,
       ),
     )
     .join("");
@@ -118,13 +131,16 @@ const comparisonDistributionMarkup = (): string => {
     .flatMap((panel) =>
       (["left", "right"] as const).map(
         (side) =>
-          `<h3 id="dist-${panel}-${side}-title"></h3><div id="${panel}-${side}-y-axis"></div><div id="${panel}-${side}"><canvas id="${panel}-${side}-canvas"></canvas></div>`,
+          `<h3 id="dist-${panel}-${side}-title"></h3><p id="dist-${panel}-${side}-note"></p><div id="${panel}-${side}-y-axis"></div><div id="${panel}-${side}"><canvas id="${panel}-${side}-canvas"></canvas></div>`,
       ),
     )
     .join("");
   return `
     <section id="comparison-distributions" hidden>
-      <div class="comparison-distributions-heading"><div><h2>Snapshot distributions</h2></div></div>
+      <div class="comparison-distributions-heading"><div><h2>Snapshot distributions</h2><p id="comparison-distribution-summary"></p></div></div>
+      <select id="dist-classifier"></select>
+      <button id="dist-metric-count" aria-pressed="false"></button>
+      <button id="dist-metric-vsize" aria-pressed="true"></button>
       <button id="dist-scope-all" aria-pressed="true"></button>
       <button id="dist-scope-common" aria-pressed="false"></button>
       <button id="dist-scope-left" aria-pressed="false"></button>
@@ -163,7 +179,9 @@ describe("createComparisonDistributionsView", () => {
     expect(root!.querySelectorAll("#complexity-left .panel-axis")).toHaveLength(
       1,
     );
-
+    expect(
+      root!.querySelector("#complexity-left .panel-axis-title")?.textContent,
+    ).toBe("Inputs");
     await view.render(comparison);
 
     expect(root!.hidden).toBe(false);
@@ -174,6 +192,12 @@ describe("createComparisonDistributionsView", () => {
       "outside sentinel",
     );
     expect(root!.querySelector("#spectrum-left svg")).not.toBeNull();
+    expect(
+      root!.querySelector("#value-left .panel-axis-title")?.textContent,
+    ).toBe("Total output value");
+    expect(
+      root!.querySelector("#value-left .spectrum-y-axis-title")?.textContent,
+    ).toBe("Virtual size");
     expect(
       root!.querySelectorAll(
         "#composition-left .composition-segment[tabindex]",
@@ -196,10 +220,47 @@ describe("createComparisonDistributionsView", () => {
     expect(harness.pendingAnimationFrames()).toBe(1);
     harness.flushAnimationFrames();
     harness.flushAnimationFrames();
+    harness.flushAnimationFrames();
+    expect(
+      root!.querySelector("#complexity-left-y-axis .joint-y-axis-title")
+        ?.textContent,
+    ).toBe("Outputs");
     expect(harness.canvasContext.setTransform).toHaveBeenCalled();
     expect(
       root!.querySelector("#joint-left-canvas")?.getAttribute("aria-pressed"),
     ).toBe("false");
+  });
+
+  it("keeps lens and metric controls local to the distribution view", async () => {
+    const root = document.querySelector<HTMLElement>(
+      "section#comparison-distributions",
+    )!;
+    const view = createComparisonDistributionsView(root);
+    await view.render(comparison);
+
+    const lens = root.querySelector<HTMLSelectElement>("#dist-classifier")!;
+    expect(lens.value).toBe("knots_bip110");
+    expect(lens.disabled).toBe(true);
+    expect(
+      root.querySelector("#dist-metric-vsize")?.getAttribute("aria-pressed"),
+    ).toBe("true");
+
+    root.querySelector<HTMLButtonElement>("#dist-metric-count")?.click();
+
+    await vi.waitFor(() => {
+      expect(
+        root.querySelector("#dist-metric-count")?.getAttribute("aria-pressed"),
+      ).toBe("true");
+      expect(
+        root.querySelector("#value-left .spectrum-y-axis-title")?.textContent,
+      ).toBe("Transaction count");
+    });
+    expect(
+      root.querySelector("#dist-spectrum-left-note")?.textContent,
+    ).toContain("transaction count");
+    expect(
+      root.querySelector("#comparison-distribution-summary")?.textContent,
+    ).toContain("weighted by transaction count");
   });
 
   it("rerenders source-local empty state when a one-sided scope is selected", async () => {
