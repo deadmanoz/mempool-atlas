@@ -17,6 +17,9 @@ import type {
 const HEX = "0123456789abcdef";
 const TXID = /^[0-9a-f]{64}$/;
 const ROW_CACHE_LIMIT = 256;
+export const SOURCE_DIFFERENCE_WITNESS_VARIANT = 1 << 0;
+export const SOURCE_DIFFERENCE_ANCESTOR_PACKAGE = 1 << 1;
+export const SOURCE_DIFFERENCE_REPLACEABILITY = 1 << 2;
 const PRIMARY_MEMBERSHIP_FIELDS = [
   "wtxid",
   "weight",
@@ -268,6 +271,38 @@ export class PackedPublicationStore {
     return bit(this.differingWtxidBits, row)
       ? this.differingWtxids[(this.differingWtxidRanks[row] ?? 0) * 32 + byte]
       : this.txids[row * 32 + byte];
+  }
+
+  sourceDifferenceFlags(
+    row: number,
+    other: PackedPublicationStore,
+    otherRow: number,
+  ): number | undefined {
+    if (
+      !isValidRow(row, this.rowCount) ||
+      !isValidRow(otherRow, other.rowCount)
+    ) {
+      return undefined;
+    }
+    let flags = 0;
+    for (let byte = 0; byte < 32; byte += 1) {
+      if (this.rowWtxidByte(row, byte) !== other.rowWtxidByte(otherRow, byte)) {
+        flags |= SOURCE_DIFFERENCE_WITNESS_VARIANT;
+        break;
+      }
+    }
+    if (
+      this.ancestorVsize.at(row) !== other.ancestorVsize.at(otherRow) ||
+      this.ancestorFeeSats.at(row) !== other.ancestorFeeSats.at(otherRow)
+    ) {
+      flags |= SOURCE_DIFFERENCE_ANCESTOR_PACKAGE;
+    }
+    if (
+      bit(this.replaceableBits, row) !== bit(other.replaceableBits, otherRow)
+    ) {
+      flags |= SOURCE_DIFFERENCE_REPLACEABILITY;
+    }
+    return flags;
   }
 
   transaction(row: number): MempoolTransaction | undefined {
@@ -650,6 +685,31 @@ export const packedSnapshotRowsShareWtxid = (
     if (leftValue !== rightValue) return false;
   }
   return true;
+};
+
+/**
+ * Compare source-local facts for one txid without materializing either row.
+ * Null means either publication is incomplete or unavailable to the packed
+ * comparison path.
+ */
+export const packedSnapshotRowsSourceDifferenceFlags = (
+  left: MempoolSnapshot,
+  leftRow: number,
+  right: MempoolSnapshot,
+  rightRow: number,
+): number | null => {
+  if (!completeSnapshots.has(left) || !completeSnapshots.has(right)) {
+    return null;
+  }
+  const leftStore = stores.get(left);
+  const rightStore = stores.get(right);
+  if (
+    !(leftStore instanceof PackedPublicationStore) ||
+    !(rightStore instanceof PackedPublicationStore)
+  ) {
+    return null;
+  }
+  return leftStore.sourceDifferenceFlags(leftRow, rightStore, rightRow) ?? null;
 };
 
 /**

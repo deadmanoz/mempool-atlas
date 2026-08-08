@@ -434,6 +434,24 @@ test.describe("comparison page", () => {
     expect(inputBox.height).toBeGreaterThanOrEqual(40);
   });
 
+  test("surfaces overlapping source-local differences without adding a membership region", async ({
+    page,
+  }) => {
+    const summary = page.locator("#comparison-source-differences");
+    await expect(summary).toBeVisible();
+    await expect(summary.locator("dl > div")).toHaveCount(4);
+    await expect(page.locator("#source-difference-any")).not.toHaveText("0");
+    await expect(page.locator("#comparison-visual-summary")).toContainText(
+      "different source-local facts",
+    );
+    await expect(page.locator("#comparison-visual-summary")).toContainText(
+      "Counts overlap",
+    );
+    await expect(
+      page.locator("#comparison-regions button[data-region]"),
+    ).toHaveCount(3);
+  });
+
   test("promotes different chain tips and reframes the shared population", async ({
     page,
   }) => {

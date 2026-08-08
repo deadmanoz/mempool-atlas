@@ -70,12 +70,16 @@ viewer, and the Node control in Compare opens its current left-hand source.
 
 The comparison page fetches two snapshots and derives three regions in the
 browser: present in both, observed only on the left, and observed only on the
-right. Snapshot timing states which source was observed later and whether the
-two collection windows overlapped. A prominent txid lookup immediately below
-that context opens one transaction across both current snapshots. The lookup
-and three membership populations share one transaction panel. Selected
-transaction IDs in both Node and Compare link to their transaction page on
-mempool.space.
+right. Within the shared region, it also derives overlapping counts for
+different witness variants, unconfirmed ancestor packages, and effective
+replaceability directly from the two packed source snapshots. Outlined cells
+carry at least one such difference, and selected transaction detail names the
+exact source-local values. Snapshot timing states which source was observed
+later and whether the two collection windows overlapped. A prominent txid
+lookup immediately below that context opens one transaction across both
+current snapshots. The lookup and three membership populations share one
+transaction panel. Selected transaction IDs in both Node and Compare link to
+their transaction page on mempool.space.
 
 Both products render the lightweight current source metadata before their full
 snapshot bodies arrive. The comparison page keeps its primary membership

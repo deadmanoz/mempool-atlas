@@ -3,8 +3,11 @@ import {
   comparePackedSnapshotRows,
   packedSnapshotRowCount,
   packedSnapshotRowVsize,
-  packedSnapshotRowsShareWtxid,
+  packedSnapshotRowsSourceDifferenceFlags,
   packedSnapshotTransaction,
+  SOURCE_DIFFERENCE_ANCESTOR_PACKAGE,
+  SOURCE_DIFFERENCE_REPLACEABILITY,
+  SOURCE_DIFFERENCE_WITNESS_VARIANT,
 } from "./packed-store";
 import type {
   Bip110Status,
@@ -62,6 +65,10 @@ export interface ComparisonTotals {
   left_only_vsize: number;
   right_only_count: number;
   right_only_vsize: number;
+  common_source_difference_count: number;
+  common_witness_variant_count: number;
+  common_ancestor_package_difference_count: number;
+  common_replaceability_difference_count: number;
 }
 
 export interface CurrentComparison {
@@ -72,7 +79,7 @@ export interface CurrentComparison {
   common: ComparedTransaction[];
   left_only: ComparedTransaction[];
   right_only: ComparedTransaction[];
-  common_differing_wtxids: Uint8Array;
+  common_source_difference_flags: Uint8Array;
   totals: ComparisonTotals;
 }
 
@@ -108,7 +115,7 @@ interface ComparisonMembership {
   common: ComparedTransaction[];
   left_only: ComparedTransaction[];
   right_only: ComparedTransaction[];
-  common_differing_wtxids: Uint8Array;
+  common_source_difference_flags: Uint8Array;
   totals: ComparisonTotals;
 }
 
@@ -316,27 +323,41 @@ const comparePackedMembership = (
 
   const commonLeftRows = new Uint32Array(commonCount);
   const commonRightRows = new Uint32Array(commonCount);
-  const commonDifferingWtxids = new Uint8Array(commonCount);
+  const commonSourceDifferenceFlags = new Uint8Array(commonCount);
   const leftOnlyRows = new Uint32Array(leftOnlyCount);
   const rightOnlyRows = new Uint32Array(rightOnlyCount);
   let commonIndex = 0;
   let leftOnlyIndex = 0;
   let rightOnlyIndex = 0;
+  let commonSourceDifferenceCount = 0;
+  let commonWitnessVariantCount = 0;
+  let commonAncestorPackageDifferenceCount = 0;
+  let commonReplaceabilityDifferenceCount = 0;
   visitPackedMerge(left.snapshot, leftCount, right.snapshot, rightCount, {
     common: (leftRow, rightRow) => {
       commonLeftRows[commonIndex] = leftRow;
       commonRightRows[commonIndex] = rightRow;
       if (membershipReady) {
-        const sameWtxid = packedSnapshotRowsShareWtxid(
+        const flags = packedSnapshotRowsSourceDifferenceFlags(
           left.snapshot,
           leftRow,
           right.snapshot,
           rightRow,
         );
-        if (sameWtxid === null) {
-          throw new TypeError("Packed witness comparison is unavailable");
+        if (flags === null) {
+          throw new TypeError("Packed source-fact comparison is unavailable");
         }
-        commonDifferingWtxids[commonIndex] = sameWtxid ? 0 : 1;
+        commonSourceDifferenceFlags[commonIndex] = flags;
+        if (flags !== 0) commonSourceDifferenceCount += 1;
+        if ((flags & SOURCE_DIFFERENCE_WITNESS_VARIANT) !== 0) {
+          commonWitnessVariantCount += 1;
+        }
+        if ((flags & SOURCE_DIFFERENCE_ANCESTOR_PACKAGE) !== 0) {
+          commonAncestorPackageDifferenceCount += 1;
+        }
+        if ((flags & SOURCE_DIFFERENCE_REPLACEABILITY) !== 0) {
+          commonReplaceabilityDifferenceCount += 1;
+        }
       }
       commonIndex += 1;
     },
@@ -389,7 +410,7 @@ const comparePackedMembership = (
         membershipReady,
       );
     }),
-    common_differing_wtxids: commonDifferingWtxids,
+    common_source_difference_flags: commonSourceDifferenceFlags,
     rows: {
       commonLeft: commonLeftRows,
       commonRight: commonRightRows,
@@ -405,6 +426,12 @@ const comparePackedMembership = (
       left_only_vsize: leftOnlyVsize,
       right_only_count: rightOnlyCount,
       right_only_vsize: rightOnlyVsize,
+      common_source_difference_count: commonSourceDifferenceCount,
+      common_witness_variant_count: commonWitnessVariantCount,
+      common_ancestor_package_difference_count:
+        commonAncestorPackageDifferenceCount,
+      common_replaceability_difference_count:
+        commonReplaceabilityDifferenceCount,
     },
   };
 };

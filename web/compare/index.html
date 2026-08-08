@@ -251,6 +251,44 @@
           </button>
         </section>
         <section
+          id="comparison-source-differences"
+          class="comparison-source-differences"
+          aria-labelledby="comparison-source-differences-heading"
+          hidden
+        >
+          <div>
+            <strong id="comparison-source-differences-heading"
+              >Different source-local facts</strong
+            >
+            <span
+              >Shared txids whose witness, unconfirmed ancestor package, or
+              effective replaceability differs.</span
+            >
+          </div>
+          <dl>
+            <div>
+              <dt>Any difference</dt>
+              <dd id="source-difference-any">0</dd>
+            </div>
+            <div>
+              <dt>Witness variant</dt>
+              <dd id="source-difference-witness">0</dd>
+            </div>
+            <div>
+              <dt>Ancestor package</dt>
+              <dd id="source-difference-ancestor">0</dd>
+            </div>
+            <div>
+              <dt>Replaceability</dt>
+              <dd id="source-difference-replaceability">0</dd>
+            </div>
+          </dl>
+          <p>
+            Counts overlap. These are differences between the two reported
+            snapshots, not claims about why either node holds a transaction.
+          </p>
+        </section>
+        <section
           class="comparison-transaction-detail detail-section"
           aria-labelledby="comparison-detail-heading"
         >

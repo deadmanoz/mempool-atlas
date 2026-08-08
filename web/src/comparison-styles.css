@@ -576,6 +576,65 @@
   color: var(--cyan);
 }
 
+.comparison-source-differences {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.65rem 0.8rem;
+  border-top: 1px solid var(--border);
+  background: #08141b;
+}
+
+.comparison-source-differences[hidden] {
+  display: none;
+}
+
+.comparison-source-differences > div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.comparison-source-differences > div:first-child span,
+.comparison-source-differences > p {
+  margin: 0;
+  color: var(--faint);
+  font-size: 0.59rem;
+  line-height: 1.45;
+}
+
+.comparison-source-differences dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  border: 1px solid var(--border);
+}
+
+.comparison-source-differences dl > div {
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border-right: 1px solid var(--border);
+}
+
+.comparison-source-differences dl > div:last-child {
+  border-right: 0;
+}
+
+.comparison-source-differences dt {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 0.55rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comparison-source-differences dd {
+  margin: 0.18rem 0 0;
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.82rem;
+}
+
 .comparison-stage {
   position: relative;
   height: min(62vh, 690px);
@@ -850,13 +909,32 @@
   font-size: 0.68rem;
 }
 
-.variant-warning {
-  margin: 0;
-  padding: 0.45rem 0.55rem;
+.comparison-detail-differences {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.55rem 0.65rem;
   border-left: 2px solid var(--amber);
   background: rgba(225, 170, 75, 0.08);
+}
+
+.comparison-detail-differences h3,
+.comparison-detail-differences p {
+  margin: 0;
+}
+
+.comparison-detail-differences ul {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding-left: 1.1rem;
   color: #d4bd82;
   font-size: 0.63rem;
+  line-height: 1.45;
+}
+
+.comparison-detail-differences p {
+  color: var(--faint);
+  font-size: 0.59rem;
   line-height: 1.45;
 }
 
@@ -1006,6 +1084,23 @@
 
   .comparison-region-controls button {
     min-height: 3.5rem;
+  }
+
+  .comparison-source-differences > div:first-child {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .comparison-source-differences dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .comparison-source-differences dl > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .comparison-source-differences dl > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--border);
   }
 
   .comparison-policy-toolbar-controls {

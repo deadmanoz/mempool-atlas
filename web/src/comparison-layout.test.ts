@@ -105,7 +105,7 @@ describe("comparison layout", () => {
     ).toBe(false);
   });
 
-  it("bounds population and witness work in progressive paint batches", () => {
+  it("bounds population and source-difference work in progressive paint batches", () => {
     const comparison = compareCurrentSnapshots(
       source(
         "left",
@@ -131,12 +131,12 @@ describe("comparison layout", () => {
     ).toBe(comparison.totals.union_count);
     expect(
       batches
-        .filter(({ kind }) => kind === "witness")
+        .filter(({ kind }) => kind === "source-difference")
         .reduce((count, { start, end }) => count + end - start, 0),
     ).toBe(comparison.totals.common_count);
   });
 
-  it("paints unfiltered witness variants without materializing comparison entries", () => {
+  it("paints unfiltered source differences without materializing comparison entries", () => {
     const comparison = compareCurrentSnapshots(
       loadedSource("left", [mempoolTransaction(1)]),
       loadedSource("right", [mempoolTransaction(1, { wtxid: txid(2) })]),

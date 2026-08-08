@@ -24,7 +24,7 @@ export interface ComparisonRegionLayout {
   contentRect: ComparisonRect;
   transactionCount: number;
   entries: readonly ComparedTransaction[];
-  differingWitnessBits: Uint8Array | null;
+  sourceDifferenceFlags: Uint8Array | null;
   columns: number;
   rows: number;
   cellWidth: number;
@@ -36,7 +36,7 @@ export interface ComparisonGlyph {
   txid: string;
   regionKey: ComparisonRegionKey;
   rect: ComparisonRect;
-  differingWitnessVariant: boolean;
+  sourceDifferenceFlags: number;
 }
 
 export interface ComparisonLayout {
@@ -66,7 +66,7 @@ export type ComparisonPaintBatch =
       end: number;
     }
   | {
-      kind: "witness";
+      kind: "source-difference";
       region: ComparisonRegionLayout;
       start: number;
       end: number;
@@ -154,7 +154,7 @@ const glyphAtPoint = (
         txid: entry.txid,
         regionKey: region.key,
         rect,
-        differingWitnessVariant: region.differingWitnessBits?.[index] === 1,
+        sourceDifferenceFlags: region.sourceDifferenceFlags?.[index] ?? 0,
       }
     : null;
 };
@@ -224,8 +224,8 @@ export const createComparisonLayout = (
       rect,
       contentRect,
       transactionCount: entries.length,
-      differingWitnessBits:
-        key === "common" ? comparison.common_differing_wtxids : null,
+      sourceDifferenceFlags:
+        key === "common" ? comparison.common_source_difference_flags : null,
       ...configureRegionGrid(entries, contentRect),
     });
     x += regionWidth + REGION_GAP;
@@ -337,7 +337,7 @@ export const comparisonPaintBatches = (
   if (common !== undefined) {
     for (let start = 0; start < common.transactionCount; start += batchSize) {
       batches.push({
-        kind: "witness",
+        kind: "source-difference",
         region: common,
         start,
         end: Math.min(start + batchSize, common.transactionCount),
@@ -398,19 +398,21 @@ const paintComparisonBatch = (
   context.globalAlpha = 1;
   context.strokeStyle = "#e1aa4b";
   context.lineWidth = 1;
+  const addDifference = (index: number): void => {
+    if ((region.sourceDifferenceFlags?.[index] ?? 0) === 0) return;
+    const rect = glyphRect(region, index);
+    context.rect(rect.x, rect.y, rect.width, rect.height);
+  };
   if (policyFilter.kind === "all") {
     for (let index = batch.start; index < batch.end; index += 1) {
-      if (region.differingWitnessBits?.[index] === 1) {
-        const rect = glyphRect(region, index);
-        context.rect(rect.x, rect.y, rect.width, rect.height);
-      }
+      addDifference(index);
     }
     context.stroke();
     return;
   }
   const effectiveSide = policySideForRegion(region.key, policySide);
   for (let index = batch.start; index < batch.end; index += 1) {
-    if (region.differingWitnessBits?.[index] !== 1) {
+    if ((region.sourceDifferenceFlags?.[index] ?? 0) === 0) {
       continue;
     }
     const entry = region.entries[index];
@@ -423,8 +425,7 @@ const paintComparisonBatch = (
     ) {
       continue;
     }
-    const rect = glyphRect(region, index);
-    context.rect(rect.x, rect.y, rect.width, rect.height);
+    addDifference(index);
   }
   context.stroke();
 };

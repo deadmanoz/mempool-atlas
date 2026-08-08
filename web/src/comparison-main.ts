@@ -54,7 +54,13 @@ import {
 import { renderPrimaryComparisonPublication } from "./comparison-primary-publication";
 import { createComparisonSamplingView } from "./comparison-sampling-view";
 import {
-  comparisonWitnessVariantDescription,
+  createSourceDifferenceDetail,
+  renderSourceDifferenceSummary,
+  resetSourceDifferenceSummary,
+  sourceDifferenceNavigatorDescription,
+  type SourceDifferenceSummaryElements,
+} from "./comparison-source-differences";
+import {
   comparisonRegionEntries,
   lookupComparisonTransaction,
   policySideForRegion,
@@ -71,14 +77,13 @@ import { markAtlasReadiness, markAtlasReadinessAfterPaint } from "./readiness";
 import {
   countFormat,
   compactTxid,
-  decimalFormat,
   formatTime,
   formatTxidCount,
   formatVsize,
   percentageFormat,
 } from "./format";
 import { createSourceCardView, setAtlasLoadPhase } from "./source-summary-view";
-import { baseFeeRate, transactionFactPairs } from "./transaction-facts";
+import { transactionFactPairs } from "./transaction-facts";
 import {
   createMempoolSpaceTransactionLink,
   createTransactionDetailValue,
@@ -147,6 +152,15 @@ const policyMatrixBody = requiredElement<HTMLTableSectionElement>(
   "comparison-policy-matrix-body",
 );
 const regionControls = requiredElement<HTMLElement>("comparison-regions");
+const sourceDifferenceSummary: SourceDifferenceSummaryElements = {
+  panel: requiredElement<HTMLElement>("comparison-source-differences"),
+  any: requiredElement<HTMLElement>("source-difference-any"),
+  witness: requiredElement<HTMLElement>("source-difference-witness"),
+  ancestor: requiredElement<HTMLElement>("source-difference-ancestor"),
+  replaceability: requiredElement<HTMLElement>(
+    "source-difference-replaceability",
+  ),
+};
 const comparisonStage = requiredElement<HTMLElement>("comparison-stage");
 const comparisonCanvas =
   requiredElement<HTMLCanvasElement>("comparison-canvas");
@@ -527,6 +541,7 @@ const resetRegionControls = (): void => {
       `${labels[key]}: 0 transaction IDs, ${details[key]}`,
     );
   }
+  resetSourceDifferenceSummary(sourceDifferenceSummary);
 };
 
 const invalidateComparisonGeometry = (): void => {
@@ -565,9 +580,7 @@ const renderTransactionNavigator = (): void => {
   navigatorSummary.textContent = `${regionLabel(current, selectedRegion)} · transaction ${countFormat.format(keyboardTransactionIndex + 1)} of ${countFormat.format(entries.length)}`;
   navigatorTxid.textContent = entry.txid;
   navigatorTxid.title = entry.txid;
-  navigatorVariant.textContent = comparisonWitnessVariantDescription(
-    entry.witness_relation,
-  );
+  navigatorVariant.textContent = sourceDifferenceNavigatorDescription(entry);
   activeTransactionOption.setAttribute(
     "aria-posinset",
     String(keyboardTransactionIndex + 1),
@@ -1185,17 +1198,8 @@ const loadSelectedTransactionDetail = async (
   const identity = document.createElement("div");
   identity.className = "comparison-detail-identity";
   identity.append(createMempoolSpaceTransactionLink(entry.txid));
-  if (entry.witness_relation === "different") {
-    const warning = document.createElement("p");
-    warning.className = "variant-warning";
-    const left = entry.left;
-    const right = entry.right;
-    warning.textContent =
-      left !== null && right !== null
-        ? `The same txid carries different witness variants. ${current.left.snapshot.source_label}: ${formatVsize(left.vsize)} at ${decimalFormat.format(baseFeeRate(left))} sat/vB. ${current.right.snapshot.source_label}: ${formatVsize(right.vsize)} at ${decimalFormat.format(baseFeeRate(right))} sat/vB. Atlas applies the same BIP-110 evaluator to each source-local variant; neither node reports these verdicts.`
-        : "The same txid carries different witness variants. Atlas applies the same BIP-110 evaluator to each source-local variant; neither node reports these verdicts.";
-    identity.append(warning);
-  }
+  const sourceDifferenceDetail = createSourceDifferenceDetail(current, entry);
+  if (sourceDifferenceDetail !== null) identity.append(sourceDifferenceDetail);
   detailContainer.replaceChildren(
     identity,
     ...outcomes.map((outcome) => renderDetailOutcome(current, entry, outcome)),
@@ -1223,26 +1227,27 @@ const renderComparison = async (
   if (comparison !== current) return;
   renderPolicyMatrix(current, view);
   renderRegionControls(current);
+  renderSourceDifferenceSummary(sourceDifferenceSummary, current, complete);
   unionCount.textContent = `${countFormat.format(current.totals.union_count)} txids`;
   comparisonStage.hidden = current.totals.union_count === 0;
   comparisonEmpty.hidden = current.totals.union_count !== 0;
   comparisonEmpty.textContent = "Both sampled mempools are empty.";
   const differingVariants = complete
-    ? current.common_differing_wtxids.reduce(
-        (count, differing) => count + differing,
-        0,
-      )
+    ? current.totals.common_witness_variant_count
+    : 0;
+  const sourceDifferencesCount = complete
+    ? current.totals.common_source_difference_count
     : 0;
   comparisonCanvas.setAttribute(
     "aria-label",
-    `Current membership comparison with ${formatTxidCount(current.totals.common_count)} present in both snapshots, ${formatTxidCount(current.totals.left_only_count)} observed only in ${current.left.snapshot.source_label} snapshot, and ${formatTxidCount(current.totals.right_only_count)} observed only in ${current.right.snapshot.source_label} snapshot. ${complete ? "Use the transaction navigator or arrow keys to reach every transaction." : "Witness variants and membership details are still loading."}`,
+    `Current membership comparison with ${formatTxidCount(current.totals.common_count)} present in both snapshots, ${formatTxidCount(current.totals.left_only_count)} observed only in ${current.left.snapshot.source_label} snapshot, and ${formatTxidCount(current.totals.right_only_count)} observed only in ${current.right.snapshot.source_label} snapshot. ${complete ? `${formatTxidCount(sourceDifferencesCount)} shared transaction IDs have different source-local facts. Use the transaction navigator or arrow keys to reach every transaction.` : "Witness variants and membership details are still loading."}`,
   );
   const unionSentence =
     current.totals.union_count === 1
       ? "The one transaction ID appears once."
       : `Each of the ${formatTxidCount(current.totals.union_count)} appears once.`;
   visualSummary.textContent = complete
-    ? `${unionSentence} ${formatTxidCount(differingVariants)} present in both ${differingVariants === 1 ? "carries" : "carry"} different witness variants.`
+    ? `${unionSentence} Among the shared transaction IDs, ${formatTxidCount(sourceDifferencesCount)} ${sourceDifferencesCount === 1 ? "has" : "have"} different source-local facts: ${formatTxidCount(differingVariants)} witness ${differingVariants === 1 ? "variant" : "variants"}, ${formatTxidCount(current.totals.common_ancestor_package_difference_count)} ancestor ${current.totals.common_ancestor_package_difference_count === 1 ? "package" : "packages"}, and ${formatTxidCount(current.totals.common_replaceability_difference_count)} replaceability ${current.totals.common_replaceability_difference_count === 1 ? "result" : "results"}. Counts overlap.`
     : `${formatTxidCount(current.totals.union_count)} transaction IDs are ready for membership-region and policy exploration. Witness variants, fee distributions, and transaction details are still loading.`;
   renderTransactionNavigator();
   renderInspector();

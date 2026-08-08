@@ -9,6 +9,11 @@ import {
   type CurrentComparison,
 } from "./comparison-model";
 import { loadedSource } from "./comparison-test-fixtures";
+import {
+  SOURCE_DIFFERENCE_ANCESTOR_PACKAGE,
+  SOURCE_DIFFERENCE_REPLACEABILITY,
+  SOURCE_DIFFERENCE_WITNESS_VARIANT,
+} from "./packed-store";
 import { mempoolTransaction, txid } from "./test-fixtures";
 import type { Bip110Assessment, MempoolTransaction } from "./types";
 
@@ -116,6 +121,10 @@ describe("compareCurrentSnapshots", () => {
       left_only_vsize: 200,
       right_only_count: 1,
       right_only_vsize: 400,
+      common_source_difference_count: 2,
+      common_witness_variant_count: 0,
+      common_ancestor_package_difference_count: 2,
+      common_replaceability_difference_count: 0,
     });
     expect(comparison.observed_skew_ms).toBe(3_000);
     expect(comparison.earlier_side).toBe("left");
@@ -148,7 +157,17 @@ describe("compareCurrentSnapshots", () => {
       left: { wtxid: txid(10), vsize: 100 },
       right: { wtxid: txid(11), vsize: 120 },
     });
-    expect(comparison.common_differing_wtxids).toEqual(Uint8Array.of(1));
+    expect(comparison.common_source_difference_flags).toEqual(
+      Uint8Array.of(
+        SOURCE_DIFFERENCE_WITNESS_VARIANT | SOURCE_DIFFERENCE_ANCESTOR_PACKAGE,
+      ),
+    );
+    expect(comparison.totals).toMatchObject({
+      common_source_difference_count: 1,
+      common_witness_variant_count: 1,
+      common_ancestor_package_difference_count: 1,
+      common_replaceability_difference_count: 0,
+    });
     expect(comparison.totals.common_left_vsize).toBe(100);
     expect(comparison.totals.common_right_vsize).toBe(120);
   });
@@ -187,7 +206,9 @@ describe("compareCurrentSnapshots", () => {
         comparison.left_only[0]?.witness_relation ?? "loading",
       ),
     ).toBe("Observed in one snapshot");
-    expect(comparison.common_differing_wtxids).toEqual(Uint8Array.of(0, 0));
+    expect(comparison.common_source_difference_flags).toEqual(
+      Uint8Array.of(0, 0),
+    );
 
     const ready = compareCurrentSnapshots(comparison.left, comparison.right);
     expect(ready.common[0]?.witness_relation).toBe("different");
@@ -202,7 +223,46 @@ describe("compareCurrentSnapshots", () => {
         ready.common[1]?.witness_relation ?? "loading",
       ),
     ).toBe("Same witness variant");
-    expect(ready.common_differing_wtxids).toEqual(Uint8Array.of(1, 0));
+    expect(ready.common_source_difference_flags).toEqual(
+      Uint8Array.of(
+        SOURCE_DIFFERENCE_WITNESS_VARIANT | SOURCE_DIFFERENCE_ANCESTOR_PACKAGE,
+        SOURCE_DIFFERENCE_ANCESTOR_PACKAGE,
+      ),
+    );
+  });
+
+  it("derives overlapping source-local difference flags without materializing rows", () => {
+    const left = mempoolTransaction(1, {
+      wtxid: txid(10),
+      ancestor_vsize: 300,
+      ancestor_fee_sats: 3_000,
+      replaceable: false,
+    });
+    const right = mempoolTransaction(1, {
+      wtxid: txid(11),
+      ancestor_vsize: 400,
+      ancestor_fee_sats: 5_000,
+      replaceable: true,
+    });
+
+    const comparison = compareCurrentSnapshots(
+      loadedSource("core", [left]),
+      loadedSource("knots", [right]),
+    );
+
+    expect(comparison.common_source_difference_flags).toEqual(
+      Uint8Array.of(
+        SOURCE_DIFFERENCE_WITNESS_VARIANT |
+          SOURCE_DIFFERENCE_ANCESTOR_PACKAGE |
+          SOURCE_DIFFERENCE_REPLACEABILITY,
+      ),
+    );
+    expect(comparison.totals).toMatchObject({
+      common_source_difference_count: 1,
+      common_witness_variant_count: 1,
+      common_ancestor_package_difference_count: 1,
+      common_replaceability_difference_count: 1,
+    });
   });
 
   it("looks up source-local entries across every sorted membership region", () => {
