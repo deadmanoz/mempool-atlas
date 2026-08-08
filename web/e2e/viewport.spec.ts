@@ -25,7 +25,7 @@ const viewportWidth = (page: Page): number => {
 const waitForSnapshot = async (page: Page, statusId: string): Promise<void> => {
   await expect(page.locator(`#${statusId}`)).toHaveAttribute(
     "data-state",
-    /ready|stale/,
+    /ready|stale|different/,
     { timeout: 20_000 },
   );
 };
