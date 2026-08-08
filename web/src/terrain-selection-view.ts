@@ -2,8 +2,7 @@ import {
   paintBucketTerrainSelection,
   type BucketTerrainLayout,
 } from "./bucket-terrain";
-
-const MAX_SELECTION_BASE_PIXELS = 4_194_304;
+import { MAX_RETAINED_CANVAS_PIXELS } from "./canvas-backing";
 
 /**
  * Preserve the last complete terrain paint so a transaction-only selection
@@ -25,13 +24,14 @@ export class TerrainSelectionView {
     layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
   ): boolean {
     if (
-      this.canvas.width * this.canvas.height > MAX_SELECTION_BASE_PIXELS ||
+      this.canvas.width * this.canvas.height > MAX_RETAINED_CANVAS_PIXELS ||
       this.canvas.width < 1 ||
       this.canvas.height < 1
     ) {
       this.reset();
       return false;
     }
+    this.reset();
     this.baseCanvas.width = this.canvas.width;
     this.baseCanvas.height = this.canvas.height;
     const context = this.baseCanvas.getContext("2d");

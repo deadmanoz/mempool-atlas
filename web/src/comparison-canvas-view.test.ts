@@ -18,6 +18,17 @@ const comparison = compareCurrentSnapshots(
   loadedSource("left", [mempoolTransaction(1), mempoolTransaction(2)]),
   loadedSource("right", [mempoolTransaction(2), mempoolTransaction(3)]),
 );
+const replacementComparison = compareCurrentSnapshots(
+  loadedSource("left", [mempoolTransaction(4)]),
+  loadedSource("right", [mempoolTransaction(4), mempoolTransaction(5)]),
+);
+
+const retainedBase = (view: ComparisonCanvasView): HTMLCanvasElement =>
+  (
+    view as unknown as {
+      baseCanvas: HTMLCanvasElement;
+    }
+  ).baseCanvas;
 
 describe("ComparisonCanvasView", () => {
   const context = {
@@ -105,6 +116,41 @@ describe("ComparisonCanvasView", () => {
       status: "compatible",
     });
     expect(canvas.dataset.renderedTransaction).toBeUndefined();
+
+    expect(retainedBase(view).width).toBe(canvas.width);
+    expect(retainedBase(view).height).toBe(canvas.height);
+    view.commitCandidate(view.prepareCandidate(replacementComparison));
+    expect(retainedBase(view).width).toBe(0);
+    expect(retainedBase(view).height).toBe(0);
+    await view.render(replacementComparison, "common", null, "left", {
+      kind: "all",
+    });
+    expect(retainedBase(view).width).toBe(canvas.width);
+    expect(retainedBase(view).height).toBe(canvas.height);
+    view.invalidate();
+    expect(retainedBase(view).width).toBe(0);
+    expect(retainedBase(view).height).toBe(0);
+  });
+
+  it("falls back to a full selection repaint above the retained canvas cap", async () => {
+    const canvas = document.createElement("canvas");
+    canvas.getBoundingClientRect = () =>
+      ({ width: 4_097, height: 1_024 }) as DOMRect;
+    const view = new ComparisonCanvasView(canvas);
+
+    await view.render(comparison, "common", null, "left", { kind: "all" });
+    const populationRects = vi.mocked(context.rect).mock.calls.length;
+    expect(canvas.width * canvas.height).toBeGreaterThan(4_194_304);
+    expect(retainedBase(view).width).toBe(0);
+    expect(retainedBase(view).height).toBe(0);
+
+    await view.render(comparison, "common", txid(2), "left", { kind: "all" });
+    expect(vi.mocked(context.rect).mock.calls.length).toBeGreaterThan(
+      populationRects,
+    );
+    expect(canvas.dataset.renderedTransaction).toBe(txid(2));
+    expect(retainedBase(view).width).toBe(0);
+    expect(retainedBase(view).height).toBe(0);
   });
 
   it("reports an aborted population render as superseded", async () => {

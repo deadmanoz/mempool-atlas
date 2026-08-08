@@ -7,6 +7,8 @@ export interface PreparedCanvasBacking {
   pixelRatio: number;
 }
 
+export const MAX_RETAINED_CANVAS_PIXELS = 4_194_304;
+
 const visibleDimension = (value: number, mode: CanvasVisibleSizeMode): number =>
   Math.max(1, mode === "whole-pixel" ? Math.round(value) : value);
 

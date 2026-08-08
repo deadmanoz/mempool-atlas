@@ -5,7 +5,10 @@ import {
   type ComparisonGeometry,
   type ComparisonLayout,
 } from "./comparison-layout";
-import { prepareCanvasBacking } from "./canvas-backing";
+import {
+  MAX_RETAINED_CANVAS_PIXELS,
+  prepareCanvasBacking,
+} from "./canvas-backing";
 import type {
   ComparisonPolicyFilter,
   ComparisonRegionKey,
@@ -82,6 +85,11 @@ export class ComparisonCanvasView {
     return this.geometry?.layout ?? null;
   }
 
+  private releaseBaseBacking(): void {
+    this.baseCanvas.width = 0;
+    this.baseCanvas.height = 0;
+  }
+
   invalidate(): void {
     this.controller?.abort();
     this.controller = null;
@@ -95,6 +103,7 @@ export class ComparisonCanvasView {
     this.basePolicyPaintKey = null;
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
+    this.releaseBaseBacking();
     delete this.canvas.dataset.renderedRegion;
     delete this.canvas.dataset.renderedTransaction;
   }
@@ -135,6 +144,7 @@ export class ComparisonCanvasView {
     this.basePolicyPaintKey = null;
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
+    this.releaseBaseBacking();
     delete this.canvas.dataset.renderedRegion;
     delete this.canvas.dataset.renderedTransaction;
   }
@@ -151,21 +161,34 @@ export class ComparisonCanvasView {
       this.basePolicyPaintKey === currentPolicyPaintKey &&
       this.geometry?.width === width &&
       this.geometry.height === height &&
-      this.geometry.pixelRatio === pixelRatio
+      this.geometry.pixelRatio === pixelRatio &&
+      this.baseCanvas.width === this.canvas.width &&
+      this.baseCanvas.height === this.canvas.height
     );
   }
 
-  private captureBase(): void {
+  private captureBase(): boolean {
+    if (
+      this.canvas.width < 1 ||
+      this.canvas.height < 1 ||
+      this.canvas.width * this.canvas.height > MAX_RETAINED_CANVAS_PIXELS
+    ) {
+      this.releaseBaseBacking();
+      return false;
+    }
+    this.releaseBaseBacking();
     this.baseCanvas.width = this.canvas.width;
     this.baseCanvas.height = this.canvas.height;
     const context = this.baseCanvas.getContext("2d");
     if (context === null) {
-      throw new Error("Canvas 2D rendering is unavailable");
+      this.releaseBaseBacking();
+      return false;
     }
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.globalAlpha = 1;
     context.clearRect(0, 0, this.baseCanvas.width, this.baseCanvas.height);
     context.drawImage(this.canvas, 0, 0);
+    return true;
   }
 
   private paintActiveTransaction(activeTransactionId: string | null): void {
@@ -203,6 +226,12 @@ export class ComparisonCanvasView {
     policyFilter: ComparisonPolicyFilter,
   ): Promise<ComparisonCanvasRenderStatus> {
     this.desiredTransactionId = activeTransactionId;
+    if (
+      (this.baseComparison !== null && this.baseComparison !== comparison) ||
+      (this.pendingComparison !== null && this.pendingComparison !== comparison)
+    ) {
+      this.releaseBaseBacking();
+    }
     const currentPolicyPaintKey = policyPaintKey(policySide, policyFilter);
     if (this.baseMatches(comparison, selectedRegion, currentPolicyPaintKey)) {
       this.paintActiveTransaction(activeTransactionId);
@@ -241,12 +270,38 @@ export class ComparisonCanvasView {
         );
         if (this.controller !== controller) return "superseded";
         this.geometry = result.geometry;
-        this.captureBase();
-        this.baseComparison = comparison;
-        this.baseRegion = selectedRegion;
-        this.basePolicyPaintKey = currentPolicyPaintKey;
+        const retainedBase = this.captureBase();
+        this.baseComparison = retainedBase ? comparison : null;
+        this.baseRegion = retainedBase ? selectedRegion : null;
+        this.basePolicyPaintKey = retainedBase ? currentPolicyPaintKey : null;
         this.canvas.dataset.renderedRegion = selectedRegion;
-        this.paintActiveTransaction(this.desiredTransactionId);
+        if (retainedBase) {
+          this.paintActiveTransaction(this.desiredTransactionId);
+        } else {
+          const context = this.canvas.getContext("2d");
+          if (context === null) {
+            throw new Error("Canvas 2D rendering is unavailable");
+          }
+          context.setTransform(
+            result.geometry.pixelRatio,
+            0,
+            0,
+            result.geometry.pixelRatio,
+            0,
+            0,
+          );
+          paintActiveComparisonTransaction(
+            context,
+            result.geometry.layout,
+            this.desiredTransactionId,
+          );
+          this.paintedTransactionId = this.desiredTransactionId;
+          if (this.desiredTransactionId === null) {
+            delete this.canvas.dataset.renderedTransaction;
+          } else {
+            this.canvas.dataset.renderedTransaction = this.desiredTransactionId;
+          }
+        }
         return "rendered";
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError")

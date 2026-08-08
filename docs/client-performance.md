@@ -93,6 +93,10 @@ displays. The node terrain may retain one additional current base at the same
 pixel cap so transaction-only selection restores the existing composition and
 paints one local focus marker without replaying every transaction. That base
 has a nominal 16 MiB RGBA ceiling and is discarded with the terrain layout.
+The comparison terrain uses the same 4,194,304-pixel, nominal 16 MiB retained
+base ceiling for transaction-only selection. It falls back to a progressive
+repaint above that cap and releases the backing store when its publication is
+invalidated or replaced.
 
 The memory API depends on Chrome's Performance Manager, which is not present in
 headless Chromium. The performance matrix therefore uses a normal Chromium
