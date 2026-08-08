@@ -5,11 +5,12 @@ import {
   comparisonPaintBatches,
   createComparisonLayout,
   hitTestComparison,
+  paintComparison,
   resolveComparisonGeometry,
 } from "./comparison-layout";
 import { compareCurrentSnapshots } from "./comparison-model";
 import { loadedSource } from "./comparison-test-fixtures";
-import { mempoolTransaction } from "./test-fixtures";
+import { mempoolTransaction, txid } from "./test-fixtures";
 
 const source = (sourceId: string, values: number[]) =>
   loadedSource(
@@ -133,5 +134,44 @@ describe("comparison layout", () => {
         .filter(({ kind }) => kind === "witness")
         .reduce((count, { start, end }) => count + end - start, 0),
     ).toBe(comparison.totals.common_count);
+  });
+
+  it("paints unfiltered witness variants without materializing comparison entries", () => {
+    const comparison = compareCurrentSnapshots(
+      loadedSource("left", [mempoolTransaction(1)]),
+      loadedSource("right", [mempoolTransaction(1, { wtxid: txid(2) })]),
+    );
+    const layout = createComparisonLayout(comparison, 900, 500);
+    const common = layout.regions.find(({ key }) => key === "common");
+    if (common === undefined) throw new Error("missing common region");
+    let entryReads = 0;
+    common.entries = new Proxy(common.entries, {
+      get(target, property, receiver) {
+        if (
+          typeof property === "string" &&
+          /^(0|[1-9][0-9]*)$/.test(property)
+        ) {
+          entryReads += 1;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const noOp = () => undefined;
+    const context = {
+      beginPath: noOp,
+      clearRect: noOp,
+      fill: noOp,
+      fillRect: noOp,
+      fillText: noOp,
+      rect: noOp,
+      stroke: noOp,
+      strokeRect: noOp,
+    } as unknown as CanvasRenderingContext2D;
+
+    paintComparison(context, layout, comparison, "common", "left", {
+      kind: "all",
+    });
+
+    expect(entryReads).toBe(0);
   });
 });

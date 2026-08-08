@@ -398,6 +398,16 @@ const paintComparisonBatch = (
   context.globalAlpha = 1;
   context.strokeStyle = "#e1aa4b";
   context.lineWidth = 1;
+  if (policyFilter.kind === "all") {
+    for (let index = batch.start; index < batch.end; index += 1) {
+      if (region.differingWitnessBits?.[index] === 1) {
+        const rect = glyphRect(region, index);
+        context.rect(rect.x, rect.y, rect.width, rect.height);
+      }
+    }
+    context.stroke();
+    return;
+  }
   const effectiveSide = policySideForRegion(region.key, policySide);
   for (let index = batch.start; index < batch.end; index += 1) {
     if (region.differingWitnessBits?.[index] !== 1) {
@@ -408,7 +418,6 @@ const paintComparisonBatch = (
       entry === undefined ? null : sourceEntry(entry, effectiveSide);
     if (
       region.key === selectedRegion &&
-      policyFilter.kind !== "all" &&
       (transaction === null ||
         !comparisonPolicyFilterMatches(transaction, policyFilter))
     ) {
