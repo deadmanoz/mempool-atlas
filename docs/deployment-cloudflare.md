@@ -140,9 +140,11 @@ Cloudflare.
 | `/api/v2/sources/*/transactions/*` | Bypass | `no-store` | Bypass |
 | errors and operational paths | Bypass | `no-store` | Bypass |
 
-Atlas does not send `Cache-Control` for static documents or assets; the
-browser and edge behavior for those two rows comes entirely from these Cache
-Rules. Every API, operational, and error response carries an explicit origin
+Atlas sends `Cache-Control: no-cache` for `/` and `/compare/`, so browsers
+revalidate the entry documents and cannot remain pinned to superseded hashed
+assets after a release. Other static assets do not carry an origin
+`Cache-Control` header; their behavior comes from the narrow asset Cache Rule.
+Every API, operational, and error response carries an explicit origin
 `Cache-Control` header.
 
 For the manifest and stage rules:

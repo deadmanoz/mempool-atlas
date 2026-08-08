@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use axum::body::Body;
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::middleware::map_response;
+use axum::middleware::{Next, from_fn, map_response};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -21,6 +21,7 @@ const MANIFEST_CACHE_CONTROL: &str = "public, no-cache, must-revalidate";
 // that URL is never reused for different bytes. One year matches the immutable
 // static-asset convention; must-revalidate resumes validator checks after it.
 const STAGE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable, must-revalidate";
+const DOCUMENT_CACHE_CONTROL: &str = "no-cache";
 const NO_STORE: &str = "no-store";
 const X_ATLAS_CONTENT_ID: &str = "x-atlas-content-id";
 const X_ATLAS_UNCOMPRESSED_LENGTH: &str = "x-atlas-uncompressed-length";
@@ -28,7 +29,7 @@ const X_ATLAS_UNCOMPRESSED_LENGTH: &str = "x-atlas-uncompressed-length";
 pub fn router(registry: SourceRegistry, web_root: PathBuf) -> Router {
     let static_files = Router::new()
         .fallback_service(ServeDir::new(web_root).append_index_html_on_directories(true))
-        .layer(map_response(static_fallback_cache_policy));
+        .layer(from_fn(static_fallback_cache_policy));
     Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(readiness))
@@ -64,11 +65,23 @@ async fn default_cache_policy<B>(mut response: Response<B>) -> Response<B> {
     response
 }
 
-/// The static service also answers unknown API paths, so its failures are part
-/// of the API surface and are `no-store`. Asset and document responses it does
-/// serve keep their existing caching behavior, which the edge configures.
-async fn static_fallback_cache_policy<B>(response: Response<B>) -> Response<B> {
+/// HTML entry documents always revalidate so a release cannot leave a browser
+/// pointing at superseded hashed assets. The static service also answers
+/// unknown API paths, so its failures are part of the API surface and are
+/// `no-store`. Other successful assets keep the edge-managed cache behavior.
+async fn static_fallback_cache_policy(request: Request, next: Next) -> Response {
+    let is_document = matches!(
+        request.uri().path(),
+        "/" | "/index.html" | "/compare/" | "/compare/index.html"
+    );
+    let mut response = next.run(request).await;
     if response.status().is_success() || response.status() == StatusCode::NOT_MODIFIED {
+        if is_document {
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static(DOCUMENT_CACHE_CONTROL),
+            );
+        }
         return response;
     }
     default_cache_policy(response).await
@@ -767,9 +780,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_documents_keep_their_existing_cache_behavior() {
-        let (status, policy) = cache_control(application(runtime()), "/").await;
+    async fn static_documents_always_revalidate_without_changing_asset_policy() {
+        for path in ["/", "/index.html", "/compare/", "/compare/index.html"] {
+            let (status, policy) = cache_control(application(runtime()), path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(policy.as_deref(), Some("no-cache"), "{path}");
+        }
 
+        let (status, policy) = cache_control(application(runtime()), "/package.json").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(policy, None);
     }
