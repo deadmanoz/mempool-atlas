@@ -75,13 +75,18 @@ policy that membership uses:
 3. Resolve confirmed prevout scripts with `gettxout(txid, vout, false)`.
 4. Evaluate a candidate only after every required script is present or has a
    genuine terminal result.
-5. Run each independent classifier against the same bounded fact set.
+5. Move terminal candidates through sequential `spawn_blocking` chunks bounded
+   by transaction count and actual serialized bytes, then run each independent
+   classifier against the same bounded fact set.
 6. Publish completed results in revisioned batches.
 
 A verified candidate remains pending across fact-wave boundaries, so bounded
 work does not repeatedly fetch the same transaction. Positive confirmed
 scripts may be reused under bounded eviction. Nulls, failures, and departed
-transactions are not cached as facts.
+transactions are not cached as facts. `src/classification/evaluation.rs` owns
+the CPU scheduling boundary: it keeps classifier scans away from Tokio's async
+workers, preserves deterministic witness-identifier order, and rejects every
+chunk result after its membership generation has been superseded.
 
 Collection state is kept separate from classifier evidence. Unscheduled work,
 capacity deferral, transport errors, malformed responses, and absent JSON-RPC

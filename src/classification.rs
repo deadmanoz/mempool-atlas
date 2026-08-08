@@ -20,6 +20,7 @@ use thiserror::Error;
 use tracing::warn;
 
 mod conflict_facts;
+mod evaluation;
 
 #[cfg(test)]
 pub(crate) use conflict_facts::CONFLICT_FACT_TRANSACTION_OVERHEAD_BYTES;
@@ -439,7 +440,15 @@ impl ClassificationPipeline {
                 advance.capacity_deferred += capacity_deferred;
             }
 
-            advance.classifications.extend(current.classify_ready());
+            if !self
+                .classify_ready_bounded(&mut current, &generation, &mut advance.classifications)
+                .await?
+            {
+                return Ok(ClassificationSliceReport::stale_after(
+                    generation.id,
+                    &advance,
+                ));
+            }
             current.activate_waiting(&generation, self.resolver_limits);
 
             let mut fact_waves_paused = advance.batch_failures > 0
@@ -546,7 +555,15 @@ impl ClassificationPipeline {
                 }
             }
 
-            advance.classifications.extend(current.classify_ready());
+            if !self
+                .classify_ready_bounded(&mut current, &generation, &mut advance.classifications)
+                .await?
+            {
+                return Ok(ClassificationSliceReport::stale_after(
+                    generation.id,
+                    &advance,
+                ));
+            }
             if !current.has_pending_script_capacity(self.resolver_limits)
                 && current.defer_one_capacity_blocked_fact()
             {
@@ -555,7 +572,7 @@ impl ClassificationPipeline {
             advance.deferred_candidates += current.defer_exhausted_candidates();
             if !self
                 .resolve_capacity_pressure(&mut current, &generation, &mut advance)
-                .await
+                .await?
             {
                 return Ok(ClassificationSliceReport::stale_after(
                     generation.id,
@@ -745,10 +762,10 @@ impl ClassificationPipeline {
         pending: &mut PendingSlice,
         generation: &Arc<ClassificationGeneration>,
         advance: &mut ClassificationAdvance,
-    ) -> bool {
+    ) -> Result<bool, ClassificationError> {
         loop {
             if !self.is_current_generation(generation) {
-                return false;
+                return Ok(false);
             }
             let classified_before = advance.classifications.len();
             {
@@ -758,7 +775,7 @@ impl ClassificationPipeline {
                     .as_ref()
                     .is_none_or(|candidate| !Arc::ptr_eq(candidate, generation))
                 {
-                    return false;
+                    return Ok(false);
                 }
                 let work = generation.work();
                 let (resolved, capacity_deferred) = pending.hydrate_from_caches(
@@ -777,9 +794,14 @@ impl ClassificationPipeline {
             );
             advance.facts_resolved += resolved;
             advance.capacity_deferred += capacity_deferred;
-            advance.classifications.extend(pending.classify_ready());
+            if !self
+                .classify_ready_bounded(pending, generation, &mut advance.classifications)
+                .await?
+            {
+                return Ok(false);
+            }
             if advance.classifications.len() == classified_before {
-                return true;
+                return Ok(true);
             }
             tokio::task::yield_now().await;
         }
@@ -795,20 +817,23 @@ impl ClassificationPipeline {
         pending: &mut PendingSlice,
         generation: &Arc<ClassificationGeneration>,
         advance: &mut ClassificationAdvance,
-    ) -> bool {
+    ) -> Result<bool, ClassificationError> {
         let mut deferred_once = false;
         loop {
-            if !self.recover_known_facts(pending, generation, advance).await {
-                return false;
+            if !self
+                .recover_known_facts(pending, generation, advance)
+                .await?
+            {
+                return Ok(false);
             }
             let transient_fact_survives = pending
                 .has_transient_capacity_blocked_fact(&advance.outputs, &advance.confirmed_scripts);
             if deferred_once && !transient_fact_survives {
-                return true;
+                return Ok(true);
             }
             let deferred = pending.defer_capacity_blocked_candidate();
             if deferred == 0 {
-                return true;
+                return Ok(true);
             }
             advance.deferred_candidates += deferred;
             deferred_once = true;
@@ -1298,6 +1323,8 @@ pub enum ClassificationError {
     InvalidMembershipTxid(String),
     #[error("classification generation counter overflowed")]
     GenerationOverflow,
+    #[error("classification evaluation task failed: {0}")]
+    EvaluationTask(#[source] tokio::task::JoinError),
 }
 
 #[derive(Clone, Debug)]
@@ -1615,10 +1642,11 @@ enum FactState {
     ExplicitlyMissing,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct PendingSlice {
     queued: VecDeque<PreparedCandidate>,
     active: BTreeMap<String, PendingCandidate>,
+    ready: VecDeque<PendingCandidate>,
     fair_order: VecDeque<String>,
     facts: BTreeMap<OutPoint, FactState>,
     deferred_facts: BTreeSet<OutPoint>,
@@ -1650,6 +1678,7 @@ impl PendingSlice {
         let mut pending = Self {
             queued,
             active: BTreeMap::new(),
+            ready: VecDeque::new(),
             fair_order: VecDeque::new(),
             facts: BTreeMap::new(),
             deferred_facts: BTreeSet::new(),
@@ -1661,11 +1690,14 @@ impl PendingSlice {
     }
 
     fn candidate_count(&self) -> usize {
-        self.active.len().saturating_add(self.queued.len())
+        self.active
+            .len()
+            .saturating_add(self.ready.len())
+            .saturating_add(self.queued.len())
     }
 
     fn is_empty(&self) -> bool {
-        self.active.is_empty() && self.queued.is_empty()
+        self.active.is_empty() && self.ready.is_empty() && self.queued.is_empty()
     }
 
     fn activate_waiting(&mut self, generation: &ClassificationGeneration, limits: ResolverLimits) {
@@ -2221,90 +2253,6 @@ impl PendingSlice {
             .retain(|candidate_key| candidate_key != &doomed);
         self.drop_unreferenced_facts();
         1
-    }
-
-    fn classify_ready(&mut self) -> Vec<CachedClassification> {
-        let ready = self
-            .active
-            .iter()
-            .filter_map(|(key, candidate)| {
-                candidate
-                    .required
-                    .iter()
-                    .all(|outpoint| {
-                        matches!(
-                            self.facts.get(outpoint),
-                            Some(FactState::Ready(_) | FactState::ExplicitlyMissing)
-                        )
-                    })
-                    .then_some(key.clone())
-            })
-            .collect::<Vec<_>>();
-        let mut classifications = Vec::with_capacity(ready.len());
-        for key in ready {
-            let candidate = self
-                .active
-                .remove(&key)
-                .expect("ready candidate remains active");
-            let (prevouts, retryable) = if candidate.transaction.is_coinbase() {
-                (PrevoutSet::default(), false)
-            } else {
-                let facts = candidate
-                    .transaction
-                    .input
-                    .iter()
-                    .map(|input| match self.facts.get(&input.previous_output) {
-                        Some(FactState::Ready(script)) => {
-                            Some(PrevoutFacts::new(script.clone(), None))
-                        }
-                        Some(FactState::ExplicitlyMissing) => None,
-                        Some(
-                            FactState::Awaiting { .. }
-                            | FactState::CapacityBlocked(_)
-                            | FactState::OperationallyDeferred,
-                        )
-                        | None => {
-                            unreachable!("only terminal candidates are classified")
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let retryable = facts.iter().any(Option::is_none);
-                (PrevoutSet::from_vec(facts), retryable)
-            };
-            let evidence = evaluate_mempool_policy(&candidate.transaction, &prevouts);
-            let structure = transaction_structure(&candidate.transaction)
-                .expect("structure derivability is verified when raw transactions are admitted");
-            let mut classification = classification_from_evidence(
-                candidate.expected.txid,
-                candidate.expected.wtxid,
-                structure,
-                evidence,
-            );
-            let classifier_output = classify_transaction_with_metrics(
-                &candidate.transaction,
-                &prevouts,
-                &classification.assessment,
-            );
-            let recognized_carried_bytes = classification
-                .structure
-                .op_return_bytes
-                .saturating_add(classifier_output.recognized_non_op_return_bytes);
-            classification.structure = classification
-                .structure
-                .with_recognized_carried_bytes(recognized_carried_bytes)
-                .expect("recognized carriage is bounded by the admitted raw transaction");
-            classification.results = classifier_output.results;
-            classification.input_outpoints = transaction_input_outpoints(&candidate.transaction);
-            classifications.push(CachedClassification {
-                classification: Arc::new(classification),
-                retryable,
-            });
-        }
-        let active = &self.active;
-        self.fair_order
-            .retain(|candidate_key| active.contains_key(candidate_key));
-        self.drop_unreferenced_facts();
-        classifications
     }
 
     fn store_script(&mut self, outpoint: OutPoint, script: ScriptBuf, maximum: usize) -> bool {

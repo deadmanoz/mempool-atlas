@@ -2090,11 +2090,11 @@ async fn assert_multi_victim_transient_fact_is_consumed(source: FactSource) {
                 .insert(transient, transient_script);
         }
     }
-
     assert!(
         pipeline
             .resolve_capacity_pressure(&mut pending, &generation, &mut advance)
             .await
+            .expect("classification evaluation")
     );
     assert_eq!(advance.deferred_candidates, 2);
     assert_eq!(advance.classifications.len(), 1);
