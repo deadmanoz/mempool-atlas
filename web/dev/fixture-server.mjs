@@ -27,6 +27,12 @@ const OMIT_HEADER = process.env.ATLAS_FIXTURE_OMIT_HEADER ?? "";
 const REPEAT_HEADER = process.env.ATLAS_FIXTURE_REPEAT_HEADER ?? "";
 const FIXTURE_DETAIL_STATUS_TEXT =
   process.env.ATLAS_FIXTURE_DETAIL_STATUS ?? "200";
+const FIXTURE_STAGE_FAULT_COUNT_TEXT =
+  process.env.ATLAS_FIXTURE_STAGE_FAULT_COUNT ?? "0";
+const FIXTURE_STAGE_FAULT_PHASE =
+  process.env.ATLAS_FIXTURE_STAGE_FAULT_PHASE ?? "initial";
+const FIXTURE_STAGE_FAULT_STATUS_TEXT =
+  process.env.ATLAS_FIXTURE_STAGE_FAULT_STATUS ?? "409";
 
 if (!/^(0|[1-9][0-9]{0,4})$/.test(FIXTURE_PORT_TEXT)) {
   writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_PORT\n");
@@ -41,6 +47,18 @@ if (!/^(200|404|503)$/.test(FIXTURE_DETAIL_STATUS_TEXT)) {
   writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_DETAIL_STATUS\n");
   process.exit(2);
 }
+if (!/^[0-4]$/.test(FIXTURE_STAGE_FAULT_COUNT_TEXT)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_STAGE_FAULT_COUNT\n");
+  process.exit(2);
+}
+if (!/^(initial|conditional)$/.test(FIXTURE_STAGE_FAULT_PHASE)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_STAGE_FAULT_PHASE\n");
+  process.exit(2);
+}
+if (!/^(404|409)$/.test(FIXTURE_STAGE_FAULT_STATUS_TEXT)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_STAGE_FAULT_STATUS\n");
+  process.exit(2);
+}
 if (!/^(|cache-control|cf-cache-status|vary)$/.test(OMIT_HEADER)) {
   writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_OMIT_HEADER\n");
   process.exit(2);
@@ -50,6 +68,8 @@ if (!/^(|cache-control|vary)$/.test(REPEAT_HEADER)) {
   process.exit(2);
 }
 const FIXTURE_DETAIL_STATUS = Number(FIXTURE_DETAIL_STATUS_TEXT);
+let fixtureStageFaultsRemaining = Number(FIXTURE_STAGE_FAULT_COUNT_TEXT);
+const FIXTURE_STAGE_FAULT_STATUS = Number(FIXTURE_STAGE_FAULT_STATUS_TEXT);
 
 const failFixtureLoad = () => {
   writeSync(process.stderr.fd, `${FIXTURE_ERROR}\n`);
@@ -243,6 +263,8 @@ const errorBodies = Object.freeze({
 });
 const transactionDetailPath =
   /^\/api\/v2\/sources\/[^/]+\/transactions\/([0-9a-f]{64})$/;
+const manifestPath = /^\/api\/v2\/sources\/[^/]+\/mempool$/;
+const stagePath = /^\/api\/v2\/sources\/[^/]+\/mempool\/stages\//;
 
 const cloudflareHeaders = (cacheStatus) =>
   EMULATE_CLOUDFLARE_HEADERS
@@ -339,6 +361,33 @@ const server = createServer((request, response) => {
       status === 400 ? errorBodies.invalidStage : errorBodies.notFound,
     );
     return;
+  }
+  const isConditional = request.headers["if-none-match"] !== undefined;
+  if (
+    fixtureStageFaultsRemaining > 0 &&
+    stagePath.test(url.pathname) &&
+    (FIXTURE_STAGE_FAULT_PHASE === "conditional") === isConditional
+  ) {
+    fixtureStageFaultsRemaining -= 1;
+    console.log(
+      `fixture injected ${FIXTURE_STAGE_FAULT_STATUS} ${FIXTURE_STAGE_FAULT_PHASE} stage response`,
+    );
+    send(
+      request,
+      response,
+      FIXTURE_STAGE_FAULT_STATUS,
+      FIXTURE_STAGE_FAULT_STATUS === 409
+        ? errorBodies.superseded
+        : errorBodies.notFound,
+    );
+    return;
+  }
+  if (
+    Number(FIXTURE_STAGE_FAULT_COUNT_TEXT) > 0 &&
+    manifestPath.test(url.pathname) &&
+    !isConditional
+  ) {
+    console.log("fixture served publication manifest attempt");
   }
   const bytes = body.bytes;
   const etag = `W/"${body.contentId}"`;

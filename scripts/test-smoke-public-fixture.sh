@@ -23,6 +23,7 @@ fixture_server="$repo_root/web/dev/fixture-server.mjs"
 smoke_script="$repo_root/scripts/smoke-public.sh"
 test_tmp_dir=$(mktemp -d)
 server_pid=
+fixture_server_log=
 
 cleanup() {
     if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
@@ -51,15 +52,22 @@ start_fixture_server() {
     local detail_status=$2
     local omit_header=${3:-}
     local repeat_header=${4:-}
-    local log_path="$test_tmp_dir/server-$cloudflare_headers-$detail_status-${omit_header:-none}-${repeat_header:-none}.log"
+    local stage_fault_count=${5:-0}
+    local stage_fault_phase=${6:-initial}
+    local stage_fault_status=${7:-409}
+    local log_path="$test_tmp_dir/server-$cloudflare_headers-$detail_status-${omit_header:-none}-${repeat_header:-none}-$stage_fault_count-$stage_fault_phase-$stage_fault_status.log"
     local line=
     local attempt=0
 
+    fixture_server_log=$log_path
     ATLAS_FIXTURE_PORT=0 \
         ATLAS_FIXTURE_CLOUDFLARE_HEADERS="$cloudflare_headers" \
         ATLAS_FIXTURE_DETAIL_STATUS="$detail_status" \
         ATLAS_FIXTURE_OMIT_HEADER="$omit_header" \
         ATLAS_FIXTURE_REPEAT_HEADER="$repeat_header" \
+        ATLAS_FIXTURE_STAGE_FAULT_COUNT="$stage_fault_count" \
+        ATLAS_FIXTURE_STAGE_FAULT_PHASE="$stage_fault_phase" \
+        ATLAS_FIXTURE_STAGE_FAULT_STATUS="$stage_fault_status" \
         node "$fixture_server" >"$log_path" 2>&1 &
     server_pid=$!
 
@@ -81,6 +89,49 @@ start_fixture_server() {
         attempt=$((attempt + 1))
     done
     fail "fixture server did not become ready: $(<"$log_path")"
+}
+
+require_fixed_count() {
+    local context=$1
+    local expected=$2
+    local needle=$3
+    local path=$4
+    local actual
+
+    actual=$(grep -F -c "$needle" "$path" || true)
+    [[ "$actual" == "$expected" ]] ||
+        fail "$context: expected $expected occurrences of '$needle', found $actual"
+}
+
+expect_stage_supersession_recovery() {
+    local phase=$1
+    local stdout_path="$test_tmp_dir/stage-supersession-$phase.stdout"
+    local stderr_path="$test_tmp_dir/stage-supersession-$phase.stderr"
+
+    start_fixture_server 0 200 "" "" 1 "$phase" 409
+    ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
+        "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
+        >"$stdout_path" \
+        2>"$stderr_path"
+    grep -F 'public v2-only Cloudflare smoke checks passed' \
+        "$stdout_path" >/dev/null ||
+        fail "smoke script did not recover from $phase stage supersession"
+    require_fixed_count \
+        "$phase stage supersession retry" \
+        1 \
+        'publication changed during smoke verification; restarting with a fresh manifest' \
+        "$stderr_path"
+    require_fixed_count \
+        "$phase stage supersession manifest attempts" \
+        2 \
+        'fixture served publication manifest attempt' \
+        "$fixture_server_log"
+    require_fixed_count \
+        "$phase stage supersession injection" \
+        1 \
+        "fixture injected 409 $phase stage response" \
+        "$fixture_server_log"
+    stop_fixture_server
 }
 
 require_message_once() {
@@ -174,6 +225,65 @@ ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
 grep -F 'public v2-only Cloudflare smoke checks passed' \
     "$test_tmp_dir/no-cloudflare.stdout" >/dev/null ||
     fail "smoke script did not report success without Cloudflare headers"
+stop_fixture_server
+
+# A stage supersession invalidates the entire manifest-derived verification.
+# Exercise both fetch phases and prove that the next attempt starts from a
+# fresh manifest.
+expect_stage_supersession_recovery initial
+expect_stage_supersession_recovery conditional
+
+# A status other than the exact 409 supersession contract is terminal and must
+# not consume the restart budget.
+start_fixture_server 0 200 "" "" 1 initial 404
+if ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
+    "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
+    >"$test_tmp_dir/stage-failure-404.stdout" \
+    2>"$test_tmp_dir/stage-failure-404.stderr"; then
+    fail "smoke script retried an unexpected 404 stage response"
+fi
+grep -F 'stage request returned unexpected status 404:' \
+    "$test_tmp_dir/stage-failure-404.stderr" >/dev/null ||
+    fail "smoke script did not report the terminal 404 stage response"
+require_fixed_count \
+    "terminal stage failure retries" \
+    0 \
+    'publication changed during smoke verification; restarting with a fresh manifest' \
+    "$test_tmp_dir/stage-failure-404.stderr"
+require_fixed_count \
+    "terminal stage failure manifest attempts" \
+    1 \
+    'fixture served publication manifest attempt' \
+    "$fixture_server_log"
+stop_fixture_server
+
+# Match the browser's one initial attempt plus three restarts. A fourth
+# supersession terminates cleanly instead of looping forever.
+start_fixture_server 0 200 "" "" 4 initial 409
+if ATLAS_SMOKE_DETAIL_TXID="$detail_txid" \
+    "$smoke_script" --local-fixture "$fixture_base_url" "$source_id" \
+    >"$test_tmp_dir/stage-supersession-exhausted.stdout" \
+    2>"$test_tmp_dir/stage-supersession-exhausted.stderr"; then
+    fail "smoke script exceeded its bounded publication restart budget"
+fi
+grep -F 'publication changed during all 4 smoke verification attempts' \
+    "$test_tmp_dir/stage-supersession-exhausted.stderr" >/dev/null ||
+    fail "smoke script did not report publication restart exhaustion"
+require_fixed_count \
+    "exhausted publication restarts" \
+    3 \
+    'publication changed during smoke verification; restarting with a fresh manifest' \
+    "$test_tmp_dir/stage-supersession-exhausted.stderr"
+require_fixed_count \
+    "exhausted publication manifest attempts" \
+    4 \
+    'fixture served publication manifest attempt' \
+    "$fixture_server_log"
+require_fixed_count \
+    "exhausted stage supersessions" \
+    4 \
+    'fixture injected 409 initial stage response' \
+    "$fixture_server_log"
 stop_fixture_server
 
 # Multiple Vary fields are one ordered comma-list for token matching.
