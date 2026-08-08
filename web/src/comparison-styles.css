@@ -38,6 +38,11 @@
   margin: 0 0 0.65rem;
 }
 
+.comparison-transaction-detail {
+  padding: 0.8rem 0.85rem 0.85rem;
+  border-top: 1px solid var(--border);
+}
+
 .comparison-controls-heading,
 .comparison-transaction-panel-heading {
   display: flex;
@@ -562,6 +567,7 @@
 }
 
 .comparison-stage {
+  position: relative;
   height: min(62vh, 690px);
   min-height: 520px;
   padding: 0.3rem;
@@ -572,11 +578,25 @@
   min-block-size: 43rem;
 }
 
-.comparison-stage canvas {
+.comparison-canvas-stack {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.comparison-canvas-stack canvas {
   display: block;
   width: 100%;
   height: 100%;
   cursor: crosshair;
+}
+
+.comparison-stage .comparison-selection-marker {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #f5fbff;
+  box-shadow: 0 0 6px rgba(245, 251, 255, 0.75);
+  pointer-events: none;
 }
 
 .comparison-transaction-navigator {
@@ -805,26 +825,19 @@
 
 .comparison-detail {
   display: grid;
-  gap: 0.55rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
 }
 
 .comparison-detail-identity {
   display: grid;
+  grid-column: 1 / -1;
   gap: 0.4rem;
-}
-
-.comparison-detail-identity > code,
-.comparison-detail-source > code {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 0.58rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .comparison-detail-identity > .transaction-explorer-link,
 .comparison-detail > .transaction-explorer-link {
-  font-size: 0.58rem;
+  font-size: 0.68rem;
 }
 
 .variant-warning {
@@ -839,8 +852,10 @@
 
 .comparison-detail-source {
   display: grid;
-  gap: 0.45rem;
-  padding: 0.55rem;
+  align-content: start;
+  gap: 0.7rem;
+  min-width: 0;
+  padding: 0.75rem;
   border: 1px solid var(--border);
   background: #09151d;
 }
@@ -854,14 +869,18 @@
 
 .comparison-detail-source > div:first-child span {
   color: var(--faint);
-  font-size: 0.57rem;
+  font-size: 0.62rem;
 }
 
 .comparison-detail-source > p {
   margin: 0;
   color: var(--muted);
-  font-size: 0.64rem;
+  font-size: 0.7rem;
   line-height: 1.45;
+}
+
+.comparison-detail-source .detail-transaction {
+  margin-bottom: 0;
 }
 
 .comparison-detail-assessment {
@@ -875,6 +894,10 @@
    distribution-styles.css so every page receives them. */
 
 @media (max-width: 900px) {
+  .comparison-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .comparison-header .comparison-heading-copy {
     grid-column: 1 / -1;
     grid-row: 2;
@@ -1117,11 +1140,4 @@
     flex: 1 1 0;
     min-width: 0;
   }
-}
-
-.comparison-detail-facts {
-  margin: 0.3rem 0 0;
-  color: var(--muted);
-  font-size: 0.66rem;
-  line-height: 1.5;
 }

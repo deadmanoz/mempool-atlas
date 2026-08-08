@@ -553,6 +553,7 @@ test.describe("comparison page", () => {
     const navigator = page.locator("#comparison-transaction-listbox");
     const navigatorTxid = page.locator("#comparison-navigator-txid");
     const canvas = page.locator("#comparison-canvas");
+    const selection = page.locator("#comparison-selection");
 
     await navigator.focus();
     const initialTxid = (await navigatorTxid.textContent()) ?? "";
@@ -564,6 +565,8 @@ test.describe("comparison page", () => {
       "data-rendered-transaction",
       selectedTxid,
     );
+    await expect(selection).toBeVisible();
+    const firstMarkerPosition = await selection.getAttribute("style");
     await expect
       .poll(() => new URL(page.url()).searchParams.get("txid"))
       .toBe(selectedTxid);
@@ -579,6 +582,39 @@ test.describe("comparison page", () => {
     await expect(page.locator("#comparison-detail-status")).not.toHaveText(
       "Select a transaction",
     );
+    const transactionPanel = page.locator(".comparison-transaction-panel");
+    await expect(transactionPanel.locator("#comparison-detail")).toHaveCount(1);
+    await expect(
+      page.locator(".comparison-inspector #comparison-detail"),
+    ).toHaveCount(0);
+    const sourceDetails = transactionPanel.locator(
+      ".comparison-detail-source .detail-transaction",
+    );
+    await expect(sourceDetails).toHaveCount(2);
+    for (const label of [
+      "wtxid",
+      "Weight",
+      "Ancestors",
+      "Descendants",
+      "Replaceable",
+      "Shape",
+      "Output value",
+      "Witness",
+    ]) {
+      await expect(sourceDetails.first()).toContainText(label);
+    }
+
+    await page.keyboard.press("ArrowRight");
+    await expect(navigatorTxid).not.toHaveText(selectedTxid);
+    const adjacentTxid = (await navigatorTxid.textContent()) ?? "";
+    await expect(canvas).toHaveAttribute(
+      "data-rendered-transaction",
+      adjacentTxid,
+    );
+    await expect(selection).toBeVisible();
+    await expect
+      .poll(() => selection.getAttribute("style"))
+      .not.toBe(firstMarkerPosition);
   });
 
   test("scrolls the policy matrix inside its own container", async ({

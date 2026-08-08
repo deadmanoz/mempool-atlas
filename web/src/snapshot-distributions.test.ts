@@ -219,7 +219,7 @@ describe("buildSnapshotDistributionModel", () => {
       input("vsize", rightPopulation),
     );
 
-    expect(comparison.common[0]?.same_wtxid).toBe(false);
+    expect(comparison.common[0]?.witness_relation).toBe("different");
     expect(leftModel.totals.population.vsize).toBe(120);
     expect(rightModel.totals.population.vsize).toBe(300);
     expect(leftModel.totals.carrier).toEqual({ count: 1, vsize: 120 });

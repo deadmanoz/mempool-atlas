@@ -343,7 +343,7 @@ describe("PackedPublicationStore", () => {
     const common = comparison.common[0];
     expect(common).toMatchObject({
       txid: "00".repeat(32),
-      same_wtxid: true,
+      witness_relation: "same",
       left: { vsize: 1 },
       right: { vsize: 1 },
     });
@@ -471,7 +471,7 @@ describe("PackedPrimaryPublicationStore", () => {
     expect(comparison.common).toHaveLength(2);
     expect(comparison.common[0]).toMatchObject({
       txid: "00".repeat(32),
-      same_wtxid: null,
+      witness_relation: "loading",
       left: { vsize: 1 },
       right: { vsize: 1 },
     });

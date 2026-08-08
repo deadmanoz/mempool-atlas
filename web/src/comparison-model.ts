@@ -17,6 +17,8 @@ import type {
 export type ComparisonSide = "left" | "right";
 export type ComparisonRegionKey = "common" | "left_only" | "right_only";
 export type ComparisonPolicyStatus = Bip110Status | "unclassified";
+export type ComparisonWitnessRelation =
+  "one_sided" | "loading" | "same" | "different";
 
 export interface LoadedSourceSnapshot {
   source: LoadedSourcePublication["source"];
@@ -27,8 +29,23 @@ export interface ComparedTransaction {
   txid: string;
   left: MempoolTransaction | null;
   right: MempoolTransaction | null;
-  same_wtxid: boolean | null;
+  witness_relation: ComparisonWitnessRelation;
 }
+
+export const comparisonWitnessVariantDescription = (
+  relation: ComparisonWitnessRelation,
+): string => {
+  switch (relation) {
+    case "one_sided":
+      return "Observed in one snapshot";
+    case "loading":
+      return "Witness variants are still loading";
+    case "same":
+      return "Same witness variant";
+    case "different":
+      return "Different witness variants";
+  }
+};
 
 export interface ComparisonTransactionLookup {
   region: ComparisonRegionKey;
@@ -120,10 +137,14 @@ const comparedEntry = (
   txid: left?.txid ?? right?.txid ?? "",
   left,
   right,
-  same_wtxid:
-    left === null || right === null || !membershipReady
-      ? null
-      : left.wtxid === right.wtxid,
+  witness_relation:
+    left === null || right === null
+      ? "one_sided"
+      : !membershipReady
+        ? "loading"
+        : left.wtxid === right.wtxid
+          ? "same"
+          : "different",
 });
 
 const isArrayIndex = (property: PropertyKey): number | null => {

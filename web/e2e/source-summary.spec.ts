@@ -1693,25 +1693,15 @@ test.describe("policy terrain raster", () => {
       '{"fixture":true}',
     );
     await waitForRendering(page);
-    const highlightedPixels = await canvas.evaluate((element) => {
-      const context = (element as HTMLCanvasElement).getContext("2d");
-      if (context === null) throw new Error("terrain canvas has no 2D context");
-      const pixels = context.getImageData(
-        0,
-        0,
-        context.canvas.width,
-        context.canvas.height,
-      ).data;
-      let count = 0;
-      for (let index = 0; index < pixels.length; index += 4) {
-        const red = pixels[index] ?? 0;
-        const green = pixels[index + 1] ?? 0;
-        const blue = pixels[index + 2] ?? 0;
-        if (red >= 220 && green >= 220 && blue <= 180) count += 1;
-      }
-      return count;
-    });
-    expect(highlightedPixels).toBeGreaterThan(0);
+    const marker = page.locator("#terrain-selection");
+    await expect(marker).toBeVisible();
+    await expect(marker).toHaveAttribute("style", /left: .*top:/);
+    await expect(page.locator(".terrain-selection-marker")).toHaveCount(2);
+    await expect(
+      page.locator(".terrain-selection-marker:not([hidden])"),
+    ).toHaveCount(1);
+
+    await expect(selectedRule).toHaveAttribute("aria-pressed", "true");
   });
 
   test("matches direct selected-region stroke pixels", async ({

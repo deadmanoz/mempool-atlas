@@ -34,6 +34,7 @@ interface ClassificationQueryElements {
   root: HTMLElement;
   stage: HTMLElement;
   canvas: HTMLCanvasElement;
+  selectionMarker: HTMLElement;
   regions: HTMLElement;
   summary: HTMLElement;
   empty: HTMLElement;
@@ -163,13 +164,17 @@ export const createClassificationQueryView = (
   elements: ClassificationQueryElements,
   onSelectTransaction: (transaction: MempoolTransaction) => void,
 ): ClassificationQueryView => {
-  const selectionView = new TerrainSelectionView(elements.canvas);
+  const selectionView = new TerrainSelectionView(
+    elements.canvas,
+    elements.selectionMarker,
+  );
   let input: ClassificationQueryRenderInput | null = null;
   let population: ClassifierLabelQueryPopulation | null = null;
   let layout: QueryLayout | null = null;
   let populationKey: string | null = null;
   let layoutKey: string | null = null;
   let frame: number | null = null;
+  let pendingClick: { x: number; y: number } | null = null;
   let keyboardIndex = 0;
 
   const focusedTxid = (): string | null =>
@@ -254,10 +259,16 @@ export const createClassificationQueryView = (
         rasterStyleKey: `classification-query:${input.descriptor.id}`,
       },
       layout,
-      focusedTxid(),
+      null,
     );
     selectionView.capture(layout);
+    paintSelection(focusedTxid());
     renderRegions(layout);
+    if (pendingClick !== null) {
+      const click = pendingClick;
+      pendingClick = null;
+      selectTransactionAt(click.x, click.y);
+    }
   };
 
   const schedule = (): void => {
@@ -272,6 +283,7 @@ export const createClassificationQueryView = (
     populationKey = null;
     layoutKey = null;
     keyboardIndex = 0;
+    pendingClick = null;
     selectionView.reset();
     elements.stage.hidden = true;
     elements.hint.hidden = true;
@@ -354,14 +366,9 @@ export const createClassificationQueryView = (
     updateActiveOption();
   };
 
-  elements.stage.addEventListener("click", (event) => {
+  const selectTransactionAt = (x: number, y: number): void => {
     if (layout === null || population === null) return;
-    const bounds = elements.canvas.getBoundingClientRect();
-    const hit = hitTestBucketTerrain(
-      layout,
-      event.clientX - bounds.left,
-      event.clientY - bounds.top,
-    );
+    const hit = hitTestBucketTerrain(layout, x, y);
     if (hit?.kind !== "transaction") return;
     const index = population.transactions.findIndex(
       ({ txid }) => txid === hit.glyph.txid,
@@ -371,6 +378,19 @@ export const createClassificationQueryView = (
     updateActiveOption();
     const transaction = population.transactions[index];
     if (transaction !== undefined) onSelectTransaction(transaction);
+  };
+
+  elements.stage.addEventListener("click", (event) => {
+    const bounds = elements.canvas.getBoundingClientRect();
+    const click = {
+      x: event.clientX - bounds.left,
+      y: event.clientY - bounds.top,
+    };
+    if (layout === null) {
+      pendingClick = click;
+      return;
+    }
+    selectTransactionAt(click.x, click.y);
   });
 
   elements.stage.addEventListener("pointermove", (event) => {

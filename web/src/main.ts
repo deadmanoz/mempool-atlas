@@ -181,6 +181,9 @@ const classificationQueryStage = requiredElement<HTMLElement>(
 const classificationQueryCanvas = requiredElement<HTMLCanvasElement>(
   "classification-query-canvas",
 );
+const classificationQuerySelection = requiredElement<HTMLElement>(
+  "classification-query-selection",
+);
 const classificationQueryRegions = requiredElement<HTMLElement>(
   "classification-query-regions",
 );
@@ -219,7 +222,11 @@ const classificationProgress = requiredElement<HTMLElement>(
 const terrainSummaryView = createTerrainSummaryView();
 const terrainStage = requiredElement<HTMLElement>("terrain-stage");
 const terrainCanvas = requiredElement<HTMLCanvasElement>("terrain-canvas");
-const terrainSelectionView = new TerrainSelectionView(terrainCanvas);
+const terrainSelection = requiredElement<HTMLElement>("terrain-selection");
+const terrainSelectionView = new TerrainSelectionView(
+  terrainCanvas,
+  terrainSelection,
+);
 const terrainRegions = requiredElement<HTMLElement>("terrain-regions");
 const terrainEmpty = requiredElement<HTMLElement>("terrain-empty");
 const modeCount = requiredElement<HTMLButtonElement>("mode-count");
@@ -444,6 +451,7 @@ const classificationQueryView = createClassificationQueryView(
     root: classificationQueryRoot,
     stage: classificationQueryStage,
     canvas: classificationQueryCanvas,
+    selectionMarker: classificationQuerySelection,
     regions: classificationQueryRegions,
     summary: classificationQuerySummary,
     empty: classificationQueryEmpty,
@@ -570,9 +578,7 @@ const clearDetail = (
   detailStatus.textContent = message;
   detailTransaction.replaceChildren();
   detailRules.replaceChildren();
-  if (selectedLens === "overview") {
-    classificationQueryView.paintSelection(null);
-  }
+  paintCurrentTerrainSelection();
 };
 
 const compactJson = (value: unknown[]): string => {

@@ -246,6 +246,16 @@
             <small>0 vB</small>
           </button>
         </section>
+        <section
+          class="comparison-transaction-detail detail-section"
+          aria-labelledby="comparison-detail-heading"
+        >
+          <div class="section-heading">
+            <h3 id="comparison-detail-heading">Selected transaction</h3>
+            <span id="comparison-detail-status">Select a transaction</span>
+          </div>
+          <div id="comparison-detail" class="comparison-detail"></div>
+        </section>
       </section>
 
       <section
@@ -359,12 +369,20 @@
             Choose two sources with complete snapshots.
           </p>
           <div id="comparison-stage" class="comparison-stage" hidden>
-            <canvas
-              id="comparison-canvas"
-              tabindex="0"
-              role="img"
-              aria-describedby="comparison-visual-summary comparison-navigator-instructions"
-            ></canvas>
+            <div class="comparison-canvas-stack">
+              <canvas
+                id="comparison-canvas"
+                tabindex="0"
+                role="img"
+                aria-describedby="comparison-visual-summary comparison-navigator-instructions"
+              ></canvas>
+              <div
+                id="comparison-selection"
+                class="comparison-selection-marker"
+                aria-hidden="true"
+                hidden
+              ></div>
+            </div>
           </div>
           <div
             id="comparison-transaction-navigator"
@@ -426,17 +444,6 @@
             Presence and absence describe these two sampled mempools only. They
             do not establish why the memberships differ.
           </p>
-
-          <section
-            class="detail-section"
-            aria-labelledby="comparison-detail-heading"
-          >
-            <div class="section-heading">
-              <h3 id="comparison-detail-heading">Selected transaction</h3>
-              <span id="comparison-detail-status">Select a transaction</span>
-            </div>
-            <div id="comparison-detail" class="comparison-detail"></div>
-          </section>
         </aside>
       </div>
 

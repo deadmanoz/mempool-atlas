@@ -23,13 +23,6 @@ const replacementComparison = compareCurrentSnapshots(
   loadedSource("right", [mempoolTransaction(4), mempoolTransaction(5)]),
 );
 
-const retainedBase = (view: ComparisonCanvasView): HTMLCanvasElement =>
-  (
-    view as unknown as {
-      baseCanvas: HTMLCanvasElement;
-    }
-  ).baseCanvas;
-
 describe("ComparisonCanvasView", () => {
   const context = {
     beginPath: vi.fn(),
@@ -70,28 +63,32 @@ describe("ComparisonCanvasView", () => {
     vi.restoreAllMocks();
   });
 
-  it("reuses the population base for transaction-only transitions and repaints explicit policy focus", async () => {
+  it("moves one selection marker without repainting the population", async () => {
     const canvas = document.createElement("canvas");
+    const marker = document.createElement("div");
+    marker.hidden = true;
     canvas.getBoundingClientRect = () =>
       ({ width: 900, height: 500 }) as DOMRect;
-    const view = new ComparisonCanvasView(canvas);
+    const view = new ComparisonCanvasView(canvas, marker);
 
     await view.render(comparison, "common", null, "left", { kind: "all" });
     const populationRects = vi.mocked(context.rect).mock.calls.length;
-    const baseCopies = vi.mocked(context.drawImage).mock.calls.length;
 
     await view.render(comparison, "common", txid(2), "left", { kind: "all" });
     expect(vi.mocked(context.rect).mock.calls).toHaveLength(populationRects);
-    expect(vi.mocked(context.drawImage).mock.calls).toHaveLength(
-      baseCopies + 1,
-    );
+    expect(context.drawImage).not.toHaveBeenCalled();
+    expect(marker.hidden).toBe(false);
+    const firstLeft = marker.style.left;
     expect(canvas.dataset.renderedTransaction).toBe(txid(2));
 
     await view.render(comparison, "common", txid(2), "left", { kind: "all" });
     expect(vi.mocked(context.rect).mock.calls).toHaveLength(populationRects);
-    expect(vi.mocked(context.drawImage).mock.calls).toHaveLength(
-      baseCopies + 1,
-    );
+
+    await view.render(comparison, "common", txid(3), "left", { kind: "all" });
+    expect(vi.mocked(context.rect).mock.calls).toHaveLength(populationRects);
+    expect(marker.hidden).toBe(false);
+    expect(marker.style.left).not.toBe(firstLeft);
+    expect(canvas.dataset.renderedTransaction).toBe(txid(3));
 
     await view.render(comparison, "common", txid(2), "left", {
       kind: "status",
@@ -115,42 +112,66 @@ describe("ComparisonCanvasView", () => {
       kind: "status",
       status: "compatible",
     });
+    expect(marker.hidden).toBe(true);
     expect(canvas.dataset.renderedTransaction).toBeUndefined();
 
-    expect(retainedBase(view).width).toBe(canvas.width);
-    expect(retainedBase(view).height).toBe(canvas.height);
     view.commitCandidate(view.prepareCandidate(replacementComparison));
-    expect(retainedBase(view).width).toBe(0);
-    expect(retainedBase(view).height).toBe(0);
+    expect(marker.hidden).toBe(true);
     await view.render(replacementComparison, "common", null, "left", {
       kind: "all",
     });
-    expect(retainedBase(view).width).toBe(canvas.width);
-    expect(retainedBase(view).height).toBe(canvas.height);
     view.invalidate();
-    expect(retainedBase(view).width).toBe(0);
-    expect(retainedBase(view).height).toBe(0);
+    expect(marker.hidden).toBe(true);
   });
 
-  it("falls back to a full selection repaint above the retained canvas cap", async () => {
+  it("does not repaint a large population when selection changes", async () => {
     const canvas = document.createElement("canvas");
+    const marker = document.createElement("div");
     canvas.getBoundingClientRect = () =>
       ({ width: 4_097, height: 1_024 }) as DOMRect;
-    const view = new ComparisonCanvasView(canvas);
+    const view = new ComparisonCanvasView(canvas, marker);
 
     await view.render(comparison, "common", null, "left", { kind: "all" });
     const populationRects = vi.mocked(context.rect).mock.calls.length;
     expect(canvas.width * canvas.height).toBeGreaterThan(4_194_304);
-    expect(retainedBase(view).width).toBe(0);
-    expect(retainedBase(view).height).toBe(0);
 
     await view.render(comparison, "common", txid(2), "left", { kind: "all" });
-    expect(vi.mocked(context.rect).mock.calls.length).toBeGreaterThan(
-      populationRects,
-    );
+    expect(vi.mocked(context.rect).mock.calls).toHaveLength(populationRects);
+    expect(marker.hidden).toBe(false);
     expect(canvas.dataset.renderedTransaction).toBe(txid(2));
-    expect(retainedBase(view).width).toBe(0);
-    expect(retainedBase(view).height).toBe(0);
+  });
+
+  it("shows a selection while the population is still painting", async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.mocked(window.requestAnimationFrame).mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const canvas = document.createElement("canvas");
+    const marker = document.createElement("div");
+    marker.hidden = true;
+    canvas.getBoundingClientRect = () =>
+      ({ width: 900, height: 500 }) as DOMRect;
+    const view = new ComparisonCanvasView(canvas, marker);
+    view.commitCandidate(view.prepareCandidate(comparison));
+
+    const populationRender = view.render(comparison, "common", null, "left", {
+      kind: "all",
+    });
+    const selectionRender = view.render(comparison, "common", txid(2), "left", {
+      kind: "all",
+    });
+
+    expect(marker.hidden).toBe(false);
+    expect(canvas.dataset.renderedTransaction).toBe(txid(2));
+    while (frames.length > 0) {
+      frames.shift()?.(performance.now());
+      await Promise.resolve();
+    }
+    await expect(populationRender).resolves.toBe("rendered");
+    await expect(selectionRender).resolves.toBe("rendered");
+    expect(marker.hidden).toBe(false);
+    expect(canvas.dataset.renderedTransaction).toBe(txid(2));
   });
 
   it("reports an aborted population render as superseded", async () => {
@@ -160,9 +181,10 @@ describe("ComparisonCanvasView", () => {
       return frames.length;
     });
     const canvas = document.createElement("canvas");
+    const marker = document.createElement("div");
     canvas.getBoundingClientRect = () =>
       ({ width: 900, height: 500 }) as DOMRect;
-    const view = new ComparisonCanvasView(canvas);
+    const view = new ComparisonCanvasView(canvas, marker);
 
     const stale = view.render(comparison, "common", null, "left", {
       kind: "all",

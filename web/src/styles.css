@@ -923,8 +923,21 @@ h3 {
   cursor: pointer;
 }
 
+.terrain-selection-marker {
+  position: absolute;
+  z-index: 1;
+  box-sizing: border-box;
+  border: 1px solid #fff;
+  background: #f7ff6a;
+  box-shadow:
+    0 0 8px rgba(247, 255, 106, 0.95),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.95);
+  pointer-events: none;
+}
+
 .terrain-regions {
   position: absolute;
+  z-index: 2;
   inset: 0;
   overflow: hidden;
   pointer-events: none;

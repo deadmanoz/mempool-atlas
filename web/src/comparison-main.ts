@@ -54,6 +54,7 @@ import {
 import { renderPrimaryComparisonPublication } from "./comparison-primary-publication";
 import { createComparisonSamplingView } from "./comparison-sampling-view";
 import {
+  comparisonWitnessVariantDescription,
   comparisonRegionEntries,
   lookupComparisonTransaction,
   policySideForRegion,
@@ -76,8 +77,11 @@ import {
   percentageFormat,
 } from "./format";
 import { createSourceCardView, setAtlasLoadPhase } from "./source-summary-view";
-import { transactionFactSummary } from "./transaction-facts";
-import { createMempoolSpaceTransactionLink } from "./transaction-explorer";
+import { transactionFactPairs } from "./transaction-facts";
+import {
+  createMempoolSpaceTransactionLink,
+  createTransactionDetailValue,
+} from "./transaction-explorer";
 import {
   TERRAIN_RULES,
   signatureLabel,
@@ -145,6 +149,9 @@ const regionControls = requiredElement<HTMLElement>("comparison-regions");
 const comparisonStage = requiredElement<HTMLElement>("comparison-stage");
 const comparisonCanvas =
   requiredElement<HTMLCanvasElement>("comparison-canvas");
+const comparisonSelection = requiredElement<HTMLElement>(
+  "comparison-selection",
+);
 const comparisonEmpty = requiredElement<HTMLElement>("comparison-empty");
 const visualSummary = requiredElement<HTMLElement>("comparison-visual-summary");
 const unionCount = requiredElement<HTMLElement>("union-count");
@@ -544,12 +551,9 @@ const renderTransactionNavigator = (): void => {
   navigatorSummary.textContent = `${regionLabel(current, selectedRegion)} · transaction ${countFormat.format(keyboardTransactionIndex + 1)} of ${countFormat.format(entries.length)}`;
   navigatorTxid.textContent = entry.txid;
   navigatorTxid.title = entry.txid;
-  navigatorVariant.textContent =
-    entry.same_wtxid === false
-      ? "Different witness variants"
-      : entry.same_wtxid === true
-        ? "Same witness variant"
-        : "Observed in one snapshot";
+  navigatorVariant.textContent = comparisonWitnessVariantDescription(
+    entry.witness_relation,
+  );
   activeTransactionOption.setAttribute(
     "aria-posinset",
     String(keyboardTransactionIndex + 1),
@@ -565,7 +569,10 @@ const renderTransactionNavigator = (): void => {
   );
 };
 
-const comparisonCanvasView = new ComparisonCanvasView(comparisonCanvas);
+const comparisonCanvasView = new ComparisonCanvasView(
+  comparisonCanvas,
+  comparisonSelection,
+);
 
 const scheduleCanvasRender = () =>
   comparison === null || comparisonStage.hidden
@@ -1031,13 +1038,14 @@ const renderDetailOutcome = (
   heading.append(name, membership);
   panel.append(heading);
   if (transaction !== null) {
-    const variant = document.createElement("code");
-    variant.textContent = `wtxid ${transaction.wtxid}`;
-    variant.title = transaction.wtxid;
-    panel.append(variant);
-    const facts = document.createElement("p");
-    facts.className = "comparison-detail-facts";
-    facts.textContent = transactionFactSummary(transaction);
+    const facts = document.createElement("div");
+    facts.className = "detail-transaction comparison-detail-facts";
+    facts.append(
+      createTransactionDetailValue("wtxid", transaction.wtxid),
+      ...transactionFactPairs(transaction).map(([label, value]) =>
+        createTransactionDetailValue(label, value),
+      ),
+    );
     panel.append(facts);
   }
   if (outcome.state === "absent") {
@@ -1158,7 +1166,7 @@ const loadSelectedTransactionDetail = async (
   const identity = document.createElement("div");
   identity.className = "comparison-detail-identity";
   identity.append(createMempoolSpaceTransactionLink(entry.txid));
-  if (entry.same_wtxid === false) {
+  if (entry.witness_relation === "different") {
     const warning = document.createElement("p");
     warning.className = "variant-warning";
     warning.textContent =

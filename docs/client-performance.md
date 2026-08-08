@@ -89,14 +89,11 @@ from the 40,000,000-byte and 60 MiB complete-model ceilings.
 Canvas backing stores are outside the V8 heap and worker-inclusive measurements.
 Each retained specialist raster is therefore capped at 4,194,304 pixels; the
 dim/highlight pair has a nominal 32 MiB RGBA ceiling even on high-density large
-displays. The node terrain may retain one additional current base at the same
-pixel cap so transaction-only selection restores the existing composition and
-paints one local focus marker without replaying every transaction. That base
-has a nominal 16 MiB RGBA ceiling and is discarded with the terrain layout.
-The comparison terrain uses the same 4,194,304-pixel, nominal 16 MiB retained
-base ceiling for transaction-only selection. It falls back to a progressive
-repaint above that cap and releases the backing store when its publication is
-invalidated or replaced.
+displays. Transaction focus in both the node and comparison terrains is one
+positioned DOM marker above the population canvas. Selection changes move or
+hide that marker without copying, clearing, or repainting the population
+raster. No additional full-canvas selection backing is retained, including on
+high-density large displays.
 
 The memory API depends on Chrome's Performance Manager, which is not present in
 headless Chromium. The performance matrix therefore uses a normal Chromium

@@ -1,48 +1,40 @@
-import {
-  paintBucketTerrainSelection,
-  type BucketTerrainLayout,
-} from "./bucket-terrain";
-import { MAX_RETAINED_CANVAS_PIXELS } from "./canvas-backing";
+import type { BucketTerrainLayout } from "./bucket-terrain";
 
 /**
- * Preserve the last complete terrain paint so a transaction-only selection
- * can move its highlight without clearing and replaying the full population.
+ * Position transaction focus above the population. Selection never touches,
+ * copies, or replays the dense terrain bitmap.
  */
 export class TerrainSelectionView {
-  private readonly baseCanvas = document.createElement("canvas");
   private baseLayout: object | null = null;
 
-  constructor(private readonly canvas: HTMLCanvasElement) {}
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly selectionMarker: HTMLElement,
+  ) {}
+
+  private clear(): void {
+    this.selectionMarker.hidden = true;
+    this.selectionMarker.style.removeProperty("left");
+    this.selectionMarker.style.removeProperty("top");
+    this.selectionMarker.style.removeProperty("width");
+    this.selectionMarker.style.removeProperty("height");
+  }
 
   reset(): void {
     this.baseLayout = null;
-    this.baseCanvas.width = 0;
-    this.baseCanvas.height = 0;
+    this.clear();
   }
 
   capture<SectionKey extends string, RegionKey extends string, Signature>(
     layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
   ): boolean {
-    if (
-      this.canvas.width * this.canvas.height > MAX_RETAINED_CANVAS_PIXELS ||
-      this.canvas.width < 1 ||
-      this.canvas.height < 1
-    ) {
+    const bounds = this.canvas.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) {
       this.reset();
       return false;
     }
-    this.reset();
-    this.baseCanvas.width = this.canvas.width;
-    this.baseCanvas.height = this.canvas.height;
-    const context = this.baseCanvas.getContext("2d");
-    if (context === null) {
-      this.reset();
-      return false;
-    }
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.globalAlpha = 1;
-    context.drawImage(this.canvas, 0, 0);
     this.baseLayout = layout;
+    this.clear();
     return true;
   }
 
@@ -52,29 +44,24 @@ export class TerrainSelectionView {
   ): boolean {
     if (
       this.baseLayout !== layout ||
-      this.baseCanvas.width !== this.canvas.width ||
-      this.baseCanvas.height !== this.canvas.height
+      this.canvas.getBoundingClientRect().width <= 0 ||
+      this.canvas.getBoundingClientRect().height <= 0
     ) {
       return false;
     }
-    const context = this.canvas.getContext("2d");
-    if (context === null) return false;
-    context.save();
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.globalAlpha = 1;
-    context.drawImage(this.baseCanvas, 0, 0);
-    context.restore();
-    context.setTransform(
-      this.canvas.width / layout.width,
-      0,
-      0,
-      this.canvas.height / layout.height,
-      0,
-      0,
-    );
-    if (selectedTxid !== null) {
-      paintBucketTerrainSelection(context, layout, selectedTxid);
+    const glyph =
+      selectedTxid === null
+        ? undefined
+        : layout.glyphs.find(({ txid }) => txid === selectedTxid);
+    if (glyph === undefined) {
+      this.clear();
+      return true;
     }
+    this.selectionMarker.style.left = `${(glyph.rect.x / layout.width) * 100}%`;
+    this.selectionMarker.style.top = `${(glyph.rect.y / layout.height) * 100}%`;
+    this.selectionMarker.style.width = `${(glyph.rect.width / layout.width) * 100}%`;
+    this.selectionMarker.style.height = `${(glyph.rect.height / layout.height) * 100}%`;
+    this.selectionMarker.hidden = false;
     return true;
   }
 }

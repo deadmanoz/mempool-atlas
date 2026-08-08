@@ -429,23 +429,29 @@ const paintComparisonBatch = (
   context.stroke();
 };
 
+export const comparisonTransactionRect = (
+  layout: ComparisonLayout,
+  activeTransactionId: string | null,
+): ComparisonRect | null => {
+  if (activeTransactionId === null) return null;
+  for (const region of layout.regions) {
+    const index = entryIndex(region.entries, activeTransactionId);
+    if (index !== null) return glyphRect(region, index);
+  }
+  return null;
+};
+
 export const paintActiveComparisonTransaction = (
   context: CanvasRenderingContext2D,
   layout: ComparisonLayout,
   activeTransactionId: string | null,
 ): void => {
   context.globalAlpha = 1;
-  if (activeTransactionId !== null) {
-    for (const region of layout.regions) {
-      const index = entryIndex(region.entries, activeTransactionId);
-      if (index === null) continue;
-      const rect = glyphRect(region, index);
-      context.strokeStyle = "#f5fbff";
-      context.lineWidth = 2;
-      context.strokeRect(rect.x, rect.y, rect.width, rect.height);
-      break;
-    }
-  }
+  const rect = comparisonTransactionRect(layout, activeTransactionId);
+  if (rect === null) return;
+  context.strokeStyle = "#f5fbff";
+  context.lineWidth = 2;
+  context.strokeRect(rect.x, rect.y, rect.width, rect.height);
 };
 
 export const paintComparison = (

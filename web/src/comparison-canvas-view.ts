@@ -1,14 +1,10 @@
 import {
-  paintActiveComparisonTransaction,
+  comparisonTransactionRect,
   resolveComparisonGeometry,
   renderComparisonCanvasProgressively,
   type ComparisonGeometry,
   type ComparisonLayout,
 } from "./comparison-layout";
-import {
-  MAX_RETAINED_CANVAS_PIXELS,
-  prepareCanvasBacking,
-} from "./canvas-backing";
 import type {
   ComparisonPolicyFilter,
   ComparisonRegionKey,
@@ -68,7 +64,6 @@ const policyPaintKey = (
 export class ComparisonCanvasView {
   private geometry: ComparisonGeometry | null = null;
   private controller: AbortController | null = null;
-  private readonly baseCanvas = document.createElement("canvas");
   private baseComparison: CurrentComparison | null = null;
   private baseRegion: ComparisonRegionKey | null = null;
   private basePolicyPaintKey: string | null = null;
@@ -79,15 +74,21 @@ export class ComparisonCanvasView {
   private pendingRegion: ComparisonRegionKey | null = null;
   private pendingPolicyPaintKey: string | null = null;
 
-  constructor(private readonly canvas: HTMLCanvasElement) {}
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly selectionMarker: HTMLElement,
+  ) {}
 
   get layout(): ComparisonLayout | null {
     return this.geometry?.layout ?? null;
   }
 
-  private releaseBaseBacking(): void {
-    this.baseCanvas.width = 0;
-    this.baseCanvas.height = 0;
+  private clearSelection(): void {
+    this.selectionMarker.hidden = true;
+    this.selectionMarker.style.removeProperty("left");
+    this.selectionMarker.style.removeProperty("top");
+    this.selectionMarker.style.removeProperty("width");
+    this.selectionMarker.style.removeProperty("height");
   }
 
   invalidate(): void {
@@ -103,7 +104,7 @@ export class ComparisonCanvasView {
     this.basePolicyPaintKey = null;
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
-    this.releaseBaseBacking();
+    this.clearSelection();
     delete this.canvas.dataset.renderedRegion;
     delete this.canvas.dataset.renderedTransaction;
   }
@@ -144,7 +145,7 @@ export class ComparisonCanvasView {
     this.basePolicyPaintKey = null;
     this.paintedTransactionId = null;
     this.desiredTransactionId = null;
-    this.releaseBaseBacking();
+    this.clearSelection();
     delete this.canvas.dataset.renderedRegion;
     delete this.canvas.dataset.renderedTransaction;
   }
@@ -161,34 +162,8 @@ export class ComparisonCanvasView {
       this.basePolicyPaintKey === currentPolicyPaintKey &&
       this.geometry?.width === width &&
       this.geometry.height === height &&
-      this.geometry.pixelRatio === pixelRatio &&
-      this.baseCanvas.width === this.canvas.width &&
-      this.baseCanvas.height === this.canvas.height
+      this.geometry.pixelRatio === pixelRatio
     );
-  }
-
-  private captureBase(): boolean {
-    if (
-      this.canvas.width < 1 ||
-      this.canvas.height < 1 ||
-      this.canvas.width * this.canvas.height > MAX_RETAINED_CANVAS_PIXELS
-    ) {
-      this.releaseBaseBacking();
-      return false;
-    }
-    this.releaseBaseBacking();
-    this.baseCanvas.width = this.canvas.width;
-    this.baseCanvas.height = this.canvas.height;
-    const context = this.baseCanvas.getContext("2d");
-    if (context === null) {
-      this.releaseBaseBacking();
-      return false;
-    }
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.globalAlpha = 1;
-    context.clearRect(0, 0, this.baseCanvas.width, this.baseCanvas.height);
-    context.drawImage(this.canvas, 0, 0);
-    return true;
   }
 
   private paintActiveTransaction(activeTransactionId: string | null): void {
@@ -198,22 +173,20 @@ export class ComparisonCanvasView {
     ) {
       return;
     }
-    const { context } = prepareCanvasBacking(this.canvas, "whole-pixel");
-    context.save();
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.globalAlpha = 1;
-    context.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    context.drawImage(this.baseCanvas, 0, 0);
-    context.restore();
-    paintActiveComparisonTransaction(
-      context,
+    const rect = comparisonTransactionRect(
       this.geometry.layout,
       activeTransactionId,
     );
     this.paintedTransactionId = activeTransactionId;
-    if (activeTransactionId === null) {
+    if (activeTransactionId === null || rect === null) {
+      this.clearSelection();
       delete this.canvas.dataset.renderedTransaction;
     } else {
+      this.selectionMarker.style.left = `${(rect.x / this.geometry.layout.width) * 100}%`;
+      this.selectionMarker.style.top = `${(rect.y / this.geometry.layout.height) * 100}%`;
+      this.selectionMarker.style.width = `${(rect.width / this.geometry.layout.width) * 100}%`;
+      this.selectionMarker.style.height = `${(rect.height / this.geometry.layout.height) * 100}%`;
+      this.selectionMarker.hidden = false;
       this.canvas.dataset.renderedTransaction = activeTransactionId;
     }
   }
@@ -226,17 +199,15 @@ export class ComparisonCanvasView {
     policyFilter: ComparisonPolicyFilter,
   ): Promise<ComparisonCanvasRenderStatus> {
     this.desiredTransactionId = activeTransactionId;
-    if (
-      (this.baseComparison !== null && this.baseComparison !== comparison) ||
-      (this.pendingComparison !== null && this.pendingComparison !== comparison)
-    ) {
-      this.releaseBaseBacking();
-    }
     const currentPolicyPaintKey = policyPaintKey(policySide, policyFilter);
     if (this.baseMatches(comparison, selectedRegion, currentPolicyPaintKey)) {
       this.paintActiveTransaction(activeTransactionId);
       return Promise.resolve("rendered");
     }
+    this.paintedTransactionId = null;
+    this.clearSelection();
+    delete this.canvas.dataset.renderedTransaction;
+    this.paintActiveTransaction(activeTransactionId);
     if (
       this.pendingBase !== null &&
       this.pendingComparison === comparison &&
@@ -270,38 +241,11 @@ export class ComparisonCanvasView {
         );
         if (this.controller !== controller) return "superseded";
         this.geometry = result.geometry;
-        const retainedBase = this.captureBase();
-        this.baseComparison = retainedBase ? comparison : null;
-        this.baseRegion = retainedBase ? selectedRegion : null;
-        this.basePolicyPaintKey = retainedBase ? currentPolicyPaintKey : null;
+        this.baseComparison = comparison;
+        this.baseRegion = selectedRegion;
+        this.basePolicyPaintKey = currentPolicyPaintKey;
         this.canvas.dataset.renderedRegion = selectedRegion;
-        if (retainedBase) {
-          this.paintActiveTransaction(this.desiredTransactionId);
-        } else {
-          const context = this.canvas.getContext("2d");
-          if (context === null) {
-            throw new Error("Canvas 2D rendering is unavailable");
-          }
-          context.setTransform(
-            result.geometry.pixelRatio,
-            0,
-            0,
-            result.geometry.pixelRatio,
-            0,
-            0,
-          );
-          paintActiveComparisonTransaction(
-            context,
-            result.geometry.layout,
-            this.desiredTransactionId,
-          );
-          this.paintedTransactionId = this.desiredTransactionId;
-          if (this.desiredTransactionId === null) {
-            delete this.canvas.dataset.renderedTransaction;
-          } else {
-            this.canvas.dataset.renderedTransaction = this.desiredTransactionId;
-          }
-        }
+        this.paintActiveTransaction(this.desiredTransactionId);
         return "rendered";
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError")

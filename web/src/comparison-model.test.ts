@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  comparisonWitnessVariantDescription,
   comparisonPolicyFilterMatches,
   compareCurrentSnapshots,
   lookupComparisonTransaction,
@@ -143,7 +144,7 @@ describe("compareCurrentSnapshots", () => {
     expect(comparison.common).toHaveLength(1);
     expect(comparison.common[0]).toMatchObject({
       txid: txid(1),
-      same_wtxid: false,
+      witness_relation: "different",
       left: { wtxid: txid(10), vsize: 100 },
       right: { wtxid: txid(11), vsize: 120 },
     });
@@ -152,23 +153,56 @@ describe("compareCurrentSnapshots", () => {
     expect(comparison.totals.common_right_vsize).toBe(120);
   });
 
-  it("defers witness-variant comparison until membership is ready", () => {
+  it("distinguishes loading, one-sided, same, and differing witness states", () => {
     const comparison = compareCurrentSnapshots(
       loadedSource(
         "core",
-        [transaction(1, 100, null, txid(10))],
+        [
+          transaction(1, 100, null, txid(10)),
+          transaction(2, 100, null, txid(20)),
+          transaction(3, 100, null, txid(30)),
+        ],
         1_700_000_001_000,
       ),
       loadedSource(
         "knots",
-        [transaction(1, 120, null, txid(11))],
+        [
+          transaction(1, 120, null, txid(11)),
+          transaction(2, 120, null, txid(20)),
+        ],
         1_700_000_001_000,
       ),
       false,
     );
 
-    expect(comparison.common[0]?.same_wtxid).toBeNull();
-    expect(comparison.common_differing_wtxids).toEqual(Uint8Array.of(0));
+    expect(comparison.common[0]?.witness_relation).toBe("loading");
+    expect(
+      comparisonWitnessVariantDescription(
+        comparison.common[0]?.witness_relation ?? "one_sided",
+      ),
+    ).toBe("Witness variants are still loading");
+    expect(comparison.left_only[0]?.witness_relation).toBe("one_sided");
+    expect(
+      comparisonWitnessVariantDescription(
+        comparison.left_only[0]?.witness_relation ?? "loading",
+      ),
+    ).toBe("Observed in one snapshot");
+    expect(comparison.common_differing_wtxids).toEqual(Uint8Array.of(0, 0));
+
+    const ready = compareCurrentSnapshots(comparison.left, comparison.right);
+    expect(ready.common[0]?.witness_relation).toBe("different");
+    expect(
+      comparisonWitnessVariantDescription(
+        ready.common[0]?.witness_relation ?? "loading",
+      ),
+    ).toBe("Different witness variants");
+    expect(ready.common[1]?.witness_relation).toBe("same");
+    expect(
+      comparisonWitnessVariantDescription(
+        ready.common[1]?.witness_relation ?? "loading",
+      ),
+    ).toBe("Same witness variant");
+    expect(ready.common_differing_wtxids).toEqual(Uint8Array.of(1, 0));
   });
 
   it("looks up source-local entries across every sorted membership region", () => {
@@ -215,7 +249,7 @@ describe("compareCurrentSnapshots", () => {
     ).toMatchObject({
       left: { vsize: 300 },
       right: { vsize: 440 },
-      same_wtxid: true,
+      witness_relation: "same",
     });
     expect(lookupComparisonTransaction(comparison, txid(5))).toBeNull();
     expect(lookupComparisonTransaction(comparison, txid(0))).toBeNull();
@@ -232,7 +266,7 @@ describe("compareCurrentSnapshots", () => {
         txid: txid(index),
         left: null,
         right: null,
-        same_wtxid: null,
+        witness_relation: "one_sided",
       }),
     );
     let indexedReads = 0;
