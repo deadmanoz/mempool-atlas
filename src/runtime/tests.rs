@@ -17,6 +17,7 @@ use crate::{
     ClassificationLimits,
 };
 
+mod conflict_facts;
 mod staged_publication;
 
 #[derive(Debug)]
@@ -369,6 +370,7 @@ fn compatible_observation(txid: String, observed_at_ms: u64) -> MempoolObservati
                 missing: Vec::new(),
             })
             .collect(),
+        input_outpoints: None,
     });
     MempoolObservation::materialize(
         &snapshot_for(txid.clone(), observed_at_ms),
@@ -403,6 +405,7 @@ fn indeterminate_observation(txid: String, observed_at_ms: u64) -> MempoolObserv
                 missing: vec![crate::bip110::Missing::ScriptPubKey { input: 0 }],
             })
             .collect(),
+        input_outpoints: None,
     });
     MempoolObservation::materialize(
         &snapshot_for(txid.clone(), observed_at_ms),

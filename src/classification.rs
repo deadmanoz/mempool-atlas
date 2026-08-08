@@ -19,6 +19,14 @@ use serde_json::json;
 use thiserror::Error;
 use tracing::warn;
 
+mod conflict_facts;
+
+#[cfg(test)]
+pub(crate) use conflict_facts::CONFLICT_FACT_TRANSACTION_OVERHEAD_BYTES;
+pub(crate) use conflict_facts::MAX_CONFLICT_FACT_BYTES;
+use conflict_facts::retain_within_budget as retain_conflict_facts_within_budget;
+use conflict_facts::{retain_new_classifications, transaction_input_outpoints};
+
 use crate::classification_rpc::{
     ClassificationRpcClient, ClassificationRpcError, ClassificationRpcOutcome,
 };
@@ -64,6 +72,7 @@ pub struct ClassificationLimits {
     max_transactions_per_slice: usize,
     rpc_lanes: usize,
     max_auxiliary_cache_bytes: usize,
+    max_conflict_fact_bytes: usize,
 }
 
 impl ClassificationLimits {
@@ -85,11 +94,18 @@ impl ClassificationLimits {
             max_transactions_per_slice,
             rpc_lanes,
             max_auxiliary_cache_bytes,
+            max_conflict_fact_bytes: MAX_CONFLICT_FACT_BYTES,
         })
     }
 
     fn prevout_rpc_lanes(self) -> usize {
         self.rpc_lanes.div_ceil(2)
+    }
+
+    #[cfg(test)]
+    fn with_conflict_fact_bytes(mut self, maximum: usize) -> Self {
+        self.max_conflict_fact_bytes = maximum;
+        self
     }
 }
 
@@ -210,6 +226,12 @@ impl ClassificationPipeline {
                     if let Some(cached) = previous_work.classifications.get(&entry.wtxid)
                         && cached.classification.txid == entry.txid
                     {
+                        let mut cached = cached.clone();
+                        retain_conflict_facts_within_budget(
+                            &mut work,
+                            &mut cached,
+                            self.limits.max_conflict_fact_bytes,
+                        );
                         work.classifications
                             .insert(entry.wtxid.clone(), cached.clone());
                         classifications
@@ -574,10 +596,11 @@ impl ClassificationPipeline {
                         .confirmed_cache
                         .insert(*outpoint, script.clone(), reserved_bytes);
                 }
-                for cached in &advance.classifications {
-                    work.classifications
-                        .insert(cached.classification.wtxid.clone(), cached.clone());
-                }
+                retain_new_classifications(
+                    &mut work,
+                    &mut advance.classifications,
+                    self.limits.max_conflict_fact_bytes,
+                );
                 if !advance.classifications.is_empty() {
                     work.revision = work
                         .revision
@@ -1384,6 +1407,8 @@ struct ClassificationWork {
     raw_retry_used: BTreeSet<String>,
     pending: Option<PendingSlice>,
     output_cache_bytes: usize,
+    conflict_fact_bytes: usize,
+    conflict_fact_capacity_exhausted: bool,
     revision: u64,
 }
 
@@ -2269,6 +2294,7 @@ impl PendingSlice {
                 .with_recognized_carried_bytes(recognized_carried_bytes)
                 .expect("recognized carriage is bounded by the admitted raw transaction");
             classification.results = classifier_output.results;
+            classification.input_outpoints = transaction_input_outpoints(&candidate.transaction);
             classifications.push(CachedClassification {
                 classification: Arc::new(classification),
                 retryable,
@@ -2602,6 +2628,7 @@ fn classification_from_evidence(
             unknown_rules,
         },
         rules,
+        input_outpoints: None,
     }
 }
 

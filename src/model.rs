@@ -1,3 +1,4 @@
+use bitcoin::OutPoint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -921,6 +922,11 @@ pub struct TransactionClassification {
     pub results: Vec<ClassificationResult>,
     pub assessment: Bip110Assessment,
     pub rules: Vec<Bip110RuleDetail>,
+    /// Exact input outpoints retained only for publication-bound, lazy
+    /// conflicting-spend verification. They never enter the ordinary snapshot
+    /// or transaction-detail JSON contracts.
+    #[serde(skip)]
+    pub(crate) input_outpoints: Option<Arc<[OutPoint]>>,
 }
 
 pub type TransactionClassifications = BTreeMap<String, Arc<TransactionClassification>>;
@@ -1049,6 +1055,20 @@ impl MempoolObservation {
 }
 
 fn validate_classification(classification: &TransactionClassification) -> Result<(), ModelError> {
+    if let Some(outpoints) = &classification.input_outpoints {
+        if u64::try_from(outpoints.len()).ok() != Some(classification.structure.input_count) {
+            return Err(ModelError::InvalidClassificationDetail {
+                txid: classification.txid.clone(),
+                reason: "retained input outpoints do not match the transaction input count",
+            });
+        }
+        if outpoints.iter().any(OutPoint::is_null) {
+            return Err(ModelError::InvalidClassificationDetail {
+                txid: classification.txid.clone(),
+                reason: "retained input outpoints cannot contain a null outpoint",
+            });
+        }
+    }
     validate_classifier_results(&classification.txid, &classification.results)?;
     let policy = classification
         .results
@@ -1459,7 +1479,49 @@ mod tests {
                     missing: Vec::new(),
                 })
                 .collect(),
+            input_outpoints: None,
         })
+    }
+
+    fn retained_outpoint(marker: &str, vout: u32) -> OutPoint {
+        OutPoint {
+            txid: marker.repeat(32).parse().expect("outpoint txid"),
+            vout,
+        }
+    }
+
+    #[test]
+    fn classification_validates_private_input_outpoint_cardinality() {
+        let mut classification = compatible_classification("00", "10");
+        Arc::make_mut(&mut classification).input_outpoints =
+            Some(vec![retained_outpoint("11", 0), retained_outpoint("22", 1)].into());
+
+        assert!(matches!(
+            validate_classification(&classification),
+            Err(ModelError::InvalidClassificationDetail { reason, .. })
+                if reason.contains("input count")
+        ));
+    }
+
+    #[test]
+    fn classification_rejects_a_private_null_input_outpoint() {
+        let mut classification = compatible_classification("00", "10");
+        Arc::make_mut(&mut classification).input_outpoints = Some(vec![OutPoint::null()].into());
+
+        assert!(matches!(
+            validate_classification(&classification),
+            Err(ModelError::InvalidClassificationDetail { reason, .. })
+                if reason.contains("null outpoint")
+        ));
+    }
+
+    #[test]
+    fn classification_accepts_matching_private_input_outpoints() {
+        let mut classification = compatible_classification("00", "10");
+        Arc::make_mut(&mut classification).input_outpoints =
+            Some(vec![retained_outpoint("33", 7)].into());
+
+        validate_classification(&classification).expect("valid retained outpoints");
     }
 
     #[test]
@@ -1749,6 +1811,7 @@ mod tests {
             results: test_classifier_results(&assessment),
             assessment,
             rules,
+            input_outpoints: None,
         });
 
         assert!(matches!(

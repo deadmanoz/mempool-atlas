@@ -13,7 +13,9 @@ use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 
 use crate::model::SourcesResponse;
-use crate::runtime::{PublicationLookup, SourceRegistry, StageLookup, TransactionLookup};
+use crate::runtime::{
+    ConflictFactLookup, PublicationLookup, SourceRegistry, StageLookup, TransactionLookup,
+};
 use crate::staged_snapshot::StageKind;
 
 const MANIFEST_CACHE_CONTROL: &str = "public, no-cache, must-revalidate";
@@ -42,6 +44,14 @@ pub fn router(registry: SourceRegistry, web_root: PathBuf) -> Router {
         .route(
             "/api/v2/sources/{source_id}/mempool/stages/classifier/{classifier_id}/{stage_id}",
             get(classifier_stage),
+        )
+        .route(
+            "/api/v2/sources/{source_id}/mempool/conflict-fingerprints/{population_id}/{structure_id}",
+            get(conflict_fingerprints),
+        )
+        .route(
+            "/api/v2/sources/{source_id}/mempool/conflict-outpoints/{population_id}/{structure_id}/{txid}",
+            get(conflict_outpoints),
         )
         .route(
             "/api/v2/sources/{source_id}/transactions/{txid}",
@@ -202,13 +212,22 @@ fn cacheable_payload(
     request_headers: &HeaderMap,
     cache_control: &'static str,
 ) -> Response {
+    cacheable_payload_with_type(payload, request_headers, cache_control, "application/json")
+}
+
+fn cacheable_payload_with_type(
+    payload: crate::runtime::PublicationPayload,
+    request_headers: &HeaderMap,
+    cache_control: &'static str,
+    content_type: &'static str,
+) -> Response {
     let not_modified = if_none_match_matches(request_headers, &payload.etag);
     let mut response = if not_modified {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
         (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
+            [(header::CONTENT_TYPE, content_type)],
             Body::from(payload.body),
         )
             .into_response()
@@ -235,6 +254,66 @@ fn cacheable_payload(
             .expect("generated v2 body length is a valid header value"),
     );
     response
+}
+
+async fn conflict_fingerprints(
+    State(registry): State<SourceRegistry>,
+    Path((source_id, population_id, structure_id)): Path<(String, String, String)>,
+    request_headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Result<Response, ApiError> {
+    reject_query(query)?;
+    validate_stage_id(&population_id)?;
+    validate_stage_id(&structure_id)?;
+    let source = registry
+        .get(&source_id)
+        .ok_or_else(|| ApiError::source_not_found(&source_id))?;
+    let lookup = source
+        .conflict_fingerprint_payload(&population_id, &structure_id)
+        .await
+        .map_err(|_| ApiError::conflict_facts_failed())?;
+    conflict_fact_response(lookup, &request_headers)
+}
+
+async fn conflict_outpoints(
+    State(registry): State<SourceRegistry>,
+    Path((source_id, population_id, structure_id, txid)): Path<(String, String, String, String)>,
+    request_headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Result<Response, ApiError> {
+    reject_query(query)?;
+    validate_stage_id(&population_id)?;
+    validate_stage_id(&structure_id)?;
+    let canonical_txid = bitcoin::Txid::from_str(&txid)
+        .map_err(|_| ApiError::invalid_txid(&txid))?
+        .to_string();
+    let source = registry
+        .get(&source_id)
+        .ok_or_else(|| ApiError::source_not_found(&source_id))?;
+    let lookup = source
+        .exact_outpoint_payload(&population_id, &structure_id, &canonical_txid)
+        .await
+        .map_err(|_| ApiError::conflict_facts_failed())?;
+    conflict_fact_response(lookup, &request_headers)
+}
+
+fn conflict_fact_response(
+    lookup: ConflictFactLookup,
+    request_headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    match lookup {
+        ConflictFactLookup::Ready(payload) => Ok(cacheable_payload_with_type(
+            payload,
+            request_headers,
+            STAGE_CACHE_CONTROL,
+            "application/octet-stream",
+        )),
+        ConflictFactLookup::Unavailable => Err(ApiError::v2_unavailable()),
+        ConflictFactLookup::NotTerminal => Err(ApiError::conflict_facts_not_terminal()),
+        ConflictFactLookup::Superseded => Err(ApiError::superseded_conflict_facts()),
+        ConflictFactLookup::NotPresent => Err(ApiError::conflict_transaction_not_present()),
+        ConflictFactLookup::Uncovered => Err(ApiError::conflict_transaction_uncovered()),
+    }
 }
 
 fn reject_query(query: Option<String>) -> Result<(), ApiError> {
@@ -335,6 +414,49 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             message: "requested stage is not part of the current v2 publication".to_owned(),
+            v2_unavailable: false,
+        }
+    }
+
+    fn superseded_conflict_facts() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message:
+                "requested conflict facts do not belong to the current population and structure"
+                    .to_owned(),
+            v2_unavailable: false,
+        }
+    }
+
+    fn conflict_facts_not_terminal() -> Self {
+        Self {
+            status: StatusCode::TOO_EARLY,
+            message: "conflict facts are available only after classification completes or pauses"
+                .to_owned(),
+            v2_unavailable: false,
+        }
+    }
+
+    fn conflict_transaction_not_present() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: "transaction is not in the current conflict-fact population".to_owned(),
+            v2_unavailable: false,
+        }
+    }
+
+    fn conflict_transaction_uncovered() -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: "exact input outpoints were not retained for this transaction".to_owned(),
+            v2_unavailable: false,
+        }
+    }
+
+    fn conflict_facts_failed() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "failed to encode bounded conflict facts".to_owned(),
             v2_unavailable: false,
         }
     }
@@ -528,6 +650,14 @@ mod tests {
     }
 
     fn classified_observation() -> MempoolObservation {
+        classified_observation_for("00".repeat(32), true)
+    }
+
+    fn classified_observation_with_outpoints(retain_outpoints: bool) -> MempoolObservation {
+        classified_observation_for("11".repeat(32), retain_outpoints)
+    }
+
+    fn classified_observation_for(txid: String, retain_outpoints: bool) -> MempoolObservation {
         let assessment = Bip110Assessment {
             status: Bip110Status::Compatible,
             primary_rule: None,
@@ -536,7 +666,7 @@ mod tests {
         };
         let structure = TransactionStructure::new(1, 2, 0, 50_000, 107).expect("structure");
         let mut entry =
-            MempoolEntry::new("00".repeat(32), 141, 1_200, 1_699_999_000_000).expect("entry");
+            MempoolEntry::new(txid.clone(), 141, 1_200, 1_699_999_000_000).expect("entry");
         let results = crate::model::test_classifier_results(&assessment);
         entry.classifications = results
             .iter()
@@ -557,8 +687,8 @@ mod tests {
         .expect("snapshot");
         let classification = Arc::new(TransactionClassification {
             structure,
-            txid: "00".repeat(32),
-            wtxid: "00".repeat(32),
+            txid: txid.clone(),
+            wtxid: txid.clone(),
             results,
             assessment,
             rules: Bip110RuleId::ALL
@@ -573,12 +703,16 @@ mod tests {
                     missing: Vec::new(),
                 })
                 .collect(),
+            input_outpoints: retain_outpoints.then(|| {
+                vec![bitcoin::OutPoint {
+                    txid: "77".repeat(32).parse().expect("outpoint txid"),
+                    vout: 3,
+                }]
+                .into()
+            }),
         });
-        MempoolObservation::new(
-            snapshot,
-            BTreeMap::from([("00".repeat(32), classification)]),
-        )
-        .expect("observation")
+        MempoolObservation::new(snapshot, BTreeMap::from([(txid, classification)]))
+            .expect("observation")
     }
 
     async fn get_json(application: Router, path: &str) -> (StatusCode, Value) {
@@ -606,6 +740,23 @@ mod tests {
             .get(header::CACHE_CONTROL)
             .map(|value| value.to_str().expect("Cache-Control").to_owned());
         (response.status(), policy)
+    }
+
+    async fn conflict_identity(application: Router) -> (String, String) {
+        let (_, manifest) = get_json(application, "/api/v2/sources/core/mempool").await;
+        let population_id = manifest["population_id"]
+            .as_str()
+            .expect("population ID")
+            .to_owned();
+        let structure_id = manifest["stages"]
+            .as_array()
+            .expect("stages")
+            .iter()
+            .find(|stage| stage["kind"] == "structure")
+            .and_then(|stage| stage["content_id"].as_str())
+            .expect("structure ID")
+            .to_owned();
+        (population_id, structure_id)
     }
 
     #[tokio::test]
@@ -1603,6 +1754,185 @@ mod tests {
             response["error"]
                 .as_str()
                 .is_some_and(|error| error.contains("has no policy assessment"))
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_conflict_facts_are_binary_cacheable_and_do_not_change_staged_publication() {
+        let source = runtime();
+        source
+            .record_success(classified_observation())
+            .await
+            .expect("publish classified observation");
+        let application = application(source);
+        let manifest_before = application
+            .clone()
+            .oneshot(
+                Request::get("/api/v2/sources/core/mempool")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("manifest");
+        let manifest_before = to_bytes(manifest_before.into_body(), usize::MAX)
+            .await
+            .expect("manifest body");
+        let manifest: Value = serde_json::from_slice(&manifest_before).expect("manifest JSON");
+        assert!(
+            manifest["stages"]
+                .as_array()
+                .expect("stages")
+                .iter()
+                .all(|stage| matches!(
+                    stage["kind"].as_str(),
+                    Some("population" | "membership" | "structure" | "classifier")
+                )),
+            "lazy conflict facts must not add ordinary stage descriptors"
+        );
+        let (population_id, structure_id) = conflict_identity(application.clone()).await;
+        let path = format!(
+            "/api/v2/sources/core/mempool/conflict-fingerprints/{population_id}/{structure_id}"
+        );
+
+        let first = application
+            .clone()
+            .oneshot(Request::get(&path).body(Body::empty()).expect("request"))
+            .await
+            .expect("fingerprints");
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            first.headers()[header::CONTENT_TYPE],
+            "application/octet-stream"
+        );
+        assert_eq!(first.headers()[header::CACHE_CONTROL], STAGE_CACHE_CONTROL);
+        let etag = first.headers()[header::ETAG].clone();
+        let body = to_bytes(first.into_body(), usize::MAX)
+            .await
+            .expect("fingerprint body");
+        assert_eq!(&body[..8], crate::conflict_facts::FINGERPRINT_MAGIC);
+        assert_eq!(u32::from_le_bytes(body[8..12].try_into().expect("rows")), 1);
+        assert_eq!(
+            u32::from_le_bytes(body[12..16].try_into().expect("covered rows")),
+            1
+        );
+        assert_eq!(
+            u32::from_le_bytes(body[16..20].try_into().expect("records")),
+            1
+        );
+
+        let not_modified = application
+            .clone()
+            .oneshot(
+                Request::get(&path)
+                    .header(header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("conditional fingerprints");
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+
+        let manifest_after = application
+            .oneshot(
+                Request::get("/api/v2/sources/core/mempool")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("manifest");
+        let manifest_after = to_bytes(manifest_after.into_body(), usize::MAX)
+            .await
+            .expect("manifest body");
+        assert_eq!(manifest_after, manifest_before);
+    }
+
+    #[tokio::test]
+    async fn exact_conflict_outpoints_are_publication_bound_and_report_uncovered_rows() {
+        let source = runtime();
+        source
+            .record_success(classified_observation())
+            .await
+            .expect("publish classified observation");
+        let initial_application = application(Arc::clone(&source));
+        let (population_id, structure_id) = conflict_identity(initial_application.clone()).await;
+        let txid = "00".repeat(32);
+        let path = format!(
+            "/api/v2/sources/core/mempool/conflict-outpoints/{population_id}/{structure_id}/{txid}"
+        );
+        let response = initial_application
+            .clone()
+            .oneshot(Request::get(&path).body(Body::empty()).expect("request"))
+            .await
+            .expect("exact outpoints");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("exact body");
+        assert_eq!(&body[..8], crate::conflict_facts::EXACT_MAGIC);
+        assert_eq!(u32::from_le_bytes(body[8..12].try_into().expect("rows")), 1);
+        assert_eq!(
+            u32::from_le_bytes(body[12..16].try_into().expect("covered")),
+            1
+        );
+        assert_eq!(u32::from_le_bytes(body[16..20].try_into().expect("row")), 0);
+        assert_eq!(
+            u32::from_le_bytes(body[20..24].try_into().expect("outpoints")),
+            1
+        );
+        assert_eq!(
+            &body[24..60],
+            bitcoin::consensus::serialize(&bitcoin::OutPoint {
+                txid: "77".repeat(32).parse().expect("outpoint txid"),
+                vout: 3,
+            })
+        );
+
+        source
+            .record_success(classified_observation_with_outpoints(false))
+            .await
+            .expect("publish uncovered replacement");
+        let replacement = application(Arc::clone(&source));
+        let (new_population_id, new_structure_id) = conflict_identity(replacement.clone()).await;
+        let replacement_txid = "11".repeat(32);
+        let uncovered_path = format!(
+            "/api/v2/sources/core/mempool/conflict-outpoints/{new_population_id}/{new_structure_id}/{replacement_txid}"
+        );
+        let (status, response) = get_json(replacement.clone(), &uncovered_path).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("not retained"))
+        );
+
+        let (status, response) = get_json(replacement, &path).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("current"))
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_facts_wait_for_a_terminal_classification_lifecycle() {
+        let source = runtime();
+        source
+            .record_success(observation())
+            .await
+            .expect("publish classifying observation");
+        let application = application(source);
+        let (population_id, structure_id) = conflict_identity(application.clone()).await;
+        let path = format!(
+            "/api/v2/sources/core/mempool/conflict-fingerprints/{population_id}/{structure_id}"
+        );
+
+        let (status, response) = get_json(application, &path).await;
+        assert_eq!(status, StatusCode::TOO_EARLY);
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("completes or pauses"))
         );
     }
 }

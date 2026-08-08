@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 
 use super::*;
 use crate::model::MembershipFacts;
-
+mod conflict_facts;
 fn changed_classifications(
     report: &ClassificationSliceReport,
 ) -> impl Iterator<Item = &Arc<TransactionClassification>> {
@@ -1432,6 +1432,7 @@ async fn current_parent_outputs_are_reused_across_membership_snapshots() {
         .install_snapshot(second)
         .expect("second generation");
     assert_eq!(immediate.classifications.len(), 1);
+    conflict_facts::assert_exact_carry(&immediate);
     let report = pipeline.classify_next().await.expect("child slice");
     assert_eq!(
         changed_classification(&report, &child_txid)

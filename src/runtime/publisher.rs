@@ -2,10 +2,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use tokio::sync::OnceCell;
 use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::classification::{ClassificationGenerationStart, ClassificationRevisionDelta};
+use crate::conflict_facts::{encode_exact_outpoints, encode_fingerprints};
 use crate::model::{
     ClassificationProgress, ClassificationState, MempoolObservation, MempoolSnapshot,
     SourceAvailability, SourceSummary, TransactionClassifications, TransactionDetailResponse,
@@ -68,6 +70,7 @@ struct CurrentV2Publication {
     manifest_value: crate::staged_snapshot::StagedSnapshotManifest,
     manifest: EncodedBody,
     stages: Vec<PublishedStage>,
+    conflict_fingerprints: Arc<OnceCell<EncodedBody>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -90,6 +93,16 @@ pub(crate) enum StageLookup {
     Unavailable,
     Superseded,
     Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ConflictFactLookup {
+    Ready(PublicationPayload),
+    Unavailable,
+    NotTerminal,
+    Superseded,
+    NotPresent,
+    Uncovered,
 }
 
 struct PreparedObservation {
@@ -266,6 +279,183 @@ impl CurrentStatePublisher {
             content_id: stage.descriptor.content_id.clone(),
             uncompressed_bytes: stage.descriptor.uncompressed_bytes,
         })
+    }
+
+    pub(super) async fn conflict_fingerprint_payload(
+        &self,
+        population_id: &str,
+        structure_id: &str,
+    ) -> Result<ConflictFactLookup, RuntimeError> {
+        let cache = {
+            let state = self.state.read().await;
+            let Some(publication) = &state.publication else {
+                return Ok(ConflictFactLookup::Unavailable);
+            };
+            if !publication.matches_conflict_identity(population_id, structure_id) {
+                return Ok(ConflictFactLookup::Superseded);
+            }
+            if !is_terminal_classification(state.classification_state) {
+                return Ok(ConflictFactLookup::NotTerminal);
+            }
+            if state.latest.is_none() {
+                return Ok(ConflictFactLookup::Unavailable);
+            };
+            Arc::clone(&publication.conflict_fingerprints)
+        };
+
+        let initializer_cache = Arc::clone(&cache);
+        let encoded = match cache
+            .get_or_try_init(|| async move {
+                let (total_rows, covered) = self
+                    .conflict_fingerprint_inputs(population_id, structure_id, &initializer_cache)
+                    .await?;
+                let encoded =
+                    tokio::task::spawn_blocking(move || encode_fingerprints(total_rows, &covered))
+                        .await?
+                        .map_err(|error| RuntimeError::ConflictFacts(error.to_string()))?;
+                Ok::<EncodedBody, RuntimeError>(EncodedBody {
+                    content_id: encoded.content_id,
+                    body: encoded.body,
+                })
+            })
+            .await
+        {
+            Ok(encoded) => encoded,
+            Err(RuntimeError::ConflictFactsSuperseded) => {
+                return Ok(ConflictFactLookup::Superseded);
+            }
+            Err(error) => return Err(error),
+        };
+
+        let state = self.state.read().await;
+        let Some(publication) = &state.publication else {
+            return Ok(ConflictFactLookup::Superseded);
+        };
+        if !publication.matches_conflict_identity(population_id, structure_id)
+            || !Arc::ptr_eq(&cache, &publication.conflict_fingerprints)
+        {
+            return Ok(ConflictFactLookup::Superseded);
+        }
+        if !is_terminal_classification(state.classification_state) {
+            return Ok(ConflictFactLookup::NotTerminal);
+        }
+        Ok(ConflictFactLookup::Ready(PublicationPayload {
+            body: encoded.body.clone(),
+            etag: conflict_etag("fingerprints", &encoded.content_id),
+            content_id: encoded.content_id.clone(),
+            uncompressed_bytes: encoded.body.len() as u64,
+        }))
+    }
+
+    async fn conflict_fingerprint_inputs(
+        &self,
+        population_id: &str,
+        structure_id: &str,
+        cache: &Arc<OnceCell<EncodedBody>>,
+    ) -> Result<(u32, Vec<(u32, Arc<[bitcoin::OutPoint]>)>), RuntimeError> {
+        let state = self.state.read().await;
+        let publication = state
+            .publication
+            .as_ref()
+            .ok_or(RuntimeError::ConflictFactsSuperseded)?;
+        if !publication.matches_conflict_identity(population_id, structure_id)
+            || !Arc::ptr_eq(cache, &publication.conflict_fingerprints)
+            || !is_terminal_classification(state.classification_state)
+        {
+            return Err(RuntimeError::ConflictFactsSuperseded);
+        }
+        let snapshot = state
+            .latest
+            .as_ref()
+            .ok_or(RuntimeError::ConflictFactsSuperseded)?;
+        let total_rows = u32::try_from(snapshot.transactions.len())
+            .map_err(|_| RuntimeError::ConflictFacts("total row count overflow".to_owned()))?;
+        let mut covered = Vec::new();
+        for (row, entry) in snapshot.transactions.iter().enumerate() {
+            let Some(outpoints) = state
+                .classifications
+                .get(&entry.txid)
+                .and_then(|classification| classification.input_outpoints.as_ref())
+            else {
+                continue;
+            };
+            let row = u32::try_from(row)
+                .map_err(|_| RuntimeError::ConflictFacts("source row overflow".to_owned()))?;
+            covered.push((row, Arc::clone(outpoints)));
+        }
+        Ok((total_rows, covered))
+    }
+
+    pub(super) async fn exact_outpoint_payload(
+        &self,
+        population_id: &str,
+        structure_id: &str,
+        txid: &str,
+    ) -> Result<ConflictFactLookup, RuntimeError> {
+        let fingerprints = match self
+            .conflict_fingerprint_payload(population_id, structure_id)
+            .await?
+        {
+            ConflictFactLookup::Ready(payload) => payload,
+            lookup => return Ok(lookup),
+        };
+        let total_rows = read_conflict_u32(&fingerprints.body, 8);
+        let covered_rows = read_conflict_u32(&fingerprints.body, 12);
+        let (source_row, outpoints) = {
+            let state = self.state.read().await;
+            let Some(publication) = &state.publication else {
+                return Ok(ConflictFactLookup::Unavailable);
+            };
+            if !publication.matches_conflict_identity(population_id, structure_id) {
+                return Ok(ConflictFactLookup::Superseded);
+            }
+            if !is_terminal_classification(state.classification_state) {
+                return Ok(ConflictFactLookup::NotTerminal);
+            }
+            let Some(snapshot) = state.latest.as_ref() else {
+                return Ok(ConflictFactLookup::Unavailable);
+            };
+            let Ok(source_row) = snapshot
+                .transactions
+                .binary_search_by(|entry| entry.txid.as_str().cmp(txid))
+            else {
+                return Ok(ConflictFactLookup::NotPresent);
+            };
+            let Some(outpoints) = state
+                .classifications
+                .get(txid)
+                .and_then(|classification| classification.input_outpoints.as_ref())
+            else {
+                return Ok(ConflictFactLookup::Uncovered);
+            };
+            let source_row = u32::try_from(source_row)
+                .map_err(|_| RuntimeError::ConflictFacts("source row count overflow".to_owned()))?;
+            (source_row, Arc::clone(outpoints))
+        };
+
+        let encoded = tokio::task::spawn_blocking(move || {
+            encode_exact_outpoints(total_rows, covered_rows, source_row, &outpoints)
+        })
+        .await?
+        .map_err(|error| RuntimeError::ConflictFacts(error.to_string()))?;
+
+        let state = self.state.read().await;
+        let Some(publication) = &state.publication else {
+            return Ok(ConflictFactLookup::Superseded);
+        };
+        if !publication.matches_conflict_identity(population_id, structure_id) {
+            return Ok(ConflictFactLookup::Superseded);
+        }
+        if !is_terminal_classification(state.classification_state) {
+            return Ok(ConflictFactLookup::NotTerminal);
+        }
+        let uncompressed_bytes = encoded.body.len() as u64;
+        Ok(ConflictFactLookup::Ready(PublicationPayload {
+            body: encoded.body,
+            etag: conflict_etag("outpoints", &encoded.content_id),
+            content_id: encoded.content_id,
+            uncompressed_bytes,
+        }))
     }
 
     pub(super) async fn publish_membership(
@@ -912,7 +1102,16 @@ impl CurrentV2Publication {
             manifest_value,
             manifest,
             stages,
+            conflict_fingerprints: Arc::new(OnceCell::new()),
         }
+    }
+
+    fn matches_conflict_identity(&self, population_id: &str, structure_id: &str) -> bool {
+        self.manifest_value.population_id == population_id
+            && self.stages.iter().any(|stage| {
+                stage.descriptor.kind == StageKind::Structure
+                    && stage.descriptor.content_id == structure_id
+            })
     }
 
     fn membership_stages(&self) -> Result<(EncodedStage, EncodedStage), RuntimeError> {
@@ -1008,6 +1207,25 @@ fn stage_etag(stage: &PublishedStage) -> String {
     format!(
         "W/\"atlas-v2-stage-{kind}-{}\"",
         stage.descriptor.content_id
+    )
+}
+
+fn conflict_etag(kind: &str, content_id: &str) -> String {
+    format!("W/\"atlas-v2-conflict-{kind}-{content_id}\"")
+}
+
+fn read_conflict_u32(body: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        body[offset..offset + 4]
+            .try_into()
+            .expect("an internally encoded conflict-fact header is fixed width"),
+    )
+}
+
+fn is_terminal_classification(state: Option<ClassificationState>) -> bool {
+    matches!(
+        state,
+        Some(ClassificationState::Complete | ClassificationState::Paused)
     )
 }
 

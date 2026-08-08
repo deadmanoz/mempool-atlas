@@ -4,6 +4,7 @@ pub mod api;
 pub mod classification;
 mod classification_rpc;
 mod classifiers;
+pub(crate) mod conflict_facts;
 pub mod model;
 #[cfg(feature = "perf-fixtures")]
 pub mod perf_fixtures;

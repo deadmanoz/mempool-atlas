@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 mod publisher;
 
+pub(crate) use publisher::ConflictFactLookup;
 use publisher::CurrentStatePublisher;
 pub(crate) use publisher::{PublicationLookup, PublicationPayload, StageLookup};
 
@@ -526,6 +527,27 @@ impl SourceRuntime {
             .await
     }
 
+    pub(crate) async fn conflict_fingerprint_payload(
+        &self,
+        population_id: &str,
+        structure_id: &str,
+    ) -> Result<ConflictFactLookup, RuntimeError> {
+        self.publisher
+            .conflict_fingerprint_payload(population_id, structure_id)
+            .await
+    }
+
+    pub(crate) async fn exact_outpoint_payload(
+        &self,
+        population_id: &str,
+        structure_id: &str,
+        txid: &str,
+    ) -> Result<ConflictFactLookup, RuntimeError> {
+        self.publisher
+            .exact_outpoint_payload(population_id, structure_id, txid)
+            .await
+    }
+
     pub(crate) async fn record_poll_started(&self, started_at_ms: u64) -> Result<(), RuntimeError> {
         self.publisher.record_poll_started(started_at_ms).await
     }
@@ -739,6 +761,10 @@ pub enum RuntimeError {
     Classification(#[from] ClassificationError),
     #[error(transparent)]
     StagedSnapshot(#[from] StagedSnapshotError),
+    #[error("conflict-fact encoding failed: {0}")]
+    ConflictFacts(String),
+    #[error("conflict-fact publication was superseded during preparation")]
+    ConflictFactsSuperseded,
     #[error("poll interval must be greater than zero")]
     ZeroPollInterval,
     #[error("at least one source is required")]
