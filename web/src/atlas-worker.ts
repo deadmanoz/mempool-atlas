@@ -968,13 +968,17 @@ const fetchBytes = async (
   signal: AbortSignal,
   maximumBytes: number,
   exactBytes: number | null = null,
+  missingStageIsSuperseded = false,
 ): Promise<Uint8Array> => {
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const response = await fetch(path, {
       signal,
       headers: { Accept: "application/json" },
     });
-    if (response.status === 409) {
+    if (
+      response.status === 409 ||
+      (missingStageIsSuperseded && response.status === 404)
+    ) {
       await response.body?.cancel();
       throw new SupersededStageError();
     }
@@ -1051,6 +1055,7 @@ const fetchStage = async (
     signal,
     descriptor.uncompressed_bytes,
     descriptor.uncompressed_bytes,
+    true,
   );
   if (
     bytes.byteLength !== descriptor.uncompressed_bytes ||

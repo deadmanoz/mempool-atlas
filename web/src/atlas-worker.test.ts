@@ -625,72 +625,75 @@ describe("v2 coherent publication loading", () => {
     ).toBe(false);
   });
 
-  it("restarts three delayed superseded candidates and reuses surviving sibling stages", async () => {
-    const current = await fixture();
-    let conflicts = 0;
-    let elapsed = 0;
-    const requests: string[] = [];
-    vi.spyOn(performance, "now").mockImplementation(() => elapsed);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-        const path = String(input);
-        requests.push(path);
-        if (path.endsWith("/mempool")) return response(current.manifestBytes);
-        if (path.includes("/stages/membership/") && conflicts < 3) {
-          conflicts += 1;
-          elapsed += 11_000;
-          return response(json({ error: "superseded" }), 409);
-        }
-        if (path.includes("/stages/structure/")) {
-          await new Promise((resolve) => setTimeout(resolve, 0));
-          if (init?.signal?.aborted) {
-            throw new DOMException("Aborted", "AbortError");
+  it.each([404, 409] as const)(
+    "restarts three delayed superseded candidates returned as %i and reuses surviving sibling stages",
+    async (supersededStatus) => {
+      const current = await fixture();
+      let conflicts = 0;
+      let elapsed = 0;
+      const requests: string[] = [];
+      vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const path = String(input);
+          requests.push(path);
+          if (path.endsWith("/mempool")) return response(current.manifestBytes);
+          if (path.includes("/stages/membership/") && conflicts < 3) {
+            conflicts += 1;
+            elapsed += 11_000;
+            return response(json({ error: "superseded" }), supersededStatus);
           }
-        }
-        const id = path.slice(path.lastIndexOf("/") + 1);
-        const bytes = current.stages.get(id);
-        return bytes === undefined
-          ? response(json({ error: "missing" }), 404)
-          : response(bytes);
-      }),
-    );
-    const primary = vi.fn();
-    const complete = vi.fn();
+          if (path.includes("/stages/structure/")) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            if (init?.signal?.aborted) {
+              throw new DOMException("Aborted", "AbortError");
+            }
+          }
+          const id = path.slice(path.lastIndexOf("/") + 1);
+          const bytes = current.stages.get(id);
+          return bytes === undefined
+            ? response(json({ error: "missing" }), 404)
+            : response(bytes);
+        }),
+      );
+      const primary = vi.fn();
+      const complete = vi.fn();
 
-    const loaded = await loadPackedPublication(
-      "core",
-      "knots_bip110",
-      new AbortController().signal,
-      primary,
-      complete,
-    );
+      const loaded = await loadPackedPublication(
+        "core",
+        "knots_bip110",
+        new AbortController().signal,
+        primary,
+        complete,
+      );
 
-    expect(loaded.manifest.publication_id).toBe(
-      current.manifest.publication_id,
-    );
-    expect(primary).toHaveBeenCalledOnce();
-    expect(complete).toHaveBeenCalledOnce();
-    const completeTiming = complete.mock.calls[0]?.[0] as WorkerQuorumTiming;
-    expect(completeTiming.supersessionRestarts).toBe(3);
-    expect(completeTiming.populationRebaseMs).toBeNull();
-    expect(completeTiming.stages.map(({ reused }) => reused)).toEqual([
-      true,
-      false,
-      true,
-      true,
-    ]);
-    expect(requests.every((path) => path.startsWith("/api/v2/"))).toBe(true);
-    expect(requests.filter((path) => path.endsWith("/mempool"))).toHaveLength(
-      5,
-    );
-    expect(
-      requests.filter((path) => path.includes("/stages/membership/")),
-    ).toHaveLength(4);
-    expect(
-      requests.filter((path) => path.includes("/stages/structure/")),
-    ).toHaveLength(1);
-  });
+      expect(loaded.manifest.publication_id).toBe(
+        current.manifest.publication_id,
+      );
+      expect(primary).toHaveBeenCalledOnce();
+      expect(complete).toHaveBeenCalledOnce();
+      const completeTiming = complete.mock.calls[0]?.[0] as WorkerQuorumTiming;
+      expect(completeTiming.supersessionRestarts).toBe(3);
+      expect(completeTiming.populationRebaseMs).toBeNull();
+      expect(completeTiming.stages.map(({ reused }) => reused)).toEqual([
+        true,
+        false,
+        true,
+        true,
+      ]);
+      expect(requests.every((path) => path.startsWith("/api/v2/"))).toBe(true);
+      expect(requests.filter((path) => path.endsWith("/mempool"))).toHaveLength(
+        5,
+      );
+      expect(
+        requests.filter((path) => path.includes("/stages/membership/")),
+      ).toHaveLength(4);
+      expect(
+        requests.filter((path) => path.includes("/stages/structure/")),
+      ).toHaveLength(1);
+    },
+  );
 
   it("terminates with retryable 409 after a fourth supersession", async () => {
     const current = await fixture();
@@ -728,36 +731,49 @@ describe("v2 coherent publication loading", () => {
     expect(conflicts).toBe(4);
   });
 
-  it.each([400, 404] as const)(
-    "treats terminal stage status %i as non-retryable",
-    async (status) => {
-      const current = await fixture();
-      let manifests = 0;
-      let stages = 0;
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (input: string | URL | Request) => {
-          const path = String(input);
-          if (path.endsWith("/mempool")) {
-            manifests += 1;
-            return response(current.manifestBytes);
-          }
-          stages += 1;
-          return response(json({ error: "terminal stage failure" }), status);
-        }),
-      );
+  it("treats a terminal stage status as non-retryable", async () => {
+    const status = 400;
+    const current = await fixture();
+    let manifests = 0;
+    let stages = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const path = String(input);
+        if (path.endsWith("/mempool")) {
+          manifests += 1;
+          return response(current.manifestBytes);
+        }
+        stages += 1;
+        return response(json({ error: "terminal stage failure" }), status);
+      }),
+    );
 
-      await expect(
-        loadPackedPublication(
-          "core",
-          "knots_bip110",
-          new AbortController().signal,
-        ),
-      ).rejects.toMatchObject({ status });
-      expect(manifests).toBe(1);
-      expect(stages).toBeGreaterThan(0);
-    },
-  );
+    await expect(
+      loadPackedPublication(
+        "core",
+        "knots_bip110",
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ status });
+    expect(manifests).toBe(1);
+    expect(stages).toBeGreaterThan(0);
+  });
+
+  it("keeps a manifest 404 terminal", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => response(json({ error: "missing source" }), 404)),
+    );
+
+    await expect(
+      loadPackedPublication(
+        "missing",
+        "knots_bip110",
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ status: 404 });
+  });
 
   it("rebases one complete candidate without withdrawing primary readiness", async () => {
     const initial = await fixture("none", 1);
