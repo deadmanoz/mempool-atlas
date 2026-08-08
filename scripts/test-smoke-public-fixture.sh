@@ -10,7 +10,7 @@ repo_root=$(cd "$script_dir/.." && pwd)
 # shellcheck source=lib/smoke-public-helpers.sh
 source "$script_dir/lib/smoke-public-helpers.sh"
 
-for required_tool in awk grep head jq mktemp node openssl rm sleep xxd; do
+for required_tool in awk grep jq mktemp node openssl rm sleep xxd; do
     command -v "$required_tool" >/dev/null 2>&1 || {
         printf 'offline public smoke tests require %s on PATH; install it and retry\n' \
             "$required_tool" >&2

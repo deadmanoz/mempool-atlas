@@ -24,6 +24,7 @@ atlas_smoke_header_value() {
 
 atlas_smoke_first_txid() {
     local population_path=$1
+    local decoded_hex
     local encoded_prefix
     local first_txid
 
@@ -32,10 +33,10 @@ atlas_smoke_first_txid() {
         select(type == "string" and length >= 44) |
         .[0:44]
     ' "$population_path") || return 1
-    first_txid=$(printf '%s' "$encoded_prefix" |
+    decoded_hex=$(printf '%s' "$encoded_prefix" |
         openssl base64 -d -A |
-        head -c 32 |
         xxd -p -c 64) || return 1
+    first_txid=${decoded_hex:0:64}
     [[ "$first_txid" =~ ^[0-9a-f]{64}$ ]] || return 1
     printf '%s\n' "$first_txid"
 }

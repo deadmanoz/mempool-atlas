@@ -40,7 +40,7 @@ if [[ -n "$detail_txid_override" ]]; then
         exit 2
     fi
 fi
-for required_tool in awk cp curl grep head jq mkdir mktemp openssl rm xxd; do
+for required_tool in awk cp curl grep jq mkdir mktemp openssl rm xxd; do
     command -v "$required_tool" >/dev/null 2>&1 || {
         printf 'public smoke tests require %s on PATH\n' "$required_tool" >&2
         exit 2
