@@ -176,6 +176,31 @@
             <span id="chain-summary">Chain tips unknown</span>
           </div>
           <p id="sampling-note"></p>
+          <div
+            id="conflict-analysis"
+            class="conflict-analysis"
+            aria-live="polite"
+            hidden
+          >
+            <div class="conflict-analysis-heading">
+              <div>
+                <strong>Cross-tip conflicting spends</strong>
+                <p id="conflict-analysis-status">
+                  Compare exact spent outpoints without changing the live
+                  comparison.
+                </p>
+              </div>
+              <button
+                id="conflict-analysis-action"
+                class="action-button"
+                type="button"
+              >
+                Analyze conflicting spends
+              </button>
+            </div>
+            <p id="conflict-analysis-coverage"></p>
+            <ol id="conflict-analysis-list"></ol>
+          </div>
         </div>
       </section>
 

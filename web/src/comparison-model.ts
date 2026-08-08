@@ -25,6 +25,8 @@ export type ComparisonWitnessRelation =
 
 export interface LoadedSourceSnapshot {
   source: LoadedSourcePublication["source"];
+  population_id: string;
+  structure_id: string | null;
   snapshot: MempoolSnapshot;
 }
 
@@ -439,7 +441,12 @@ const comparePackedMembership = (
 export const requireLoadedSnapshot = (
   response: LoadedSourcePublication,
 ): LoadedSourceSnapshot => {
-  return { source: response.source, snapshot: response.publication };
+  return {
+    source: response.source,
+    population_id: response.population_id,
+    structure_id: response.structure_id,
+    snapshot: response.publication,
+  };
 };
 
 /**

@@ -351,6 +351,8 @@ export const loadedSource = (
   );
   return {
     source: store.publication.manifest.source,
+    population_id: store.publication.manifest.population_id,
+    structure_id: store.publication.structure.contentId,
     snapshot: store.snapshot,
   };
 };

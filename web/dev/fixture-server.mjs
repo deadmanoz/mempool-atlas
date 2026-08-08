@@ -227,7 +227,46 @@ const addRoute = (route, cacheControl) => {
   ) {
     failFixtureLoad();
   }
-  routes.set(route.request_path, loadBody(route.body, cacheControl));
+  const body = loadBody(route.body, cacheControl);
+  routes.set(route.request_path, body);
+  return body;
+};
+
+const conflictFingerprintBody = (totalRows) => {
+  const bytes = Buffer.alloc(24);
+  bytes.write("ATLCFP01", 0, "ascii");
+  bytes.writeUInt32LE(totalRows, 8);
+  bytes.writeUInt32LE(0, 12);
+  bytes.writeUInt32LE(0, 16);
+  bytes.writeUInt32LE(0, 20);
+  return bytes;
+};
+
+const addConflictFingerprintRoute = (snapshot, publicationManifest) => {
+  const structure = publicationManifest.stages?.find(
+    ({ kind }) => kind === "structure",
+  );
+  if (
+    typeof publicationManifest.population_id !== "string" ||
+    !CONTENT_ID.test(publicationManifest.population_id) ||
+    structure === undefined ||
+    typeof structure.content_id !== "string" ||
+    !CONTENT_ID.test(structure.content_id)
+  ) {
+    failFixtureLoad();
+  }
+  const bytes = conflictFingerprintBody(snapshot.transaction_count);
+  routes.set(
+    `/api/v2/sources/${encodeURIComponent(snapshot.source_id)}/mempool/conflict-fingerprints/${publicationManifest.population_id}/${structure.content_id}`,
+    Object.freeze({
+      bytes,
+      cacheable: false,
+      cacheControl: NO_STORE,
+      gzipBytes: gzipSync(bytes),
+      contentId: publicationManifest.population_id,
+      contentType: "application/octet-stream",
+    }),
+  );
 };
 
 addRoute(manifest.source_list, NO_STORE);
@@ -236,11 +275,14 @@ for (const snapshot of manifest.snapshots) {
     snapshot === null ||
     typeof snapshot !== "object" ||
     typeof snapshot.source_id !== "string" ||
+    !Number.isSafeInteger(snapshot.transaction_count) ||
+    snapshot.transaction_count < 0 ||
     !Array.isArray(snapshot.stages)
   ) {
     failFixtureLoad();
   }
-  addRoute(snapshot.manifest, MANIFEST_CACHE_CONTROL);
+  const manifestBody = addRoute(snapshot.manifest, MANIFEST_CACHE_CONTROL);
+  addConflictFingerprintRoute(snapshot, JSON.parse(manifestBody.bytes));
   for (const stage of snapshot.stages) {
     addStageContract(snapshot, stage);
     addRoute(stage.route, STAGE_CACHE_CONTROL);

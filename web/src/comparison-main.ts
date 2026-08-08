@@ -53,6 +53,7 @@ import {
 } from "./comparison-publication-candidate";
 import { renderPrimaryComparisonPublication } from "./comparison-primary-publication";
 import { createComparisonSamplingView } from "./comparison-sampling-view";
+import { createComparisonConflictView } from "./comparison-conflict-view";
 import {
   createSourceDifferenceDetail,
   renderSourceDifferenceSummary,
@@ -147,6 +148,22 @@ const samplingView = createComparisonSamplingView({
   chainSummary: requiredElement<HTMLElement>("chain-summary"),
   note: requiredElement<HTMLElement>("sampling-note"),
 });
+const conflictView = createComparisonConflictView(
+  {
+    panel: requiredElement<HTMLElement>("conflict-analysis"),
+    action: requiredElement<HTMLButtonElement>("conflict-analysis-action"),
+    status: requiredElement<HTMLElement>("conflict-analysis-status"),
+    coverage: requiredElement<HTMLElement>("conflict-analysis-coverage"),
+    list: requiredElement<HTMLElement>("conflict-analysis-list"),
+  },
+  (side, txid) => {
+    transitionComparisonView({
+      ...currentViewState(),
+      side,
+      txid,
+    });
+  },
+);
 const policyMatrix = requiredElement<HTMLElement>("comparison-policy-matrix");
 const policyMatrixBody = requiredElement<HTMLTableSectionElement>(
   "comparison-policy-matrix-body",
@@ -1224,6 +1241,7 @@ const renderComparison = async (
     current.right.snapshot,
   );
   samplingView.render(current);
+  conflictView.render(current, complete);
   if (comparison !== current) return;
   renderPolicyMatrix(current, view);
   renderRegionControls(current);
@@ -1377,6 +1395,7 @@ const resetComparisonView = (message: string): void => {
   comparisonEmpty.hidden = false;
   comparisonEmpty.textContent = message;
   samplingView.reset();
+  conflictView.reset();
   comparisonDistributions.reset();
   policyMatrix.hidden = true;
   policyMatrixBody.replaceChildren();

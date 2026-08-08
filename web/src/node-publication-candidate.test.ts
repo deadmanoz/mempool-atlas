@@ -111,6 +111,8 @@ const publication = (
 ): LoadedSourcePublication => ({
   source: source(),
   publication_id: publicationId,
+  population_id: "10".repeat(32),
+  structure_id: "11".repeat(32),
   snapshot_identity: snapshotIdentity,
   publication: snapshot(),
 });

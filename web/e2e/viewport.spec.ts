@@ -483,6 +483,17 @@ test.describe("comparison page", () => {
     await expect(
       page.locator('#comparison-regions button[data-region="common"] span'),
     ).toHaveText("Observed on both reported chain tips");
+    const conflictAnalysis = page.locator("#conflict-analysis");
+    await expect(conflictAnalysis).toBeVisible();
+    await conflictAnalysis
+      .getByRole("button", { name: "Analyze conflicting spends" })
+      .click();
+    await expect(page.locator("#conflict-analysis-status")).toHaveText(
+      "0 conflicting transaction pairs among 0/0 analyzed transactions.",
+    );
+    await expect(page.locator("#conflict-analysis-coverage")).toContainText(
+      "Partial coverage",
+    );
   });
 
   test("presents Node and Compare as the primary view switch", async ({

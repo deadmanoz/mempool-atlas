@@ -607,6 +607,8 @@ export const createLoadedSourcePublication = (
   return {
     source: publication.manifest.source,
     publication_id: publication.manifest.publication_id,
+    population_id: publication.manifest.population_id,
+    structure_id: publication.structure.contentId,
     snapshot_identity: snapshotIdentity(publication.manifest),
     publication: store.snapshot,
   };
@@ -619,6 +621,10 @@ export const createPrimarySourcePublication = (
   return {
     source: publication.manifest.source,
     publication_id: publication.manifest.publication_id,
+    population_id: publication.manifest.population_id,
+    structure_id:
+      publication.manifest.stages.find(({ kind }) => kind === "structure")
+        ?.content_id ?? null,
     snapshot_identity: snapshotIdentity(publication.manifest),
     publication: store.snapshot,
   };

@@ -22,6 +22,8 @@ const publication = (sourceId: string, values: number[]) => {
     source: loaded.source,
     publication_id:
       `${sourceId.charCodeAt(0).toString(16).padStart(2, "0")}`.repeat(32),
+    population_id: "10".repeat(32),
+    structure_id: "11".repeat(32),
     snapshot_identity: `snapshot-${sourceId}`,
     publication: loaded.snapshot,
   };

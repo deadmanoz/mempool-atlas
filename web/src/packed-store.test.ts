@@ -10,6 +10,7 @@ import {
   PackedPrimaryPublicationStore,
   PackedPublicationStore,
   comparePackedSnapshotRows,
+  createLoadedSourcePublication,
   findSnapshotTransaction,
   packedSnapshotRowCount,
   packedSnapshotRowVsize,
@@ -182,6 +183,15 @@ const publication = (): PackedPublicationTransfer => ({
 });
 
 describe("PackedPublicationStore", () => {
+  it("retains population and structure identities for lazy publication facts", () => {
+    const transfer = publication();
+
+    const loaded = createLoadedSourcePublication(transfer);
+
+    expect(loaded.population_id).toBe(transfer.manifest.population_id);
+    expect(loaded.structure_id).toBe(transfer.structure.contentId);
+  });
+
   it("identifies snapshot content independently of source lifecycle metadata", () => {
     const current = publication().manifest;
     const lifecycleChange = structuredClone(current);
@@ -348,10 +358,14 @@ describe("PackedPublicationStore", () => {
     const comparison = compareCurrentSnapshots(
       {
         source: leftPublication.manifest.source,
+        population_id: leftPublication.manifest.population_id,
+        structure_id: leftPublication.structure.contentId,
         snapshot: leftStore.snapshot,
       },
       {
         source: rightPublication.manifest.source,
+        population_id: rightPublication.manifest.population_id,
+        structure_id: rightPublication.structure.contentId,
         snapshot: rightStore.snapshot,
       },
     );
@@ -489,10 +503,14 @@ describe("PackedPrimaryPublicationStore", () => {
     const comparison = compareCurrentSnapshots(
       {
         source: leftComplete.manifest.source,
+        population_id: leftComplete.manifest.population_id,
+        structure_id: leftComplete.structure.contentId,
         snapshot: left.snapshot,
       },
       {
         source: rightComplete.manifest.source,
+        population_id: rightComplete.manifest.population_id,
+        structure_id: rightComplete.structure.contentId,
         snapshot: right.snapshot,
       },
       false,

@@ -179,6 +179,8 @@ export interface SourcesResponse {
 export interface LoadedSourcePublication {
   source: SourceSummary;
   publication_id: string;
+  population_id: string;
+  structure_id: string | null;
   snapshot_identity: string;
   publication: MempoolSnapshot;
 }

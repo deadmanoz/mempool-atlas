@@ -332,6 +332,85 @@
   line-height: 1.45;
 }
 
+.conflict-analysis {
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid rgba(225, 170, 75, 0.38);
+}
+
+.conflict-analysis[hidden] {
+  display: none !important;
+}
+
+.conflict-analysis-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.conflict-analysis-heading > div {
+  min-width: 0;
+}
+
+.conflict-analysis-heading strong {
+  color: #f2dfb8;
+  font-size: 0.72rem;
+}
+
+.conflict-analysis-heading p,
+.conflict-analysis > p {
+  margin: 0.25rem 0 0;
+  color: #d9c497;
+  font-size: 0.62rem;
+  line-height: 1.45;
+}
+
+.conflict-analysis-heading .action-button {
+  flex: 0 0 auto;
+  min-height: 2.35rem;
+  padding: 0.45rem 0.7rem;
+}
+
+.conflict-analysis ol {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+  gap: 0.35rem;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conflict-analysis li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem;
+  border: 1px solid rgba(225, 170, 75, 0.34);
+  background: rgba(6, 18, 25, 0.7);
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.conflict-analysis li button {
+  min-width: 0;
+  padding: 0.35rem 0.45rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--panel-strong);
+  color: var(--cyan);
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.conflict-analysis li button:hover,
+.conflict-analysis li button:focus-visible {
+  border-color: var(--cyan);
+}
+
 .comparison-policy-matrix {
   min-block-size: 38rem;
   margin-bottom: 0.65rem;
@@ -1063,6 +1142,18 @@
   .sampling-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .conflict-analysis-heading {
+    flex-direction: column;
+  }
+
+  .conflict-analysis-heading .action-button {
+    width: 100%;
+  }
+
+  .conflict-analysis li {
+    grid-template-columns: 1fr;
   }
 
   .comparison-transaction-search-heading {
