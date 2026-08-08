@@ -30,6 +30,19 @@ const column = (...values: number[]): PackedUnsignedColumnTransfer => ({
   values: buffer(...values),
 });
 
+const wideColumn = (...values: number[]): PackedUnsignedColumnTransfer => {
+  const width = 7;
+  const bytes = new Uint8Array(values.length * width);
+  values.forEach((value, row) => {
+    let packed = BigInt(value);
+    for (let index = 0; index < width; index += 1) {
+      bytes[row * width + index] = Number(packed & 0xffn);
+      packed >>= 8n;
+    }
+  });
+  return { width, values: bytes.buffer };
+};
+
 const signedColumn = (...values: number[]): PackedSignedColumnTransfer => {
   const width = 7;
   const bytes = new Uint8Array(values.length * width);
@@ -138,7 +151,7 @@ const publication = (): PackedPublicationTransfer => ({
     inputCount: column(1),
     outputCount: column(2),
     opReturnBytes: column(80),
-    recognizedNonOpReturnBytes: column(1_450),
+    recognizedNonOpReturnBytes: wideColumn(1_450),
     outputSats: column(5),
     witnessBytes: column(3),
   },

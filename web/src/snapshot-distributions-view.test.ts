@@ -366,12 +366,16 @@ describe("createSnapshotDistributionsView", () => {
     expect([...references].map(({ textContent }) => textContent)).toEqual([
       "40 B",
       "80 B",
+      "255 B",
+      "1,020 B",
+      "1,530 B",
+      "6,334 B",
     ]);
     expect(
       root.querySelectorAll(
         "#data-chart .chart-gridline[data-reference='true']",
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(6);
 
     await harness.flushAnimationFrames();
     await harness.flushAnimationFrames();
