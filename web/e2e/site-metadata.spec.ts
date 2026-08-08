@@ -1,17 +1,20 @@
 import { expect, test } from "@playwright/test";
 
+const description =
+  "Explore current Bitcoin mempool membership and transaction classifications for a single node, or compare between two.";
+
 const pageMetadata = [
   {
     label: "Node",
     path: "/?source=vps-core-01",
     canonical: "https://atlas.deadmanoz.xyz/",
-    image: "https://atlas.deadmanoz.xyz/social/mempool-atlas-og.png",
+    image: "https://atlas.deadmanoz.xyz/social/mempool-atlas-og.jpg",
   },
   {
     label: "Compare",
     path: "/compare/",
     canonical: "https://atlas.deadmanoz.xyz/compare/",
-    image: "https://atlas.deadmanoz.xyz/social/mempool-atlas-compare-og.png",
+    image: "https://atlas.deadmanoz.xyz/social/mempool-atlas-compare-og.jpg",
   },
 ] as const;
 
@@ -72,10 +75,26 @@ for (const metadata of pageMetadata) {
       "content",
       metadata.canonical,
     );
+    await expect(page.locator('meta[name="description"]')).toHaveAttribute(
+      "content",
+      description,
+    );
+    await expect(
+      page.locator('meta[property="og:description"]'),
+    ).toHaveAttribute("content", description);
+    await expect(
+      page.locator('meta[name="twitter:description"]'),
+    ).toHaveAttribute("content", description);
     await expect(page.locator('meta[property="og:image"]')).toHaveAttribute(
       "content",
       metadata.image,
     );
+    await expect(
+      page.locator('meta[property="og:image:secure_url"]'),
+    ).toHaveAttribute("content", metadata.image);
+    await expect(
+      page.locator('meta[property="og:image:type"]'),
+    ).toHaveAttribute("content", "image/jpeg");
     await expect(
       page.locator('meta[property="og:image:width"]'),
     ).toHaveAttribute("content", "1200");
@@ -109,6 +128,8 @@ for (const metadata of pageMetadata) {
 
 test("public identity assets are served", async ({ request }) => {
   for (const path of [
+    "/social/mempool-atlas-og.jpg",
+    "/social/mempool-atlas-compare-og.jpg",
     "/social/mempool-atlas-og.png",
     "/social/mempool-atlas-compare-og.png",
     "/favicon.ico",

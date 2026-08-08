@@ -1,7 +1,7 @@
 {
   "name": "Mempool Atlas",
   "short_name": "Atlas",
-  "description": "Explore and compare current Bitcoin node mempool snapshots.",
+  "description": "Explore current Bitcoin mempool membership and transaction classifications for a single node, or compare between two.",
   "id": "/",
   "start_url": "/",
   "scope": "/",
