@@ -96,9 +96,7 @@ import {
 } from "./view-state";
 import { findSnapshotTransaction, snapshotIsComplete } from "./packed-store";
 import { markAtlasReadiness, markAtlasReadinessAfterPaint } from "./readiness";
-import "./styles.css";
 import "./distribution-styles.css";
-import "./source-summary-styles.css";
 import type {
   Bip110Assessment,
   ClassificationProgress,

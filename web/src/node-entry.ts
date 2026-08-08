@@ -1,3 +1,6 @@
+import "./styles.css";
+import "./source-summary-styles.css";
+
 const NODE_STATE_KEYS = new Set([
   "source",
   "classifier",

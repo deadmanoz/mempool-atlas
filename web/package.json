@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node --test scripts/node-shell-build-contract.mjs",
     "test": "vitest run --exclude 'e2e/**' --exclude 'perf/performance.spec.ts'",
     "test:e2e": "playwright test",
     "test:perf": "playwright test --config perf/playwright.config.ts",
