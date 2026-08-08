@@ -1,7 +1,9 @@
 import {
   createBucketTerrainLayout,
+  createBucketTerrainLayoutCooperatively,
   hitTestBucketTerrain,
   paintBucketTerrain,
+  paintBucketTerrainCooperatively,
   type BucketTerrainGlyph,
   type BucketTerrainHit,
   type BucketTerrainLayout,
@@ -12,6 +14,11 @@ import {
   type BucketTerrainSectionGroup,
 } from "./bucket-terrain";
 import { prepareCanvasBacking } from "./canvas-backing";
+import {
+  forEachCooperatively,
+  yieldCooperatively,
+  type CooperativeWorkOptions,
+} from "./cooperative-work";
 import type { Bip110Assessment, MempoolTransaction, RuleId } from "./types";
 import { RULE_IDS } from "./types";
 import {
@@ -198,6 +205,33 @@ const addToTotal = (
   total.vsize += transaction.vsize;
 };
 
+const emptyClassificationTotals = (): ClassificationTotals => ({
+  compatible: emptyTotal(),
+  violating: emptyTotal(),
+  indeterminate: emptyTotal(),
+  unclassified: emptyTotal(),
+  completeCoverage: emptyTotal(),
+  incompleteCoverage: emptyTotal(),
+});
+
+const addTransactionToClassificationTotals = (
+  totals: ClassificationTotals,
+  transaction: MempoolTransaction,
+): void => {
+  const assessment = transaction.bip110;
+  if (assessment === null) {
+    addToTotal(totals.unclassified, transaction);
+    return;
+  }
+  addToTotal(totals[assessment.status], transaction);
+  addToTotal(
+    assessment.unknown_rules.length === 0
+      ? totals.completeCoverage
+      : totals.incompleteCoverage,
+    transaction,
+  );
+};
+
 const populationShare = (
   transactions: readonly MempoolTransaction[],
   count: number,
@@ -213,27 +247,10 @@ const sumVsize = (transactions: readonly MempoolTransaction[]): number =>
 export const classificationTotals = (
   transactions: readonly MempoolTransaction[],
 ): ClassificationTotals => {
-  const totals: ClassificationTotals = {
-    compatible: emptyTotal(),
-    violating: emptyTotal(),
-    indeterminate: emptyTotal(),
-    unclassified: emptyTotal(),
-    completeCoverage: emptyTotal(),
-    incompleteCoverage: emptyTotal(),
-  };
+  const totals = emptyClassificationTotals();
 
   for (const transaction of transactions) {
-    const assessment = transaction.bip110;
-    if (assessment === null) {
-      addToTotal(totals.unclassified, transaction);
-      continue;
-    }
-    addToTotal(totals[assessment.status], transaction);
-    if (assessment.unknown_rules.length === 0) {
-      addToTotal(totals.completeCoverage, transaction);
-    } else {
-      addToTotal(totals.incompleteCoverage, transaction);
-    }
+    addTransactionToClassificationTotals(totals, transaction);
   }
   return totals;
 };
@@ -434,17 +451,11 @@ export const incompleteViolationPopulation = (
   };
 };
 
-const terrainGroups = (
-  transactions: readonly MempoolTransaction[],
-): BucketTerrainSectionGroup<
-  TerrainSectionKey,
-  TerrainRegionKey,
-  ViolationSignature | null
->[] => {
-  const compatibleRows: number[] = [];
-  const indeterminateRows: number[] = [];
-  const unclassifiedRows: number[] = [];
-  const signatures = new Map<
+interface TerrainGroupsBuilder {
+  compatibleRows: number[];
+  indeterminateRows: number[];
+  unclassifiedRows: number[];
+  signatures: Map<
     ViolationSignatureKey,
     {
       key: ViolationSignatureKey;
@@ -452,44 +463,66 @@ const terrainGroups = (
       signature: ViolationSignature;
       rows: number[];
     }
-  >();
+  >;
+  totals: ClassificationTotals;
+}
 
-  for (let row = 0; row < transactions.length; row += 1) {
-    const transaction = transactions[row];
-    if (transaction === undefined) continue;
-    const assessment = transaction.bip110;
-    if (assessment === null) {
-      unclassifiedRows.push(row);
-      continue;
-    }
-    if (assessment.status === "compatible") {
-      compatibleRows.push(row);
-      continue;
-    }
-    if (assessment.status === "indeterminate") {
-      indeterminateRows.push(row);
-      continue;
-    }
-    const signature = violationSignature(assessment);
-    if (signature === null) {
-      continue;
-    }
-    const sectionKey =
-      signature.completeness === "exact"
-        ? "violating_exact"
-        : "violating_incomplete";
-    const existing = signatures.get(signature.key);
-    if (existing === undefined) {
-      signatures.set(signature.key, {
-        key: signature.key,
-        sectionKey,
-        signature,
-        rows: [row],
-      });
-    } else {
-      existing.rows.push(row);
-    }
+const createTerrainGroupsBuilder = (): TerrainGroupsBuilder => ({
+  compatibleRows: [],
+  indeterminateRows: [],
+  unclassifiedRows: [],
+  signatures: new Map(),
+  totals: emptyClassificationTotals(),
+});
+
+const addTransactionToTerrainGroups = (
+  builder: TerrainGroupsBuilder,
+  transaction: MempoolTransaction,
+  row: number,
+): void => {
+  addTransactionToClassificationTotals(builder.totals, transaction);
+  const assessment = transaction.bip110;
+  if (assessment === null) {
+    builder.unclassifiedRows.push(row);
+    return;
   }
+  if (assessment.status === "compatible") {
+    builder.compatibleRows.push(row);
+    return;
+  }
+  if (assessment.status === "indeterminate") {
+    builder.indeterminateRows.push(row);
+    return;
+  }
+  const signature = violationSignature(assessment);
+  if (signature === null) return;
+  const sectionKey =
+    signature.completeness === "exact"
+      ? "violating_exact"
+      : "violating_incomplete";
+  const existing = builder.signatures.get(signature.key);
+  if (existing === undefined) {
+    builder.signatures.set(signature.key, {
+      key: signature.key,
+      sectionKey,
+      signature,
+      rows: [row],
+    });
+  } else {
+    existing.rows.push(row);
+  }
+};
+
+const finalizeTerrainGroups = (
+  transactions: readonly MempoolTransaction[],
+  builder: TerrainGroupsBuilder,
+): BucketTerrainSectionGroup<
+  TerrainSectionKey,
+  TerrainRegionKey,
+  ViolationSignature | null
+>[] => {
+  const { compatibleRows, indeterminateRows, unclassifiedRows, signatures } =
+    builder;
 
   const signatureGroups = [...signatures.values()]
     .sort((left, right) =>
@@ -566,6 +599,23 @@ const terrainGroups = (
   return groups;
 };
 
+const terrainGroups = (
+  transactions: readonly MempoolTransaction[],
+): BucketTerrainSectionGroup<
+  TerrainSectionKey,
+  TerrainRegionKey,
+  ViolationSignature | null
+>[] => {
+  const builder = createTerrainGroupsBuilder();
+  for (let row = 0; row < transactions.length; row += 1) {
+    const transaction = transactions[row];
+    if (transaction !== undefined) {
+      addTransactionToTerrainGroups(builder, transaction, row);
+    }
+  }
+  return finalizeTerrainGroups(transactions, builder);
+};
+
 export const createTerrainLayout = (
   transactions: readonly MempoolTransaction[],
   width: number,
@@ -580,6 +630,38 @@ export const createTerrainLayout = (
   ),
   totals: classificationTotals(transactions),
 });
+
+/**
+ * Build the specialist policy terrain without monopolising the main thread.
+ * Grouping and totals share one bounded pass, then the generic terrain packer
+ * yields while measuring and positioning the complete glyph population.
+ */
+export const createTerrainLayoutCooperatively = async (
+  transactions: readonly MempoolTransaction[],
+  width: number,
+  height: number,
+  mode: TerrainMode,
+  options: CooperativeWorkOptions = {},
+): Promise<TerrainLayout> => {
+  const builder = createTerrainGroupsBuilder();
+  await forEachCooperatively(
+    transactions,
+    (transaction, row) => {
+      addTransactionToTerrainGroups(builder, transaction, row);
+    },
+    options,
+  );
+  const groups = finalizeTerrainGroups(transactions, builder);
+  options.signal?.throwIfAborted();
+  const layout = await createBucketTerrainLayoutCooperatively(
+    groups,
+    width,
+    height,
+    mode,
+    options,
+  );
+  return { ...layout, totals: builder.totals };
+};
 
 export const hitTestTerrain = (
   layout: TerrainLayout,
@@ -642,6 +724,39 @@ export const paintTerrain = (
   );
 };
 
+export const paintTerrainCooperatively = async (
+  canvas: HTMLCanvasElement,
+  context: CanvasRenderingContext2D,
+  layout: TerrainLayout,
+  selection: TerrainSelection,
+  selectedTxid: string | null = null,
+  options: CooperativeWorkOptions = {},
+): Promise<void> => {
+  const glyphOpacity = (region: TerrainRegion, selected: boolean): number =>
+    region.signature === null
+      ? 0.82
+      : selected
+        ? 1
+        : selection.kind === "rule"
+          ? 0.46
+          : 0.7;
+  await paintBucketTerrainCooperatively(
+    canvas,
+    context,
+    layout,
+    {
+      color: regionColor,
+      selected: (region) => regionMatchesSelection(region, selection),
+      partial: (region) => region.signature?.completeness === "partial",
+      glyphOpacity,
+      glyphOpacityByRegion: glyphOpacity,
+      rasterStyleKey: `bip110-${selection.kind}`,
+    },
+    selectedTxid,
+    options,
+  );
+};
+
 export const renderTerrain = (
   canvas: HTMLCanvasElement,
   transactions: readonly MempoolTransaction[],
@@ -659,5 +774,45 @@ export const renderTerrain = (
       ? previousLayout
       : createTerrainLayout(transactions, width, height, mode);
   paintTerrain(context, layout, selection, selectedTxid);
+  return layout;
+};
+
+export const renderTerrainCooperatively = async (
+  canvas: HTMLCanvasElement,
+  transactions: readonly MempoolTransaction[],
+  mode: TerrainMode,
+  selection: TerrainSelection,
+  previousLayout: TerrainLayout | null = null,
+  selectedTxid: string | null = null,
+  options: CooperativeWorkOptions = {},
+): Promise<TerrainLayout> => {
+  const { context, width, height } = prepareCanvasBacking(canvas, "subpixel");
+  if (
+    previousLayout !== null &&
+    previousLayout.width === width &&
+    previousLayout.height === height &&
+    previousLayout.mode === mode
+  ) {
+    paintTerrain(context, previousLayout, selection, selectedTxid);
+    return previousLayout;
+  }
+  // Leave the scheduling frame before touching the cold policy population.
+  await yieldCooperatively(options);
+  const layout = await createTerrainLayoutCooperatively(
+    transactions,
+    width,
+    height,
+    mode,
+    options,
+  );
+  options.signal?.throwIfAborted();
+  await paintTerrainCooperatively(
+    canvas,
+    context,
+    layout,
+    selection,
+    selectedTxid,
+    options,
+  );
   return layout;
 };

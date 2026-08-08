@@ -81,10 +81,12 @@ gate.
 
 The node run takes another collected memory sample after activating the
 complete BIP-110 terrain and visibly rendering each of its seven rule
-selections. This specialist sample includes the logical glyph layout, compact
-rule indexes, and retained dim/highlight raster pair. Its release ceilings are
-90,000,000 bytes of page heap and 120 MiB of worker-inclusive memory, separate
-from the 40,000,000-byte and 60 MiB complete-model ceilings.
+selections. This specialist sample includes typed glyph geometry columns,
+compact rule indexes, and the retained dim/highlight raster pair. Cold policy
+grouping, layout, column packing, and raster construction yield between bounded
+batches and can be cancelled without publishing a partial canvas. Its release
+ceilings are 90,000,000 bytes of page heap and 120 MiB of worker-inclusive
+memory, separate from the 40,000,000-byte and 60 MiB complete-model ceilings.
 
 Canvas backing stores are outside the V8 heap and worker-inclusive measurements.
 Each retained specialist raster is therefore capped at 4,194,304 pixels; the

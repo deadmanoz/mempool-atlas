@@ -29,7 +29,7 @@ import { createClassificationQueryView } from "./classification-query-view";
 import {
   bucketTerrainRegionCanShowLabel,
   hitTestBucketTerrain,
-  paintBucketTerrainSelection,
+  paintBucketTerrainCanvasSelection,
   renderBucketTerrainCooperatively,
   type BucketTerrainLayout,
 } from "./bucket-terrain";
@@ -77,7 +77,6 @@ import { TerrainSelectionView } from "./terrain-selection-view";
 import {
   TERRAIN_RULES,
   hitTestTerrain,
-  renderTerrain,
   signatureLabel,
   signaturePopulation,
   statusPopulation,
@@ -99,6 +98,7 @@ import {
 } from "./view-state";
 import { findSnapshotTransaction, snapshotIsComplete } from "./packed-store";
 import { markAtlasReadiness, markAtlasReadinessAfterPaint } from "./readiness";
+import { startPolicyTerrainRender } from "./policy-terrain-render";
 import "./distribution-styles.css";
 import type {
   Bip110Assessment,
@@ -388,29 +388,30 @@ const paintCurrentTerrainSelectionDirect = (): boolean => {
   if (selectedLens === "overview") {
     return classificationQueryView.paintSelection(selectedTransactionId);
   }
-  const context = terrainCanvas.getContext("2d");
-  if (context === null) return false;
-  const paint = <
-    SectionKey extends string,
-    RegionKey extends string,
-    Signature,
-  >(
-    layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
-  ): boolean => {
-    context.setTransform(
-      terrainCanvas.width / layout.width,
-      0,
-      0,
-      terrainCanvas.height / layout.height,
-      0,
-      0,
-    );
-    return paintBucketTerrainSelection(context, layout, selectedTransactionId);
-  };
-  if (selectedClassifierIsBip110()) {
-    return policyTerrainLayout !== null && paint(policyTerrainLayout);
+  const layout = selectedClassifierIsBip110()
+    ? policyTerrainLayout
+    : classifierTerrainLayout;
+  return (
+    layout !== null &&
+    paintBucketTerrainCanvasSelection(
+      terrainCanvas,
+      layout,
+      selectedTransactionId,
+    )
+  );
+};
+
+const captureTerrainLayout = <
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+>(
+  layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
+): void => {
+  terrainSelectionView.capture(layout);
+  if (selectedTransactionId !== null && !paintCurrentTerrainSelection()) {
+    paintCurrentTerrainSelectionDirect();
   }
-  return classifierTerrainLayout !== null && paint(classifierTerrainLayout);
 };
 
 const renderCoverage = (): void => {
@@ -1568,24 +1569,30 @@ const renderTerrainFrame = (): void => {
   ) {
     return;
   }
+  const snapshot = currentSnapshot;
+  const controller = new AbortController();
+  terrainRenderController?.abort();
+  terrainRenderController = controller;
   if (selectedClassifierIsBip110()) {
-    policyTerrainLayout = renderTerrain(
-      terrainCanvas,
-      currentSnapshot.transactions,
-      terrainMode,
-      selectedInspector,
-      policyTerrainLayout,
-      null,
-    );
-    terrainSelectionView.capture(policyTerrainLayout);
-    if (selectedTransactionId !== null && !paintCurrentTerrainSelection()) {
-      paintCurrentTerrainSelectionDirect();
-    }
-    renderTerrainRegions(policyTerrainLayout);
-    terrainCanvas.setAttribute(
-      "aria-label",
-      `BIP-110 rule-combination buckets for ${countFormat.format(currentSnapshot.transaction_count)} transactions. Complete violations appear once in their exact rule-set bucket; incomplete violations are separate. Bucket area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`,
-    );
+    startPolicyTerrainRender({
+      canvas: terrainCanvas,
+      transactions: snapshot.transactions,
+      mode: terrainMode,
+      selection: selectedInspector,
+      previousLayout: policyTerrainLayout,
+      signal: controller.signal,
+      isCurrent: () =>
+        terrainRenderController === controller &&
+        currentSnapshot === snapshot &&
+        selectedClassifierIsBip110(),
+      commit: (layout, ariaLabel) => {
+        terrainRenderController = null;
+        policyTerrainLayout = layout;
+        captureTerrainLayout(layout);
+        renderTerrainRegions(layout);
+        terrainCanvas.setAttribute("aria-label", ariaLabel);
+      },
+    });
     return;
   }
   const descriptor = currentClassifierDescriptor();
@@ -1600,10 +1607,6 @@ const renderTerrainFrame = (): void => {
           selectedClassifierLabel,
         )
       : null;
-  const snapshot = currentSnapshot;
-  const controller = new AbortController();
-  terrainRenderController?.abort();
-  terrainRenderController = controller;
   const presentation = classifierTerrainPaint(descriptor, {
     selectedBucketKey: selectedClassifierBucketKey,
     selectedLabel: selectedClassifierLabel,
@@ -1629,10 +1632,7 @@ const renderTerrainFrame = (): void => {
       }
       terrainRenderController = null;
       classifierTerrainLayout = layout;
-      terrainSelectionView.capture(layout);
-      if (selectedTransactionId !== null && !paintCurrentTerrainSelection()) {
-        paintCurrentTerrainSelectionDirect();
-      }
+      captureTerrainLayout(layout);
       renderClassifierTerrainRegions(layout, descriptor);
       terrainCanvas.setAttribute(
         "aria-label",

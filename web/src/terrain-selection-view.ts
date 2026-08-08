@@ -1,4 +1,5 @@
 import type { BucketTerrainLayout } from "./bucket-terrain";
+import { findBucketTerrainGlyph } from "./bucket-terrain-glyphs";
 
 /**
  * Position transaction focus above the population. Selection never touches,
@@ -52,7 +53,7 @@ export class TerrainSelectionView {
     const glyph =
       selectedTxid === null
         ? undefined
-        : layout.glyphs.find(({ txid }) => txid === selectedTxid);
+        : findBucketTerrainGlyph(layout.glyphs, selectedTxid);
     if (glyph === undefined) {
       this.clear();
       return true;

@@ -390,9 +390,9 @@ describe("classifier terrain", () => {
     expect(alphaRows).toHaveLength(Math.ceil(70_000 / 8));
     expect(alphaRows?.[0] ?? 0).toBe(0b1010_1010);
     expect(layout.glyphs).toHaveLength(70_000);
-    expect(new Set(layout.glyphs.map(({ sourceRow }) => sourceRow)).size).toBe(
-      70_000,
-    );
+    expect(
+      new Set([...layout.glyphs].map(({ sourceRow }) => sourceRow)).size,
+    ).toBe(70_000);
     expect(classifierLabelPopulation(transactions, descriptor, "alpha")).toBe(
       alpha,
     );
@@ -890,7 +890,10 @@ describe("classifier terrain", () => {
       },
     );
 
-    expect(actual).toEqual(expected);
+    expect({ ...actual, glyphs: [...actual.glyphs] }).toEqual({
+      ...expected,
+      glyphs: [...expected.glyphs],
+    });
     expect(yields).toBeGreaterThan(0);
   });
 

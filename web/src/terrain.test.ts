@@ -8,6 +8,7 @@ import {
   TERRAIN_RULES,
   classificationTotals,
   createTerrainLayout,
+  createTerrainLayoutCooperatively,
   hitTestTerrain,
   incompleteViolationPopulation,
   paintTerrain,
@@ -332,6 +333,60 @@ describe("signaturePopulations", () => {
 });
 
 describe("createTerrainLayout", () => {
+  it("cooperatively preserves exact policy geometry and totals", async () => {
+    const transactions = Array.from({ length: 2_000 }, (_, index) =>
+      transaction(index + 1, {
+        vsize: 100 + (index % 701),
+        bip110:
+          index % 19 === 0
+            ? null
+            : index % 13 === 0
+              ? violating("op_success", { unknown: ["tapscript_op_if"] })
+              : index % 7 === 0
+                ? violating(["element_size", "tapscript_op_if"])
+                : compatible,
+      }),
+    );
+    const expected = createTerrainLayout(
+      [...transactions],
+      1_000,
+      640,
+      "vsize",
+    );
+    const yieldBetweenBatches = vi.fn(async () => Promise.resolve());
+
+    const actual = await createTerrainLayoutCooperatively(
+      transactions,
+      1_000,
+      640,
+      "vsize",
+      { batchSize: 100, yieldBetweenBatches },
+    );
+
+    expect(yieldBetweenBatches.mock.calls.length).toBeGreaterThan(20);
+    expect(actual.totals).toEqual(expected.totals);
+    expect(actual.sections).toEqual(expected.sections);
+    expect(actual.regions).toEqual(expected.regions);
+    expect([...actual.glyphs]).toEqual([...expected.glyphs]);
+  });
+
+  it("cancels cold policy grouping before publishing a partial layout", async () => {
+    const transactions = Array.from({ length: 2_000 }, (_, index) =>
+      transaction(index + 1),
+    );
+    const controller = new AbortController();
+    const yieldBetweenBatches = vi.fn(() => controller.abort());
+
+    await expect(
+      createTerrainLayoutCooperatively(transactions, 1_000, 640, "count", {
+        batchSize: 100,
+        signal: controller.signal,
+        yieldBetweenBatches,
+      }),
+    ).rejects.toThrow();
+    expect(yieldBetweenBatches).toHaveBeenCalledTimes(1);
+  });
+
   it("lays every transaction once inside its dynamic status or signature bucket", () => {
     const transactions = [
       transaction(1),
@@ -359,7 +414,7 @@ describe("createTerrainLayout", () => {
     const layout = createTerrainLayout(transactions, 1_000, 640, "count");
 
     expect(layout.glyphs).toHaveLength(transactions.length);
-    expect(new Set(layout.glyphs.map(({ txid }) => txid))).toHaveLength(
+    expect(new Set([...layout.glyphs].map(({ txid }) => txid))).toHaveLength(
       transactions.length,
     );
     expect(layout.regions.map(({ key }) => key)).toEqual([
@@ -426,7 +481,9 @@ describe("createTerrainLayout", () => {
       layout: ReturnType<typeof createTerrainLayout>,
       txid: string,
     ): number => {
-      const rect = layout.glyphs.find((glyph) => glyph.txid === txid)?.rect;
+      const rect = [...layout.glyphs].find(
+        (glyph) => glyph.txid === txid,
+      )?.rect;
       return (rect?.width ?? 0) * (rect?.height ?? 0);
     };
 
@@ -450,7 +507,7 @@ describe("createTerrainLayout", () => {
       600,
       "count",
     );
-    const glyph = layout.glyphs[0];
+    const glyph = layout.glyphs.at(0);
     expect(glyph).toBeDefined();
     if (glyph === undefined) {
       return;
@@ -527,7 +584,7 @@ describe("createTerrainLayout", () => {
       transactions[0]?.txid,
     );
 
-    const selectedGlyph = layout.glyphs.find(
+    const selectedGlyph = [...layout.glyphs].find(
       ({ txid }) => txid === transactions[0]?.txid,
     );
     expect(selectedGlyph).toBeDefined();
@@ -798,7 +855,7 @@ describe("createTerrainLayout", () => {
       const selectedRegion = layout.regions.find((region) =>
         region.signature?.violatedRules.includes("element_size"),
       );
-      const selectedGlyph = layout.glyphs[0];
+      const selectedGlyph = layout.glyphs.at(0);
       expect(selectedRegion).toBeDefined();
       expect(selectedGlyph).toBeDefined();
       const filledPaths: TestPath2D[] = [];
@@ -837,7 +894,7 @@ describe("createTerrainLayout", () => {
         .flatMap(({ rectangles }) => rectangles)
         .map((rect) => JSON.stringify(rect))
         .sort();
-      const exactGlyphRectangles = layout.glyphs
+      const exactGlyphRectangles = [...layout.glyphs]
         .map(({ rect }) =>
           JSON.stringify([rect.x, rect.y, rect.width, rect.height]),
         )
@@ -917,7 +974,7 @@ describe("createTerrainLayout", () => {
     expect(layout.glyphs).toHaveLength(transactions.length);
     expect(layout.regions).toHaveLength(131);
     for (const region of layout.regions) {
-      const glyphs = layout.glyphs.filter(
+      const glyphs = [...layout.glyphs].filter(
         ({ regionKey }) => regionKey === region.key,
       );
       expect(glyphs.length).toBe(region.transactionCount);

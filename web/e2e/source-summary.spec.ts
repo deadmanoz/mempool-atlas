@@ -144,6 +144,10 @@ const selectedTerrainStrokePixelProfile = async (
   await expect(
     page.locator('#rule-list button[data-rule="element_size"]'),
   ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#terrain-canvas")).toHaveAttribute(
+    "aria-label",
+    /BIP-110 rule-combination buckets/,
+  );
   await waitForRendering(page);
   return page.locator("#terrain-canvas").evaluate((canvas) => {
     const context = (canvas as HTMLCanvasElement).getContext("2d");

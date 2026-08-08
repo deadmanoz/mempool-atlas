@@ -1,5 +1,11 @@
 import { prepareCanvasBacking } from "./canvas-backing";
 import {
+  findBucketTerrainGlyph,
+  packBucketTerrainGlyphs,
+  packBucketTerrainGlyphsCooperatively,
+  type BucketTerrainGlyphCollection,
+} from "./bucket-terrain-glyphs";
+import {
   yieldCooperatively,
   type CooperativeWorkOptions,
 } from "./cooperative-work";
@@ -88,7 +94,7 @@ export interface BucketTerrainLayout<
   mode: BucketTerrainMode;
   sections: BucketTerrainSection<SectionKey>[];
   regions: BucketTerrainRegion<SectionKey, RegionKey, Signature>[];
-  glyphs: BucketTerrainGlyph<SectionKey, RegionKey>[];
+  glyphs: BucketTerrainGlyphCollection<SectionKey, RegionKey>;
 }
 
 export type BucketTerrainHit<
@@ -161,6 +167,8 @@ const stagingCanvasByCanvas = new WeakMap<
   HTMLCanvasElement,
   HTMLCanvasElement
 >();
+
+type BucketTerrainRasterPaths = Map<string, Map<number, Path2D>>;
 
 const glyphDensity = <SectionKey extends string, RegionKey extends string>(
   glyph: BucketTerrainGlyph<SectionKey, RegionKey>,
@@ -275,6 +283,70 @@ const splitWeightedRegions = <Key extends string>(
     stack.push({ start: current.start, end: split, rect: firstRect });
   }
   return result;
+};
+
+const paintBucketTerrainRasterLayer = <
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+>(
+  layer: CanvasRenderingContext2D,
+  layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
+  presentation: BucketTerrainPaint<SectionKey, RegionKey, Signature>,
+  pathsByRegion: BucketTerrainRasterPaths,
+  selected: boolean,
+): void => {
+  layer.clearRect(0, 0, layout.width, layout.height);
+  layer.fillStyle = "#071018";
+  layer.fillRect(0, 0, layout.width, layout.height);
+  for (const section of layout.sections) {
+    layer.fillStyle = "#0a161e";
+    layer.fillRect(
+      section.rect.x,
+      section.rect.y,
+      section.rect.width,
+      section.rect.height,
+    );
+    layer.strokeStyle = "#2a3b48";
+    layer.lineWidth = 1;
+    layer.strokeRect(
+      section.rect.x,
+      section.rect.y,
+      section.rect.width,
+      section.rect.height,
+    );
+  }
+  for (const region of layout.regions) {
+    const color = presentation.color(region);
+    layer.fillStyle = color;
+    layer.globalAlpha = selected ? 0.12 : 0.025;
+    layer.fillRect(
+      region.contentRect.x,
+      region.contentRect.y,
+      region.contentRect.width,
+      region.contentRect.height,
+    );
+    layer.globalAlpha = 1;
+    if (!selected) {
+      layer.strokeStyle = presentation.partial(region) ? "#9a7735" : "#243744";
+      layer.lineWidth = 1;
+      layer.strokeRect(
+        region.rect.x,
+        region.rect.y,
+        region.rect.width,
+        region.rect.height,
+      );
+    }
+    const pathsByDensity = pathsByRegion.get(region.key);
+    if (pathsByDensity === undefined) continue;
+    const opacity = presentation.glyphOpacityByRegion!(region, selected);
+    layer.fillStyle = color;
+    for (const [density, path] of pathsByDensity) {
+      layer.globalAlpha = Math.min(selected ? 0.86 : 0.68, opacity * density);
+      layer.fill(path);
+    }
+  }
+  layer.globalAlpha = 1;
 };
 
 interface PopulationMeasurement {
@@ -621,7 +693,7 @@ export const createBucketTerrainLayout = <
     mode,
     sections,
     regions,
-    glyphs,
+    glyphs: packBucketTerrainGlyphs(glyphs),
   };
 };
 
@@ -943,7 +1015,7 @@ export const createBucketTerrainLayoutCooperatively = async <
     mode,
     sections,
     regions,
-    glyphs,
+    glyphs: await packBucketTerrainGlyphsCooperatively(glyphs, options),
   };
 };
 
@@ -970,9 +1042,13 @@ export const hitTestBucketTerrain = <
   if (region === undefined) {
     return null;
   }
-  for (const glyph of layout.glyphs) {
+  const scratch = layout.glyphs.read(0);
+  for (let index = 0; index < layout.glyphs.length; index += 1) {
+    const glyph =
+      scratch === undefined ? undefined : layout.glyphs.read(index, scratch);
+    if (glyph === undefined) continue;
     if (glyph.regionKey === region.key && containsPoint(glyph.rect, x, y)) {
-      return { kind: "transaction", glyph };
+      return { kind: "transaction", glyph: layout.glyphs.at(index)! };
     }
   }
   return { kind: "region", region };
@@ -1040,8 +1116,12 @@ const createBucketTerrainRasterCache = <
   const regionsByKey = new Map(
     layout.regions.map((region) => [region.key, region]),
   );
-  const pathsByRegion = new Map<string, Map<number, Path2D>>();
-  for (const glyph of layout.glyphs) {
+  const pathsByRegion: BucketTerrainRasterPaths = new Map();
+  const scratch = layout.glyphs.read(0);
+  for (let index = 0; index < layout.glyphs.length; index += 1) {
+    const glyph =
+      scratch === undefined ? undefined : layout.glyphs.read(index, scratch);
+    if (glyph === undefined) continue;
     if (!regionsByKey.has(glyph.regionKey)) continue;
     let pathsByDensity = pathsByRegion.get(glyph.regionKey);
     if (pathsByDensity === undefined) {
@@ -1057,66 +1137,133 @@ const createBucketTerrainRasterCache = <
     path.rect(glyph.rect.x, glyph.rect.y, glyph.rect.width, glyph.rect.height);
   }
 
-  const paintLayer = (
-    layer: CanvasRenderingContext2D,
-    selected: boolean,
-  ): void => {
-    layer.clearRect(0, 0, layout.width, layout.height);
-    layer.fillStyle = "#071018";
-    layer.fillRect(0, 0, layout.width, layout.height);
-    for (const section of layout.sections) {
-      layer.fillStyle = "#0a161e";
-      layer.fillRect(
-        section.rect.x,
-        section.rect.y,
-        section.rect.width,
-        section.rect.height,
-      );
-      layer.strokeStyle = "#2a3b48";
-      layer.lineWidth = 1;
-      layer.strokeRect(
-        section.rect.x,
-        section.rect.y,
-        section.rect.width,
-        section.rect.height,
-      );
-    }
-    for (const region of layout.regions) {
-      const color = presentation.color(region);
-      layer.fillStyle = color;
-      layer.globalAlpha = selected ? 0.12 : 0.025;
-      layer.fillRect(
-        region.contentRect.x,
-        region.contentRect.y,
-        region.contentRect.width,
-        region.contentRect.height,
-      );
-      layer.globalAlpha = 1;
-      if (!selected) {
-        layer.strokeStyle = presentation.partial(region)
-          ? "#9a7735"
-          : "#243744";
-        layer.lineWidth = 1;
-        layer.strokeRect(
-          region.rect.x,
-          region.rect.y,
-          region.rect.width,
-          region.rect.height,
-        );
-      }
-      const pathsByDensity = pathsByRegion.get(region.key);
-      if (pathsByDensity === undefined) continue;
-      const opacity = presentation.glyphOpacityByRegion!(region, selected);
-      layer.fillStyle = color;
-      for (const [density, path] of pathsByDensity) {
-        layer.globalAlpha = Math.min(selected ? 0.86 : 0.68, opacity * density);
-        layer.fill(path);
-      }
-    }
-    layer.globalAlpha = 1;
+  paintBucketTerrainRasterLayer(
+    dim.context,
+    layout,
+    presentation,
+    pathsByRegion,
+    false,
+  );
+  paintBucketTerrainRasterLayer(
+    bright.context,
+    layout,
+    presentation,
+    pathsByRegion,
+    true,
+  );
+  const created = {
+    styleKey,
+    pixelWidth,
+    pixelHeight,
+    dim: dim.canvas,
+    bright: bright.canvas,
   };
-  paintLayer(dim.context, false);
-  paintLayer(bright.context, true);
+  rasterCacheByLayout.set(layout, created);
+  return created;
+};
+
+const createBucketTerrainRasterCacheCooperatively = async <
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+>(
+  context: CanvasRenderingContext2D,
+  layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
+  presentation: BucketTerrainPaint<SectionKey, RegionKey, Signature>,
+  options: CooperativeWorkOptions,
+): Promise<BucketTerrainRasterCache | null> => {
+  const styleKey = presentation.rasterStyleKey;
+  if (
+    styleKey === undefined ||
+    presentation.glyphOpacityByRegion === undefined ||
+    typeof document === "undefined" ||
+    typeof Path2D !== "function" ||
+    context.canvas === undefined
+  ) {
+    return null;
+  }
+  const pixelWidth = Math.max(1, context.canvas.width);
+  const pixelHeight = Math.max(1, context.canvas.height);
+  if (pixelWidth * pixelHeight > MAX_RASTER_PIXELS) return null;
+  const cached = rasterCacheByLayout.get(layout);
+  if (
+    cached !== undefined &&
+    cached.styleKey === styleKey &&
+    cached.pixelWidth === pixelWidth &&
+    cached.pixelHeight === pixelHeight
+  ) {
+    return cached;
+  }
+
+  const createLayer = (): {
+    canvas: HTMLCanvasElement;
+    context: CanvasRenderingContext2D;
+  } | null => {
+    const canvas = document.createElement("canvas");
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+    const layerContext = canvas.getContext("2d");
+    if (layerContext === null) return null;
+    layerContext.setTransform(
+      pixelWidth / layout.width,
+      0,
+      0,
+      pixelHeight / layout.height,
+      0,
+      0,
+    );
+    return { canvas, context: layerContext };
+  };
+  const dim = createLayer();
+  const bright = createLayer();
+  if (dim === null || bright === null) return null;
+
+  const batchSize = cooperativeBatchSize(options);
+  const regionsByKey = new Set(layout.regions.map(({ key }) => key));
+  const pathsByRegion: BucketTerrainRasterPaths = new Map();
+  const scratch = layout.glyphs.read(0);
+  for (let start = 0; start < layout.glyphs.length; start += batchSize) {
+    const end = Math.min(layout.glyphs.length, start + batchSize);
+    for (let index = start; index < end; index += 1) {
+      const glyph =
+        scratch === undefined ? undefined : layout.glyphs.read(index, scratch);
+      if (glyph === undefined || !regionsByKey.has(glyph.regionKey)) continue;
+      let pathsByDensity = pathsByRegion.get(glyph.regionKey);
+      if (pathsByDensity === undefined) {
+        pathsByDensity = new Map();
+        pathsByRegion.set(glyph.regionKey, pathsByDensity);
+      }
+      const density = glyphDensity(glyph);
+      let path = pathsByDensity.get(density);
+      if (path === undefined) {
+        path = new Path2D();
+        pathsByDensity.set(density, path);
+      }
+      path.rect(
+        glyph.rect.x,
+        glyph.rect.y,
+        glyph.rect.width,
+        glyph.rect.height,
+      );
+    }
+    if (end < layout.glyphs.length) await yieldCooperatively(options);
+  }
+  paintBucketTerrainRasterLayer(
+    dim.context,
+    layout,
+    presentation,
+    pathsByRegion,
+    false,
+  );
+  await yieldCooperatively(options);
+  paintBucketTerrainRasterLayer(
+    bright.context,
+    layout,
+    presentation,
+    pathsByRegion,
+    true,
+  );
+  options.signal?.throwIfAborted();
   const created = {
     styleKey,
     pixelWidth,
@@ -1162,6 +1309,79 @@ const paintSelectedTerrainGlyph = <
   context.restore();
 };
 
+const paintBucketTerrainRaster = <
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+>(
+  context: CanvasRenderingContext2D,
+  layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
+  presentation: BucketTerrainPaint<SectionKey, RegionKey, Signature>,
+  raster: BucketTerrainRasterCache,
+  selectedTxid: string | null,
+): boolean => {
+  if (
+    typeof context.drawImage !== "function" ||
+    typeof context.save !== "function" ||
+    typeof context.restore !== "function" ||
+    typeof context.beginPath !== "function" ||
+    typeof context.rect !== "function" ||
+    typeof context.clip !== "function"
+  ) {
+    return false;
+  }
+  context.globalAlpha = 1;
+  context.drawImage(
+    raster.dim,
+    0,
+    0,
+    raster.pixelWidth,
+    raster.pixelHeight,
+    0,
+    0,
+    layout.width,
+    layout.height,
+  );
+  const selectedRegions = layout.regions.filter(presentation.selected);
+  if (selectedRegions.length > 0) {
+    context.save();
+    context.beginPath();
+    for (const region of selectedRegions) {
+      context.rect(
+        region.rect.x,
+        region.rect.y,
+        region.rect.width,
+        region.rect.height,
+      );
+    }
+    context.clip();
+    context.drawImage(
+      raster.bright,
+      0,
+      0,
+      raster.pixelWidth,
+      raster.pixelHeight,
+      0,
+      0,
+      layout.width,
+      layout.height,
+    );
+    context.restore();
+    context.strokeStyle = "#6ef2f0";
+    context.lineWidth = 1.75;
+    for (const region of selectedRegions) {
+      context.strokeRect(
+        region.rect.x,
+        region.rect.y,
+        region.rect.width,
+        region.rect.height,
+      );
+    }
+  }
+  paintBucketTerrainSelection(context, layout, selectedTxid);
+  return true;
+};
+
 export const paintBucketTerrainSelection = <
   SectionKey extends string,
   RegionKey extends string,
@@ -1172,10 +1392,28 @@ export const paintBucketTerrainSelection = <
   selectedTxid: string | null,
 ): boolean => {
   if (selectedTxid === null) return false;
-  const selectedGlyph = layout.glyphs.find(({ txid }) => txid === selectedTxid);
+  const selectedGlyph = findBucketTerrainGlyph(layout.glyphs, selectedTxid);
   if (selectedGlyph === undefined) return false;
   paintSelectedTerrainGlyph(context, selectedGlyph);
   return true;
+};
+
+export const paintBucketTerrainCanvasSelection = (
+  canvas: HTMLCanvasElement,
+  layout: BucketTerrainLayout<string, string, unknown>,
+  selectedTxid: string | null,
+): boolean => {
+  const context = canvas.getContext("2d");
+  if (context === null) return false;
+  context.setTransform(
+    canvas.width / layout.width,
+    0,
+    0,
+    canvas.height / layout.height,
+    0,
+    0,
+  );
+  return paintBucketTerrainSelection(context, layout, selectedTxid);
 };
 
 export const paintBucketTerrain = <
@@ -1191,62 +1429,14 @@ export const paintBucketTerrain = <
   const raster = createBucketTerrainRasterCache(context, layout, presentation);
   if (
     raster !== null &&
-    typeof context.drawImage === "function" &&
-    typeof context.save === "function" &&
-    typeof context.restore === "function" &&
-    typeof context.beginPath === "function" &&
-    typeof context.rect === "function" &&
-    typeof context.clip === "function"
+    paintBucketTerrainRaster(
+      context,
+      layout,
+      presentation,
+      raster,
+      selectedTxid,
+    )
   ) {
-    context.globalAlpha = 1;
-    context.drawImage(
-      raster.dim,
-      0,
-      0,
-      raster.pixelWidth,
-      raster.pixelHeight,
-      0,
-      0,
-      layout.width,
-      layout.height,
-    );
-    const selectedRegions = layout.regions.filter(presentation.selected);
-    if (selectedRegions.length > 0) {
-      context.save();
-      context.beginPath();
-      for (const region of selectedRegions) {
-        context.rect(
-          region.rect.x,
-          region.rect.y,
-          region.rect.width,
-          region.rect.height,
-        );
-      }
-      context.clip();
-      context.drawImage(
-        raster.bright,
-        0,
-        0,
-        raster.pixelWidth,
-        raster.pixelHeight,
-        0,
-        0,
-        layout.width,
-        layout.height,
-      );
-      context.restore();
-      context.strokeStyle = "#6ef2f0";
-      context.lineWidth = 1.75;
-      for (const region of selectedRegions) {
-        context.strokeRect(
-          region.rect.x,
-          region.rect.y,
-          region.rect.width,
-          region.rect.height,
-        );
-      }
-    }
-    paintBucketTerrainSelection(context, layout, selectedTxid);
     return;
   }
   context.clearRect(0, 0, layout.width, layout.height);
@@ -1317,7 +1507,11 @@ export const paintBucketTerrain = <
       RegionKey,
       { color: string; pathsByAlpha: Map<number, Path2D> }
     >();
-    for (const glyph of layout.glyphs) {
+    const scratch = layout.glyphs.read(0);
+    for (let index = 0; index < layout.glyphs.length; index += 1) {
+      const glyph =
+        scratch === undefined ? undefined : layout.glyphs.read(index, scratch);
+      if (glyph === undefined) continue;
       const region = regionsByKey.get(glyph.regionKey);
       if (region === undefined) continue;
       let paths = pathsByRegion.get(glyph.regionKey);
@@ -1340,7 +1534,9 @@ export const paintBucketTerrain = <
         glyph.rect.width,
         glyph.rect.height,
       );
-      if (glyph.txid === selectedTxid) selectedGlyph = glyph;
+      if (glyph.txid === selectedTxid) {
+        selectedGlyph = layout.glyphs.at(index) ?? null;
+      }
     }
     for (const { color, pathsByAlpha } of pathsByRegion.values()) {
       context.fillStyle = color;
@@ -1352,7 +1548,11 @@ export const paintBucketTerrain = <
   } else {
     let paintedRegionKey: RegionKey | null = null;
     let paintedRegionSelected = false;
-    for (const glyph of layout.glyphs) {
+    const scratch = layout.glyphs.read(0);
+    for (let index = 0; index < layout.glyphs.length; index += 1) {
+      const glyph =
+        scratch === undefined ? undefined : layout.glyphs.read(index, scratch);
+      if (glyph === undefined) continue;
       const region = regionsByKey.get(glyph.regionKey);
       if (region === undefined) continue;
       if (paintedRegionKey !== glyph.regionKey) {
@@ -1367,7 +1567,9 @@ export const paintBucketTerrain = <
         glyph.rect.width,
         glyph.rect.height,
       );
-      if (glyph.txid === selectedTxid) selectedGlyph = glyph;
+      if (glyph.txid === selectedTxid) {
+        selectedGlyph = layout.glyphs.at(index) ?? null;
+      }
     }
   }
   context.globalAlpha = 1;
@@ -1415,6 +1617,34 @@ export const paintBucketTerrainCooperatively = async <
 ): Promise<void> => {
   const batchSize = cooperativeBatchSize(options);
   options.signal?.throwIfAborted();
+  const raster = await createBucketTerrainRasterCacheCooperatively(
+    context,
+    layout,
+    presentation,
+    options,
+  );
+  options.signal?.throwIfAborted();
+  if (raster !== null) {
+    context.setTransform(
+      canvas.width / layout.width,
+      0,
+      0,
+      canvas.height / layout.height,
+      0,
+      0,
+    );
+    if (
+      paintBucketTerrainRaster(
+        context,
+        layout,
+        presentation,
+        raster,
+        selectedTxid,
+      )
+    ) {
+      return;
+    }
+  }
   const staging = stagingCanvas(canvas);
   const layer = staging.getContext("2d");
   if (layer === null) throw new Error("Canvas 2D rendering is unavailable");
@@ -1478,10 +1708,12 @@ export const paintBucketTerrainCooperatively = async <
   let selectedGlyph: BucketTerrainGlyph<SectionKey, RegionKey> | null = null;
   let paintedRegionKey: RegionKey | null = null;
   let paintedRegionSelected = false;
+  const scratch = layout.glyphs.read(0);
   for (let start = 0; start < layout.glyphs.length; start += batchSize) {
     const end = Math.min(layout.glyphs.length, start + batchSize);
     for (let index = start; index < end; index += 1) {
-      const glyph = layout.glyphs[index];
+      const glyph =
+        scratch === undefined ? undefined : layout.glyphs.read(index, scratch);
       if (glyph === undefined) continue;
       const region = regionsByKey.get(glyph.regionKey);
       if (region === undefined) continue;
@@ -1501,7 +1733,9 @@ export const paintBucketTerrainCooperatively = async <
         glyph.rect.width,
         glyph.rect.height,
       );
-      if (glyph.txid === selectedTxid) selectedGlyph = glyph;
+      if (glyph.txid === selectedTxid) {
+        selectedGlyph = layout.glyphs.at(index) ?? null;
+      }
     }
     if (end < layout.glyphs.length) await yieldCooperatively(options);
   }

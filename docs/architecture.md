@@ -353,8 +353,12 @@ partial violations retain separate proven-plus-unresolved sets. Rule controls
 are marginal filters and the full seven-rule evidence remains available only in
 this presentation. The cooperative classifier pass also builds compact row
 indexes for all seven marginal rule populations. The terrain keeps one logical
-glyph per transaction for hit testing, while two bounded per-layout canvas
-rasters let rule changes compose dim and highlighted regions without replaying
+glyph per transaction for hit testing, but retains its geometry, source row,
+virtual size, and region membership in typed columns rather than nested glyph
+objects. A glyph object is materialized only at an interaction boundary. Cold
+BIP-110 grouping, layout, typed-column packing, and initial raster construction
+run in cancellable bounded slices, while two bounded per-layout canvas rasters
+let later rule changes compose dim and highlighted regions without replaying
 every glyph. Changing the layout size, metric, or selection kind replaces that
 raster pair. Selecting a transaction does not replace the active label, rule,
 or bucket emphasis. It repaints the existing composition with one local glow,
