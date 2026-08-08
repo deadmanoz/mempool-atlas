@@ -170,6 +170,7 @@ export class PackedPublicationStore {
   private readonly inputCount: UnsignedColumn;
   private readonly outputCount: UnsignedColumn;
   private readonly opReturnBytes: UnsignedColumn;
+  private readonly recognizedNonOpReturnBytes: UnsignedColumn;
   private readonly outputSats: UnsignedColumn;
   private readonly witnessBytes: UnsignedColumn;
   private readonly classifiers: ClassifierColumn[];
@@ -196,6 +197,9 @@ export class PackedPublicationStore {
     this.inputCount = new UnsignedColumn(structure.inputCount);
     this.outputCount = new UnsignedColumn(structure.outputCount);
     this.opReturnBytes = new UnsignedColumn(structure.opReturnBytes);
+    this.recognizedNonOpReturnBytes = new UnsignedColumn(
+      structure.recognizedNonOpReturnBytes,
+    );
     this.outputSats = new UnsignedColumn(structure.outputSats);
     this.witnessBytes = new UnsignedColumn(structure.witnessBytes);
     this.classifiers = publication.classifiers.map(
@@ -228,10 +232,17 @@ export class PackedPublicationStore {
   private structure(row: number): TransactionStructure | null {
     if (!bit(this.structureBits, row)) return null;
     const packedRow = this.structureRanks[row] ?? 0;
+    const opReturnBytes = this.opReturnBytes.at(packedRow);
+    const recognizedCarriedBytes =
+      opReturnBytes + this.recognizedNonOpReturnBytes.at(packedRow);
+    if (!Number.isSafeInteger(recognizedCarriedBytes)) {
+      throw new TypeError("Recognized carried byte total is unsafe");
+    }
     return {
       input_count: this.inputCount.at(packedRow),
       output_count: this.outputCount.at(packedRow),
-      op_return_bytes: this.opReturnBytes.at(packedRow),
+      op_return_bytes: opReturnBytes,
+      recognized_carried_bytes: recognizedCarriedBytes,
       output_sats: this.outputSats.at(packedRow),
       witness_bytes: this.witnessBytes.at(packedRow),
     };

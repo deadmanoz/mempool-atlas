@@ -226,17 +226,17 @@ export const commitComparisonDistributionSide = ({
     metricFormat,
     emptyMessage: COMPARISON_EMPTY_MESSAGE,
   });
-  panels.data.note.textContent = `Stacked ${metricNoun} per log carried-byte bin by Data protocols bucket · ${countFormat.format(model.totals.carrier.count)} transactions carry OP_RETURN bytes. References describe conventional pushed-payload forms; Atlas plots carried bytes summed across OP_RETURN outputs, not serialized script size.`;
+  panels.data.note.textContent = `Stacked ${metricNoun} per log recognized-carried-byte bin by Data protocols bucket · ${countFormat.format(model.totals.carrier.count)} transactions have recognized carriage. Atlas sums disjoint positive evidence from OP_RETURN and registered carrier shapes; the value is a conservative lower bound, not an estimate of every possible payload.`;
   renderSpectrumChart(panels.data.container, model.dataSpectrum, {
     domain: DATA_BYTES_DOMAIN,
     ticks: DATA_BYTES_TICKS,
-    axisLabel: "Carried bytes",
+    axisLabel: "Recognized carried bytes",
     metricLabel,
-    shareDenominatorLabel: "OP_RETURN carriers",
+    shareDenominatorLabel: "recognized carriers",
     keyPrefix: `comparison:${side}:data-carriage`,
     formatRangeValue: formatByteAxisValue,
     metricFormat,
-    emptyMessage: "No observed transaction carries OP_RETURN data.",
+    emptyMessage: "No observed transaction has recognized carried bytes.",
   });
   panels.entanglement.note.textContent = `Unconfirmed mempool relatives reported by this source · ${countFormat.format(model.totals.replaceable.count)} transactions are reported replaceable.`;
   renderCompositionBars(panels.entanglement.container, model.entanglement, {

@@ -44,6 +44,7 @@ export interface PackedStructureTransfer {
   inputCount: PackedUnsignedColumnTransfer;
   outputCount: PackedUnsignedColumnTransfer;
   opReturnBytes: PackedUnsignedColumnTransfer;
+  recognizedNonOpReturnBytes: PackedUnsignedColumnTransfer;
   outputSats: PackedUnsignedColumnTransfer;
   witnessBytes: PackedUnsignedColumnTransfer;
 }

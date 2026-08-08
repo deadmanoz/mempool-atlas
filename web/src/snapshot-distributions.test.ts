@@ -59,6 +59,7 @@ interface TransactionOptions {
   vsize: number;
   structured?: boolean;
   carrierBytes?: number;
+  recognizedCarrierBytes?: number;
   replaceable?: boolean;
   propertyLabels?: string[];
   dataLabels?: string[];
@@ -71,6 +72,7 @@ const transaction = (
     vsize,
     structured = true,
     carrierBytes = 0,
+    recognizedCarrierBytes = carrierBytes,
     replaceable = false,
     propertyLabels = ["p2pkh"],
     dataLabels = [],
@@ -93,6 +95,7 @@ const transaction = (
           input_count: suffix,
           output_count: suffix + 1,
           op_return_bytes: carrierBytes,
+          recognized_carried_bytes: recognizedCarrierBytes,
           output_sats: suffix * 10_000,
           witness_bytes: 0,
         }
@@ -224,6 +227,27 @@ describe("buildSnapshotDistributionModel", () => {
     expect(rightModel.totals.population.vsize).toBe(300);
     expect(leftModel.totals.carrier).toEqual({ count: 1, vsize: 120 });
     expect(rightModel.totals.carrier).toEqual({ count: 0, vsize: 0 });
+  });
+
+  it("includes recognized non-OP_RETURN carriers in carriage distributions", () => {
+    const witnessCarrier = transaction(8, {
+      vsize: 420,
+      carrierBytes: 0,
+      recognizedCarrierBytes: 1_530,
+      dataLabels: [],
+    });
+    const model = buildSnapshotDistributionModel(
+      input("count", [witnessCarrier]),
+    );
+
+    expect(model.totals.carrier).toEqual({ count: 1, vsize: 420 });
+    expect(model.dataSpectrum.totalWeight).toBe(1);
+    expect(
+      model.dataSpectrum.bins.reduce((total, bin) => total + bin.total, 0),
+    ).toBe(1);
+    expect(
+      model.dataSpectrum.bins.flatMap(({ segments }) => segments),
+    ).toHaveLength(1);
   });
 
   it("retains no transaction collections or transaction objects", () => {

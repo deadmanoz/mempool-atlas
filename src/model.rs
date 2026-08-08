@@ -585,6 +585,7 @@ pub struct TransactionStructure {
     pub input_count: u64,
     pub output_count: u64,
     pub op_return_bytes: u64,
+    pub recognized_carried_bytes: u64,
     pub output_sats: u64,
     pub witness_bytes: u64,
 }
@@ -618,9 +619,30 @@ impl TransactionStructure {
             input_count,
             output_count,
             op_return_bytes,
+            recognized_carried_bytes: op_return_bytes,
             output_sats,
             witness_bytes,
         })
+    }
+
+    pub fn with_recognized_carried_bytes(
+        mut self,
+        recognized_carried_bytes: u64,
+    ) -> Result<Self, ModelError> {
+        if recognized_carried_bytes < self.op_return_bytes {
+            return Err(ModelError::RecognizedCarriedBytesBelowOpReturn {
+                recognized_carried_bytes,
+                op_return_bytes: self.op_return_bytes,
+            });
+        }
+        if recognized_carried_bytes > MAX_SAFE_JSON_INTEGER {
+            return Err(ModelError::UnsafeJsonInteger {
+                field: "recognized_carried_bytes",
+                value: recognized_carried_bytes,
+            });
+        }
+        self.recognized_carried_bytes = recognized_carried_bytes;
+        Ok(self)
     }
 }
 
@@ -1342,6 +1364,13 @@ pub enum ModelError {
         "transaction structure must describe at least one input and one output, got {input_count} and {output_count}"
     )]
     EmptyTransactionStructure { input_count: u64, output_count: u64 },
+    #[error(
+        "recognized carried bytes {recognized_carried_bytes} cannot be below OP_RETURN bytes {op_return_bytes}"
+    )]
+    RecognizedCarriedBytesBelowOpReturn {
+        recognized_carried_bytes: u64,
+        op_return_bytes: u64,
+    },
     #[error("{field} value {value} cannot be represented exactly in JSON")]
     UnsafeJsonInteger { field: &'static str, value: u64 },
     #[error("{field} value {value} cannot be represented exactly in JSON")]
@@ -1389,6 +1418,20 @@ mod tests {
 
     fn test_structure() -> TransactionStructure {
         TransactionStructure::new(1, 2, 0, 50_000, 107).expect("structure")
+    }
+
+    #[test]
+    fn recognized_carriage_cannot_erase_op_return_bytes() {
+        let structure = TransactionStructure::new(1, 1, 80, 1_000, 0).expect("structure");
+        assert_eq!(structure.recognized_carried_bytes, 80);
+        assert!(structure.with_recognized_carried_bytes(79).is_err());
+        assert_eq!(
+            structure
+                .with_recognized_carried_bytes(1_610)
+                .expect("recognized carriage")
+                .recognized_carried_bytes,
+            1_610
+        );
     }
 
     fn compatible_classification(txid: &str, wtxid: &str) -> Arc<TransactionClassification> {

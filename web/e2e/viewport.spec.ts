@@ -329,12 +329,21 @@ test.describe("node page", () => {
     const references = page.locator(
       "#data-chart .panel-axis [data-reference='true']",
     );
-    await expect(references).toHaveCount(2);
-    await expect(references.nth(0)).toHaveText("40 B");
-    await expect(references.nth(1)).toHaveText("80 B");
+    await expect(references).toHaveText([
+      "40 B",
+      "80 B",
+      "255 B",
+      "1,020 B",
+      "1,530 B",
+      "6,334 B",
+    ]);
     await expect(references.nth(1)).toHaveAttribute(
       "data-distribution-inspection-detail",
       /83-byte OP_RETURN script/,
+    );
+    await expect(references.nth(4)).toHaveAttribute(
+      "data-distribution-inspection-detail",
+      /JXL-n-hide/,
     );
     await expect(
       page.locator("#value-chart .spectrum-y-axis-title"),

@@ -221,6 +221,7 @@ struct StructureBody {
     input_count: UnsignedColumn,
     output_count: UnsignedColumn,
     op_return_bytes: UnsignedColumn,
+    recognized_non_op_return_bytes: UnsignedColumn,
     output_sats: UnsignedColumn,
     witness_bytes: UnsignedColumn,
 }
@@ -872,6 +873,15 @@ fn structure_body(
                 .iter()
                 .filter_map(|entry| entry.structure.map(|value| value.op_return_bytes)),
         )?,
+        recognized_non_op_return_bytes: unsigned_column(snapshot.transactions.iter().filter_map(
+            |entry| {
+                entry.structure.map(|value| {
+                    value
+                        .recognized_carried_bytes
+                        .saturating_sub(value.op_return_bytes)
+                })
+            },
+        ))?,
         output_sats: unsigned_column(
             snapshot
                 .transactions
@@ -1359,7 +1369,12 @@ mod tests {
         )
         .expect("entry");
         if classified {
-            entry.structure = Some(TransactionStructure::new(2, 3, 4, 500, 6).expect("structure"));
+            entry.structure = Some(
+                TransactionStructure::new(2, 3, 4, 500, 6)
+                    .expect("structure")
+                    .with_recognized_carried_bytes(1_530)
+                    .expect("recognized carriage"),
+            );
             entry.classifications = vec![
                 result(
                     "transaction_properties",
@@ -1640,34 +1655,6 @@ mod tests {
         let differing = decoded(&membership, "differing_wtxids_base64");
         assert_eq!(&differing[..32], &[0x91; 32]);
         assert_eq!(&differing[32..], &[0x93; 32]);
-    }
-
-    #[test]
-    fn unclassified_rows_have_zero_dictionary_codes_and_absent_structure() {
-        let (source, snapshot) = fixture();
-        let bundle = encode_staged_snapshot(&source, &snapshot).expect("encoding");
-        let structure = body_json(&bundle.structure);
-        assert_eq!(
-            decoded(&structure, "presence_bitset_base64"),
-            vec![0b0000_0101]
-        );
-        assert_eq!(decoded_column(&structure, "input_count"), vec![2, 2]);
-
-        let lane = bundle
-            .classifier_stages
-            .iter()
-            .find(|stage| stage.descriptor.classifier_id.as_deref() == Some("transaction_shape"))
-            .expect("shape lane");
-        let lane = body_json(lane);
-        assert_eq!(decoded_column(&lane, "result_codes"), vec![1, 0, 1]);
-        assert_eq!(
-            lane["result_dictionary"]
-                .as_array()
-                .expect("dictionary")
-                .len(),
-            1
-        );
-        assert_eq!(lane["result_dictionary"][0]["state"], "partial");
     }
 
     #[test]

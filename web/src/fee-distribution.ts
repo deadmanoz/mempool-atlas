@@ -121,17 +121,16 @@ export const VSIZE_TICKS: readonly AxisTick[] = logDomainTicks(VSIZE_DOMAIN, [
   { value: 131_072, label: "128 KivB+", priority: 3 },
 ]);
 
-/** OP_RETURN carried bytes, one byte through 128 KiB. */
+/** Recognized carried bytes, one byte through 512 KiB. */
 export const DATA_BYTES_DOMAIN: Readonly<LogDomain> = {
   minLog2: 0,
-  maxLog2: 17,
+  maxLog2: 19,
 };
 
 export const DATA_BYTES_TICKS: readonly AxisTick[] = logDomainTicks(
   DATA_BYTES_DOMAIN,
   [
     { value: 1, label: "1 B", priority: 3 },
-    { value: 8, label: "8 B", priority: 1 },
     {
       value: 40,
       label: "40 B",
@@ -146,10 +145,38 @@ export const DATA_BYTES_TICKS: readonly AxisTick[] = logDomainTicks(
         "Payload reference. Bitcoin Core 0.11 defaulted to 80 pushed data bytes. A conventional single-push 80-byte payload serializes to an 83-byte OP_RETURN script, the Core 0.12–29 and BIP-110 script-size reference.",
       priority: 3,
     },
-    { value: 512, label: "512 B", priority: 2 },
-    { value: 4_096, label: "4 KiB", priority: 2 },
+    {
+      value: 255,
+      label: "255 B",
+      description:
+        "Largest payload item used by the exact BIP-110-compatible push and witness-argument carrier fingerprints.",
+      priority: 3,
+    },
+    {
+      value: 1_020,
+      label: "1,020 B",
+      description:
+        "Minimum recognized witness-argument carrier: four exact 255-byte arguments consumed by matching drops.",
+      priority: 2,
+    },
+    {
+      value: 1_530,
+      label: "1,530 B",
+      description:
+        "Exact JXL-n-hide P2WSH envelope payload: six 255-byte pushes.",
+      priority: 3,
+    },
+    {
+      value: 6_334,
+      label: "6,334 B",
+      description:
+        "Maximum OLGA payload in 198 standard P2WSH carrier outputs after its two-byte length prefix.",
+      priority: 3,
+    },
     { value: 32_768, label: "32 KiB", priority: 1 },
-    { value: 131_072, label: "128 KiB+", priority: 3 },
+    { value: 131_072, label: "128 KiB", priority: 2 },
+    { value: 262_144, label: "256 KiB", priority: 2 },
+    { value: 524_288, label: "512 KiB+", priority: 3 },
   ],
 );
 

@@ -22,7 +22,7 @@ use tracing::warn;
 use crate::classification_rpc::{
     ClassificationRpcClient, ClassificationRpcError, ClassificationRpcOutcome,
 };
-use crate::classifiers::{classify_transaction, transaction_structure};
+use crate::classifiers::{classify_transaction_with_metrics, transaction_structure};
 #[cfg(test)]
 use crate::model::MempoolEntry;
 use crate::model::{
@@ -2255,11 +2255,20 @@ impl PendingSlice {
                 structure,
                 evidence,
             );
-            classification.results = classify_transaction(
+            let classifier_output = classify_transaction_with_metrics(
                 &candidate.transaction,
                 &prevouts,
                 &classification.assessment,
             );
+            let recognized_carried_bytes = classification
+                .structure
+                .op_return_bytes
+                .saturating_add(classifier_output.recognized_non_op_return_bytes);
+            classification.structure = classification
+                .structure
+                .with_recognized_carried_bytes(recognized_carried_bytes)
+                .expect("recognized carriage is bounded by the admitted raw transaction");
+            classification.results = classifier_output.results;
             classifications.push(CachedClassification {
                 classification: Arc::new(classification),
                 retryable,

@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn unclassified_rows_have_zero_dictionary_codes_and_absent_structure() {
+    let (source, snapshot) = fixture();
+    let bundle = encode_staged_snapshot(&source, &snapshot).expect("encoding");
+    let structure = body_json(&bundle.structure);
+    assert_eq!(
+        decoded(&structure, "presence_bitset_base64"),
+        vec![0b0000_0101]
+    );
+    assert_eq!(decoded_column(&structure, "input_count"), vec![2, 2]);
+    assert_eq!(decoded_column(&structure, "op_return_bytes"), vec![4, 4]);
+    assert_eq!(
+        decoded_column(&structure, "recognized_non_op_return_bytes"),
+        vec![1_526, 1_526]
+    );
+
+    let lane = bundle
+        .classifier_stages
+        .iter()
+        .find(|stage| stage.descriptor.classifier_id.as_deref() == Some("transaction_shape"))
+        .expect("shape lane");
+    let lane = body_json(lane);
+    assert_eq!(decoded_column(&lane, "result_codes"), vec![1, 0, 1]);
+    assert_eq!(
+        lane["result_dictionary"]
+            .as_array()
+            .expect("dictionary")
+            .len(),
+        1
+    );
+    assert_eq!(lane["result_dictionary"][0]["state"], "partial");
+}
+
+#[test]
 fn retained_membership_validation_preserves_structural_invariants() {
     let (source, snapshot) = fixture();
     let first = encode_staged_snapshot(&source, &snapshot).expect("first encoding");

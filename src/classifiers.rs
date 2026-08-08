@@ -20,7 +20,7 @@ use crate::model::{
     DATA_PROTOCOLS_CLASSIFIER_ID, KNOTS_BIP110_CLASSIFIER_ID, ModelError,
     TRANSACTION_PROPERTIES_CLASSIFIER_ID, TRANSACTION_SHAPE_CLASSIFIER_ID, TransactionStructure,
 };
-use data_carriage::data_carriage_shape;
+use data_carriage::analyze_data_carriage;
 
 const ORD_ENVELOPE_BYTES: [u8; 6] = [0x00, 0x63, 0x03, 0x6f, 0x72, 0x64];
 const ORD_PROTOCOL_ID: &[u8] = b"ord";
@@ -124,19 +124,28 @@ pub fn transaction_structure(
 
 /// Classifies one exact witness variant after the shared fact resolver has
 /// reached a terminal state for all of its spent-output scripts.
-pub fn classify_transaction(
+pub(crate) struct TransactionClassifierOutput {
+    pub(crate) results: Vec<ClassificationResult>,
+    pub(crate) recognized_non_op_return_bytes: u64,
+}
+
+pub(crate) fn classify_transaction_with_metrics(
     transaction: &Transaction,
     prevouts: &PrevoutSet,
     bip110: &Bip110Assessment,
-) -> Vec<ClassificationResult> {
+) -> TransactionClassifierOutput {
     let data = data_protocols(transaction);
-    vec![
-        transaction_properties(transaction, prevouts),
-        transaction_shape(transaction, prevouts, &data),
-        data,
-        data_carriage_shape(transaction, prevouts),
-        bip110_result(bip110),
-    ]
+    let carriage = analyze_data_carriage(transaction, prevouts);
+    TransactionClassifierOutput {
+        results: vec![
+            transaction_properties(transaction, prevouts),
+            transaction_shape(transaction, prevouts, &data),
+            data,
+            carriage.result,
+            bip110_result(bip110),
+        ],
+        recognized_non_op_return_bytes: carriage.recognized_non_op_return_bytes,
+    }
 }
 
 fn result(
@@ -1213,7 +1222,7 @@ mod tests {
         );
         let prevouts =
             PrevoutSet::from_vec(vec![Some(crate::bip110::PrevoutFacts::new(p2tr(2), None))]);
-        let results = classify_transaction(&tx, &prevouts, &compatible());
+        let results = classify_transaction_with_metrics(&tx, &prevouts, &compatible()).results;
         assert_eq!(
             results
                 .iter()

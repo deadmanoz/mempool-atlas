@@ -314,6 +314,13 @@ const packedPublication = (
           structure === null ? [] : [structure.op_return_bytes],
         ),
       ),
+      recognizedNonOpReturnBytes: packedColumn(
+        transactions.flatMap(({ structure }) =>
+          structure === null
+            ? []
+            : [structure.recognized_carried_bytes - structure.op_return_bytes],
+        ),
+      ),
       outputSats: packedColumn(
         transactions.flatMap(({ structure }) =>
           structure === null ? [] : [structure.output_sats],

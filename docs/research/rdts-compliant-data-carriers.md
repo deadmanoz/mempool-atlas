@@ -125,10 +125,13 @@ The remaining concrete gaps are:
    high. A signature is a fingerprint, not proof that the suffix is a valid
    file.
 
-4. **`structure.op_return_bytes` measures only OP_RETURN.** Every technique in
-   Section 4 that is not [O4](#o4) contributes zero to it, so a 400 KB witness
-   carrier reports zero carried bytes. Any "data carriage" distribution built
-   on it will read these transactions as empty.
+4. **Resolved: `structure.recognized_carried_bytes` now covers implemented
+   carriers.** `structure.op_return_bytes` remains channel-specific, while the
+   sibling fact adds bytes justified by the exact push/drop, OP_PLENTY,
+   JXL-n-hide, witness-argument, OLGA, and off-curve P2TR fingerprints. The
+   distribution now uses the broader fact, so recognized witness carriers no
+   longer appear empty. This remains a conservative lower bound, not a total
+   payload estimate.
 
 ---
 
@@ -629,12 +632,13 @@ self-consistent OLGA P2WSH grammar, not arbitrary O1 or O3 reassembly. The file
 signature label uses a constant-memory consensus-serialization scan and
 deliberately excludes short collision-prone prefixes.
 
-**C. Extend `structure` with a carried-bytes fact.**
-`op_return_bytes` measures one channel. A sibling `witness_carried_bytes` (or
-a broader `carried_bytes`) would let the existing data-carriage distribution
-stop reporting 400 KB witness carriers as zero. This changes a measurement
-basis, so it needs its own decision and a documented definition, exactly as
-the current `op_return_bytes` definition is documented.
+**C. Extend `structure` with a carried-bytes fact. Shipped.**
+`recognized_carried_bytes` retains `op_return_bytes` and adds only byte counts
+backed by the implemented exact carrier fingerprints. Embedded file magic adds
+zero because it can overlap another carrier. Evidence truncation does not
+truncate the metric. The public distribution uses this fact on a 512 KiB axis,
+with exact reference ticks for 255-byte items, the 1,020-byte witness minimum,
+the 1,530-byte JXL-n-hide envelope, and the 6,334-byte OLGA maximum.
 
 ### Suggested priority
 
@@ -649,7 +653,7 @@ the current `op_return_bytes` definition is documented.
    unspendability test.
 4. **`embedded_file_magic`**. Cheap bounded scan, high explanatory value for
    users, directly addresses the file-carving concern.
-5. **C**, the carried-bytes fact, once the lenses above define what counts.
+5. **C**, the carried-bytes fact, shipped after the carrier definitions above.
 6. Field, signature and commitment channels (F1, S1, C1): document as limits.
    Do not implement.
 

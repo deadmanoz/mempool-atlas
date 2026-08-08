@@ -110,7 +110,7 @@ const buildTotals = (
     addTransaction(totals.population, transaction);
     if (transaction.structure !== null) {
       addTransaction(totals.structured, transaction);
-      if (transaction.structure.op_return_bytes > 0) {
+      if (transaction.structure.recognized_carried_bytes > 0) {
         addTransaction(totals.carrier, transaction);
       }
     }
@@ -137,7 +137,7 @@ const buildTotalsCooperatively = async (
       addTransaction(totals.population, transaction);
       if (transaction.structure !== null) {
         addTransaction(totals.structured, transaction);
-        if (transaction.structure.op_return_bytes > 0) {
+        if (transaction.structure.recognized_carried_bytes > 0) {
           addTransaction(totals.carrier, transaction);
         }
       }
@@ -169,7 +169,7 @@ export const buildSnapshotDistributionModel = ({
     classifierCatalog.find(({ id }) => id === "data_protocols") ?? null;
   const carrierGroups = filteredGroups(
     panelBucketGroups(transactions, dataDescriptor, metric, dataGroupLimit),
-    (transaction) => (transaction.structure?.op_return_bytes ?? 0) > 0,
+    (transaction) => (transaction.structure?.recognized_carried_bytes ?? 0) > 0,
   );
   const structuredGroups = filteredGroups(
     groups,
@@ -191,7 +191,7 @@ export const buildSnapshotDistributionModel = ({
       carrierGroups,
       metric,
       DATA_BYTES_DOMAIN,
-      (transaction) => transaction.structure?.op_return_bytes ?? 0,
+      (transaction) => transaction.structure?.recognized_carried_bytes ?? 0,
     ),
     complexityDensity: buildComplexityDensity(transactions, metric),
     entanglement: buildEntanglementBars(transactions, metric),
@@ -279,10 +279,10 @@ export const buildSnapshotDistributionModelCooperatively = async (
     carrierGroups,
     metric,
     DATA_BYTES_DOMAIN,
-    (transaction) => transaction.structure?.op_return_bytes ?? 0,
+    (transaction) => transaction.structure?.recognized_carried_bytes ?? 0,
     options,
     undefined,
-    (transaction) => (transaction.structure?.op_return_bytes ?? 0) > 0,
+    (transaction) => (transaction.structure?.recognized_carried_bytes ?? 0) > 0,
   );
   const complexityDensity = await buildComplexityDensityCooperatively(
     transactions,

@@ -137,7 +137,8 @@ const publication = (): PackedPublicationTransfer => ({
     presenceRanks: new Uint32Array([0, 1, 1]).buffer,
     inputCount: column(1),
     outputCount: column(2),
-    opReturnBytes: column(0),
+    opReturnBytes: column(80),
+    recognizedNonOpReturnBytes: column(1_450),
     outputSats: column(5),
     witnessBytes: column(3),
   },
@@ -225,6 +226,17 @@ describe("PackedPublicationStore", () => {
     );
   });
 
+  it("rejects an unsafe reconstructed carried-byte total", () => {
+    const current = publication();
+    current.structure.opReturnBytes = signedColumn(Number.MAX_SAFE_INTEGER);
+    current.structure.recognizedNonOpReturnBytes = column(1);
+    const store = new PackedPublicationStore(current);
+
+    expect(() => store.snapshot.transactions[0]?.structure).toThrow(
+      "Recognized carried byte total is unsafe",
+    );
+  });
+
   it("exposes a bounded non-owning row view over transferred columns", () => {
     const store = new PackedPublicationStore(publication());
 
@@ -234,7 +246,12 @@ describe("PackedPublicationStore", () => {
       wtxid: "00".repeat(32),
       vsize: 1,
       replaceable: true,
-      structure: { input_count: 1, output_count: 2 },
+      structure: {
+        input_count: 1,
+        output_count: 2,
+        op_return_bytes: 80,
+        recognized_carried_bytes: 1_530,
+      },
       bip110: { status: "compatible" },
     });
     expect(store.snapshot.transactions[1]).toMatchObject({

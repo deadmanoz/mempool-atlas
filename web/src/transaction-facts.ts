@@ -59,6 +59,12 @@ export const transactionFactPairs = (
       `${countFormat.format(structure.op_return_bytes)} bytes`,
     ]);
   }
+  if (structure.recognized_carried_bytes > structure.op_return_bytes) {
+    pairs.push([
+      "Recognized carriage",
+      `${countFormat.format(structure.recognized_carried_bytes)} bytes`,
+    ]);
+  }
   return pairs;
 };
 
@@ -84,6 +90,11 @@ export const transactionFactSummary = (
     if (structure.op_return_bytes > 0) {
       parts.push(
         `OP_RETURN ${countFormat.format(structure.op_return_bytes)} B`,
+      );
+    }
+    if (structure.recognized_carried_bytes > structure.op_return_bytes) {
+      parts.push(
+        `recognized carriage ${countFormat.format(structure.recognized_carried_bytes)} B`,
       );
     }
   }

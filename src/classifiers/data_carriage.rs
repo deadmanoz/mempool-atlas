@@ -62,6 +62,7 @@ const LABEL_ORDER: [&str; 8] = [
 struct Analysis {
     labels: BTreeSet<&'static str>,
     detections: Vec<Value>,
+    recognized_non_op_return_bytes: u64,
 }
 
 impl Analysis {
@@ -71,12 +72,23 @@ impl Analysis {
             self.detections.push(evidence);
         }
     }
+
+    fn recognize_non_op_return_bytes(&mut self, bytes: usize) {
+        self.recognized_non_op_return_bytes = self
+            .recognized_non_op_return_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
 }
 
-pub(super) fn data_carriage_shape(
+pub(super) struct DataCarriageAnalysis {
+    pub(super) result: ClassificationResult,
+    pub(super) recognized_non_op_return_bytes: u64,
+}
+
+pub(super) fn analyze_data_carriage(
     transaction: &Transaction,
     prevouts: &PrevoutSet,
-) -> ClassificationResult {
+) -> DataCarriageAnalysis {
     let mut analysis = Analysis::default();
     analyze_output_carriage(transaction, &mut analysis);
     if let Some(detection) = embedded_file_magic(transaction) {
@@ -135,6 +147,7 @@ pub(super) fn data_carriage_shape(
             continue;
         };
         if let Some(detection) = push_drop_carriage(&instructions) {
+            analysis.recognize_non_op_return_bytes(detection.pushed_bytes);
             analysis.detect(
                 "push_drop_witness",
                 json!({
@@ -149,6 +162,7 @@ pub(super) fn data_carriage_shape(
             );
         }
         if let Some(detection) = op_plenty_carriage(&instructions) {
+            analysis.recognize_non_op_return_bytes(detection.payload_bytes);
             analysis.detect(
                 "opcode_value_coding",
                 json!({
@@ -165,6 +179,7 @@ pub(super) fn data_carriage_shape(
         if carrier == "p2wsh"
             && let Some(detection) = p2wsh_envelope(&instructions)
         {
+            analysis.recognize_non_op_return_bytes(detection.pushed_bytes);
             analysis.detect(
                 "p2wsh_envelope",
                 json!({
@@ -182,6 +197,7 @@ pub(super) fn data_carriage_shape(
         if let Some(detection) =
             witness_argument_carriage(&elements[..element_index], &instructions)
         {
+            analysis.recognize_non_op_return_bytes(detection.payload_bytes);
             analysis.detect(
                 "witness_argument_carrier",
                 json!({
@@ -204,25 +220,33 @@ pub(super) fn data_carriage_shape(
     let primary = LABEL_ORDER
         .into_iter()
         .find(|label| analysis.labels.contains(label));
-    result(
-        DATA_CARRIAGE_SHAPE_CLASSIFIER_ID,
-        if complete {
-            ClassificationResultState::Complete
-        } else {
-            ClassificationResultState::Partial
-        },
-        primary,
-        ordered_labels(&analysis.labels, LABEL_ORDER),
-        if complete {
-            Vec::new()
-        } else {
-            vec!["input_script_pubkeys".to_owned()]
-        },
-        json!({
-            "missing_input_script_count": missing_input_scripts,
-            "detections": analysis.detections,
-        }),
-    )
+    DataCarriageAnalysis {
+        result: result(
+            DATA_CARRIAGE_SHAPE_CLASSIFIER_ID,
+            if complete {
+                ClassificationResultState::Complete
+            } else {
+                ClassificationResultState::Partial
+            },
+            primary,
+            ordered_labels(&analysis.labels, LABEL_ORDER),
+            if complete {
+                Vec::new()
+            } else {
+                vec!["input_script_pubkeys".to_owned()]
+            },
+            json!({
+                "missing_input_script_count": missing_input_scripts,
+                "detections": analysis.detections,
+            }),
+        ),
+        recognized_non_op_return_bytes: analysis.recognized_non_op_return_bytes,
+    }
+}
+
+#[cfg(test)]
+fn data_carriage_shape(transaction: &Transaction, prevouts: &PrevoutSet) -> ClassificationResult {
+    analyze_data_carriage(transaction, prevouts).result
 }
 
 fn analyze_output_carriage(transaction: &Transaction, analysis: &mut Analysis) {
@@ -246,6 +270,7 @@ fn analyze_output_carriage(transaction: &Transaction, analysis: &mut Analysis) {
         }
         let outputs = &transaction.output[output_index..run_end];
         if let Some(detection) = olga_output_carriage(outputs) {
+            analysis.recognize_non_op_return_bytes(detection.payload_bytes);
             analysis.detect(
                 "output_key_carrier",
                 json!({
@@ -266,6 +291,7 @@ fn analyze_output_carriage(transaction: &Transaction, analysis: &mut Analysis) {
             continue;
         };
         if XOnlyPublicKey::from_slice(&key).is_err() {
+            analysis.recognize_non_op_return_bytes(WITNESS_PROGRAM_BYTES);
             analysis.detect(
                 "off_curve_p2tr",
                 json!({
@@ -830,11 +856,13 @@ mod tests {
             .position(|window| window == b"%PDF-")
             .expect("embedded PDF signature");
 
-        let result = data_carriage_shape(
+        let analysis = analyze_data_carriage(
             &transaction,
             &PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(p2tr(), None))]),
         );
+        let result = analysis.result;
         assert_eq!(result.labels, ["embedded_file_magic"]);
+        assert_eq!(analysis.recognized_non_op_return_bytes, 0);
         assert_eq!(
             result.evidence.as_ref().unwrap()["detections"][0],
             json!({
@@ -998,6 +1026,61 @@ mod tests {
                 "output": 0,
                 "reason": "invalid_xonly_public_key",
             })
+        );
+    }
+
+    #[test]
+    fn sums_disjoint_recognized_carrier_bytes() {
+        let script = witness_argument_drop_script(MIN_WITNESS_ARGUMENT_ITEMS);
+        let mut elements = witness_arguments(MIN_WITNESS_ARGUMENT_ITEMS, WITNESS_ARGUMENT_BYTES);
+        elements.push(script.clone());
+        let mut transaction = transaction(Witness::from_slice(&elements));
+        transaction.output = olga_outputs(&[0x42; 62], 546);
+        transaction.output.push(TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: p2tr_with_key([0xff; 32]),
+        });
+
+        let analysis = analyze_data_carriage(
+            &transaction,
+            &PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(p2wsh(&script), None))]),
+        );
+
+        assert_eq!(
+            analysis.result.labels,
+            [
+                "witness_argument_carrier",
+                "output_key_carrier",
+                "off_curve_p2tr",
+            ]
+        );
+        assert_eq!(analysis.recognized_non_op_return_bytes, 4 * 255 + 62 + 32);
+    }
+
+    #[test]
+    fn recognized_byte_sum_is_not_truncated_with_evidence() {
+        let outputs = vec![
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: p2tr_with_key([0xff; 32]),
+            };
+            MAX_DETECTION_EVIDENCE + 2
+        ];
+        let analysis = analyze_data_carriage(
+            &transaction_with_outputs(outputs),
+            &PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(p2tr(), None))]),
+        );
+
+        assert_eq!(
+            analysis.result.evidence.as_ref().unwrap()["detections"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_DETECTION_EVIDENCE
+        );
+        assert_eq!(
+            analysis.recognized_non_op_return_bytes,
+            u64::try_from((MAX_DETECTION_EVIDENCE + 2) * 32).unwrap()
         );
     }
 

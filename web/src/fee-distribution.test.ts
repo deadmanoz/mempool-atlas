@@ -115,7 +115,10 @@ describe("log-domain axes", () => {
       {
         domain: DATA_BYTES_DOMAIN,
         ticks: DATA_BYTES_TICKS,
-        values: [1, 8, 40, 80, 512, 4_096, 32_768, 131_072],
+        values: [
+          1, 40, 80, 255, 1_020, 1_530, 6_334, 32_768, 131_072, 262_144,
+          524_288,
+        ],
       },
       {
         domain: IO_COUNT_DOMAIN,
@@ -155,6 +158,12 @@ describe("log-domain axes", () => {
     expect(conventional?.description).toContain("83-byte OP_RETURN script");
     expect(conventional?.description).toContain("Core 0.12–29 and BIP-110");
     expect(DATA_BYTES_TICKS.some(({ value }) => value === 83)).toBe(false);
+    expect(
+      DATA_BYTES_TICKS.find(({ value }) => value === 1_530)?.description,
+    ).toContain("six 255-byte pushes");
+    expect(
+      DATA_BYTES_TICKS.find(({ value }) => value === 6_334)?.description,
+    ).toContain("OLGA payload");
   });
 });
 

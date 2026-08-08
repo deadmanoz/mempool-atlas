@@ -706,6 +706,11 @@ const structureStage = (
       rows,
       "op_return_bytes",
     ),
+    recognizedNonOpReturnBytes: unsignedColumn(
+      body.recognized_non_op_return_bytes,
+      rows,
+      "recognized_non_op_return_bytes",
+    ),
     outputSats: unsignedColumn(body.output_sats, rows, "output_sats"),
     witnessBytes: unsignedColumn(body.witness_bytes, rows, "witness_bytes"),
   };
@@ -1524,6 +1529,7 @@ const transferables = (
     publication.structure.inputCount.values,
     publication.structure.outputCount.values,
     publication.structure.opReturnBytes.values,
+    publication.structure.recognizedNonOpReturnBytes.values,
     publication.structure.outputSats.values,
     publication.structure.witnessBytes.values,
   ];

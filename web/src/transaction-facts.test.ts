@@ -24,6 +24,7 @@ const transaction = (
       input_count: 1,
       output_count: 2,
       op_return_bytes: 80,
+      recognized_carried_bytes: 80,
       output_sats: 250_000_000,
       witness_bytes: 107,
     },
@@ -104,12 +105,31 @@ describe("transactionFactPairs", () => {
           input_count: 1,
           output_count: 1,
           op_return_bytes: 0,
+          recognized_carried_bytes: 0,
           output_sats: 1_000,
           witness_bytes: 0,
         },
       }),
     );
     expect(pairs.some(([label]) => label === "OP_RETURN bytes")).toBe(false);
+  });
+
+  it("shows recognized non-OP_RETURN carriage without relabelling OP_RETURN", () => {
+    const structure = {
+      input_count: 1,
+      output_count: 1,
+      op_return_bytes: 0,
+      recognized_carried_bytes: 1_530,
+      output_sats: 1_000,
+      witness_bytes: 1_600,
+    };
+    const pairs = new Map(transactionFactPairs(transaction({ structure })));
+
+    expect(pairs.has("OP_RETURN bytes")).toBe(false);
+    expect(pairs.get("Recognized carriage")).toBe("1,530 bytes");
+    expect(transactionFactSummary(transaction({ structure }))).toContain(
+      "recognized carriage 1,530 B",
+    );
   });
 });
 

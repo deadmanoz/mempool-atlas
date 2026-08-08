@@ -40,6 +40,7 @@ const transaction = (
       input_count: value,
       output_count: value + 1,
       op_return_bytes: 0,
+      recognized_carried_bytes: 0,
       output_sats: value * 10_000,
       witness_bytes: value * 10,
     },

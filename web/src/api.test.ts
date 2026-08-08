@@ -251,6 +251,7 @@ const completeTransfer = () => ({
     inputCount: emptyUnsigned(),
     outputCount: emptyUnsigned(),
     opReturnBytes: emptyUnsigned(),
+    recognizedNonOpReturnBytes: emptyUnsigned(),
     outputSats: emptyUnsigned(),
     witnessBytes: emptyUnsigned(),
   },

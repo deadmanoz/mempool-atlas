@@ -86,6 +86,7 @@ export interface TransactionStructure {
   input_count: number;
   output_count: number;
   op_return_bytes: number;
+  recognized_carried_bytes: number;
   output_sats: number;
   witness_bytes: number;
 }

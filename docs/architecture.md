@@ -272,8 +272,9 @@ classification-first order: composition (one bar per catalog lens), fee
 structure (a spectrum stacked by the selected classifier's buckets), ancestor
 fee rate (delta-adjusted ancestor fees over ancestor virtual size), shape (a
 joint fee-rate-by-size density heatmap with marginals), age (a bucket-by-age
-mosaic), data carriage (OP_RETURN carried bytes by data-protocols bucket),
-complexity (an input-count by output-count density), entanglement (banded
+mosaic), data carriage (conservatively recognized carried bytes by
+data-protocols bucket), complexity (an input-count by output-count density),
+entanglement (banded
 unconfirmed ancestor and descendant counts with the source-reported
 replaceability share), and total output value (the sum of every output,
 including change, by the selected classifier's buckets). Panels that need structure facts state
@@ -305,9 +306,15 @@ The node distribution view delegates this presentation-only preference to
 Axes derive positions from their raw logarithmic domains and preserve exact bin
 bounds in the inspector. Joint densities visibly name both domains, and every
 spectrum pairs its named logarithmic domain with a linear vertical scale for
-the selected count or virtual-size metric. Data-carriage reference ticks mark 40 pushed bytes and
-80 pushed bytes; the latter explains the conventional 83-byte serialized
-script without representing 83 as a carried-byte bin boundary.
+the selected count or virtual-size metric. Data-carriage reference ticks mark
+historical OP_RETURN sizes and exact carrier-fingerprint sizes through the
+512 KiB axis maximum. The recognized-carriage fact is a lower bound over
+positive fingerprints, not an estimate of all hidden payload.
+
+The staged structure body packs only the recognized non-OP_RETURN delta. The
+browser adds it to the existing OP_RETURN column when materializing a
+transaction. This keeps the public fact explicit while making the usual zero
+delta nearly free under gzip.
 
 The node and comparison distribution sections each own their complete DOM,
 cache, resize, rendering, and reset lifecycle behind a small view interface.

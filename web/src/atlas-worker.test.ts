@@ -197,6 +197,7 @@ const fixture = async (
     input_count: { width_bytes: 1, values_base64: "" },
     output_count: { width_bytes: 1, values_base64: "" },
     op_return_bytes: { width_bytes: 1, values_base64: "" },
+    recognized_non_op_return_bytes: { width_bytes: 1, values_base64: "" },
     output_sats: { width_bytes: 1, values_base64: "" },
     witness_bytes: { width_bytes: 1, values_base64: "" },
   });

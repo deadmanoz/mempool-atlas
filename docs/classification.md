@@ -428,24 +428,41 @@ including inherited signaling; it is deliberately distinct from the exact
 Derived facts arrive progressively in the nullable `structure` object,
 computed from the same raw transaction bytes fetched for classification:
 
-| Fact              | Definition                                                                                                                                                                                                      |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `input_count`     | Number of transaction inputs                                                                                                                                                                                    |
-| `output_count`    | Number of transaction outputs                                                                                                                                                                                   |
-| `op_return_bytes` | Sum across OP_RETURN outputs. When a tail decodes entirely to pushes, count the decoded pushed bytes; if decoding fails or any non-push opcode is present, count that output's serialized bytes after OP_RETURN |
-| `output_sats`     | Sum of all output values in satoshis                                                                                                                                                                            |
-| `witness_bytes`   | Serialized total size minus base size                                                                                                                                                                           |
+| Fact                       | Definition                                                                                                                                                                                                      |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `input_count`              | Number of transaction inputs                                                                                                                                                                                    |
+| `output_count`             | Number of transaction outputs                                                                                                                                                                                   |
+| `op_return_bytes`          | Sum across OP_RETURN outputs. When a tail decodes entirely to pushes, count the decoded pushed bytes; if decoding fails or any non-push opcode is present, count that output's serialized bytes after OP_RETURN |
+| `recognized_carried_bytes` | `op_return_bytes` plus the non-OP_RETURN bytes justified by the exact positive carrier fingerprints described below                                                                                             |
+| `output_sats`              | Sum of all output values in satoshis                                                                                                                                                                            |
+| `witness_bytes`            | Serialized total size minus base size                                                                                                                                                                           |
 
 `structure` is non-null exactly when classifier results are present for the
 transaction, and it carries forward between snapshots only while the exact
 `txid` and `wtxid` survive. Panels that consume derived facts state how many
 transactions they cover rather than treating missing facts as zeros.
 
-The Data carriage distribution therefore plots a transaction-total hybrid
-carried-byte fact, not serialized script size and not a per-output policy
-limit. Its 40-byte reference describes Bitcoin Core 0.9 and 0.10's pushed-data
-default. Its 80-byte reference describes Bitcoin Core 0.11's pushed-data
-default and explains that a conventional 80-byte single push occupies an
-83-byte serialized OP_RETURN script, matching the Core 0.12–29 and BIP-110
-script-size reference. Atlas does not place an 83-byte threshold on this axis
-because that would change the measurement basis.
+`recognized_carried_bytes` sums disjoint positive detections. It adds pushed
+bytes in a qualifying push/drop script, the decoded OP_PLENTY payload length,
+the six exact JXL-n-hide envelope pushes, exact 255-byte witness arguments
+consumed by matching drops, the declared OLGA payload length, and 32 bytes for
+each provably off-curve P2TR output key. Embedded file signatures add no bytes
+because they can describe bytes already counted through another carrier. The
+evidence display remains bounded, but that display limit does not truncate the
+byte total.
+
+This is a conservative recognized-carriage measure, not an estimate of all
+hidden data. It deliberately misses encrypted, on-curve, fragmented, or
+otherwise unrecognized channels, and it does not infer intent. The OP_RETURN
+component retains the hybrid definition above, including its serialized-tail
+fallback for malformed or non-push scripts. Positive facts can contribute while
+a classifier result is partial; missing facts are never treated as zero when
+the structure object itself is unavailable.
+
+The Data carriage distribution plots this transaction-total fact, not
+serialized script size and not a per-output policy limit. Its reference ticks
+include the historical 40-byte and 80-byte pushed-data defaults and exact sizes
+for recognized witness, JXL-n-hide, and OLGA carriers. The 80-byte tick explains
+the related 83-byte serialized OP_RETURN script reference without placing that
+different measurement on the axis. The axis extends to 512 KiB so large witness
+carriers remain visible.
