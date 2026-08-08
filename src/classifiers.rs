@@ -1227,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn data_carriage_catalog_declares_v4_labels() {
+    fn data_carriage_catalog_declares_v5_labels() {
         let catalog = classifier_catalog();
         let protocol_descriptor = catalog
             .iter()
@@ -1240,7 +1240,7 @@ mod tests {
             .find(|descriptor| descriptor.id == DATA_CARRIAGE_SHAPE_CLASSIFIER_ID)
             .expect("data carriage classifier");
 
-        assert_eq!(descriptor.version, "4");
+        assert_eq!(descriptor.version, "5");
         assert_eq!(
             descriptor
                 .labels
@@ -1254,6 +1254,7 @@ mod tests {
                 "witness_argument_carrier",
                 "output_key_carrier",
                 "off_curve_p2tr",
+                "embedded_file_magic",
                 "no_detected_carriage_shape",
             ]
         );

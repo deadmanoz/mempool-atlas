@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
+use bitcoin::consensus::Encodable;
 use bitcoin::hashes::{Hash, sha256};
+use bitcoin::io::{self, Write};
 use bitcoin::secp256k1::XOnlyPublicKey;
 use bitcoin::{Script, Transaction, TxOut, opcodes};
 use serde_json::{Value, json};
@@ -30,13 +32,29 @@ const OP_PLENTY_ENCODING_ALPHABET: [u8; 28] = [
 const WITNESS_PROGRAM_BYTES: usize = 32;
 const OLGA_LENGTH_PREFIX_BYTES: usize = 2;
 const OLGA_MIN_OUTPUTS: usize = 2;
-const LABEL_ORDER: [&str; 7] = [
+const MAX_FILE_MAGIC_BYTES: usize = 12;
+const FILE_MAGIC_OVERLAP_BYTES: usize = MAX_FILE_MAGIC_BYTES - 1;
+const FILE_MAGICS: [(&str, &[u8]); 11] = [
+    ("pdf", b"%PDF-"),
+    ("png", b"\x89PNG\r\n\x1a\n"),
+    ("gif87a", b"GIF87a"),
+    ("gif89a", b"GIF89a"),
+    ("wasm_v1", b"\0asm\x01\0\0\0"),
+    ("jpeg_jfif", b"\xff\xd8\xff\xe0\0\x10JFIF\0"),
+    ("iso_bmff_isom", b"ftypisom"),
+    ("iso_bmff_iso2", b"ftypiso2"),
+    ("iso_bmff_mp41", b"ftypmp41"),
+    ("iso_bmff_mp42", b"ftypmp42"),
+    ("jpeg_xl_container", b"\0\0\0\x0cJXL \r\n\x87\n"),
+];
+const LABEL_ORDER: [&str; 8] = [
     "push_drop_witness",
     "opcode_value_coding",
     "p2wsh_envelope",
     "witness_argument_carrier",
     "output_key_carrier",
     "off_curve_p2tr",
+    "embedded_file_magic",
     "no_detected_carriage_shape",
 ];
 
@@ -61,6 +79,16 @@ pub(super) fn data_carriage_shape(
 ) -> ClassificationResult {
     let mut analysis = Analysis::default();
     analyze_output_carriage(transaction, &mut analysis);
+    if let Some(detection) = embedded_file_magic(transaction) {
+        analysis.detect(
+            "embedded_file_magic",
+            json!({
+                "label": "embedded_file_magic",
+                "format": detection.format,
+                "offset": detection.offset,
+            }),
+        );
+    }
     let mut missing_input_scripts = 0_usize;
     for (input_index, input) in transaction.input.iter().enumerate() {
         let Some(prevout) = prevouts.get(input_index) else {
@@ -415,6 +443,102 @@ struct WitnessArgumentDetection {
     payload_bytes: usize,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct EmbeddedFileDetection {
+    format: &'static str,
+    offset: usize,
+}
+
+#[derive(Default)]
+struct FileMagicScanner {
+    tail: [u8; FILE_MAGIC_OVERLAP_BYTES],
+    tail_len: usize,
+    bytes_seen: usize,
+    detection: Option<EmbeddedFileDetection>,
+}
+
+impl Write for FileMagicScanner {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.detection.is_none() && !bytes.is_empty() {
+            let prefix_len = bytes.len().min(FILE_MAGIC_OVERLAP_BYTES);
+            let mut boundary = [0_u8; FILE_MAGIC_OVERLAP_BYTES * 2];
+            boundary[..self.tail_len].copy_from_slice(&self.tail[..self.tail_len]);
+            boundary[self.tail_len..self.tail_len + prefix_len]
+                .copy_from_slice(&bytes[..prefix_len]);
+            let boundary_len = self.tail_len + prefix_len;
+            if let Some((format, offset)) = find_file_magic(&boundary[..boundary_len]) {
+                self.detection = Some(EmbeddedFileDetection {
+                    format,
+                    offset: self.bytes_seen - self.tail_len + offset,
+                });
+            } else if let Some((format, offset)) = find_file_magic(bytes) {
+                self.detection = Some(EmbeddedFileDetection {
+                    format,
+                    offset: self.bytes_seen + offset,
+                });
+            }
+        }
+
+        if self.detection.is_none() {
+            self.retain_tail(bytes);
+        }
+        self.bytes_seen = self.bytes_seen.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl FileMagicScanner {
+    fn retain_tail(&mut self, bytes: &[u8]) {
+        if bytes.len() >= FILE_MAGIC_OVERLAP_BYTES {
+            self.tail
+                .copy_from_slice(&bytes[bytes.len() - FILE_MAGIC_OVERLAP_BYTES..]);
+            self.tail_len = FILE_MAGIC_OVERLAP_BYTES;
+            return;
+        }
+
+        let retained = self
+            .tail_len
+            .min(FILE_MAGIC_OVERLAP_BYTES.saturating_sub(bytes.len()));
+        self.tail
+            .copy_within(self.tail_len - retained..self.tail_len, 0);
+        self.tail[retained..retained + bytes.len()].copy_from_slice(bytes);
+        self.tail_len = retained + bytes.len();
+    }
+}
+
+fn find_file_magic(bytes: &[u8]) -> Option<(&'static str, usize)> {
+    for offset in 0..bytes.len() {
+        let candidates = match bytes[offset] {
+            b'%' => &FILE_MAGICS[0..1],
+            0x89 => &FILE_MAGICS[1..2],
+            b'G' => &FILE_MAGICS[2..4],
+            0x00 => &FILE_MAGICS[4..5],
+            0xff => &FILE_MAGICS[5..6],
+            b'f' => &FILE_MAGICS[6..10],
+            _ => continue,
+        };
+        for &(format, magic) in candidates {
+            if bytes[offset..].starts_with(magic) {
+                return Some((format, offset));
+            }
+        }
+        if bytes[offset] == 0x00 && bytes[offset..].starts_with(FILE_MAGICS[10].1) {
+            return Some((FILE_MAGICS[10].0, offset));
+        }
+    }
+    None
+}
+
+fn embedded_file_magic(transaction: &Transaction) -> Option<EmbeddedFileDetection> {
+    let mut scanner = FileMagicScanner::default();
+    transaction.consensus_encode(&mut scanner).ok()?;
+    scanner.detection
+}
+
 fn witness_argument_carriage(
     arguments: &[&[u8]],
     instructions: &[DecodedInstruction<'_>],
@@ -657,6 +781,81 @@ mod tests {
         (0..items)
             .map(|value| vec![u8::try_from(value).expect("test byte"); bytes])
             .collect()
+    }
+
+    #[test]
+    fn file_magic_scanner_preserves_offsets_across_write_boundaries() {
+        for (format, magic) in FILE_MAGICS {
+            let mut bytes = vec![0x42; 17];
+            bytes.extend(magic);
+            bytes.extend([0x24; 13]);
+            for split in 0..=bytes.len() {
+                let mut scanner = FileMagicScanner::default();
+                scanner.write_all(&bytes[..split]).expect("first fragment");
+                scanner.write_all(&bytes[split..]).expect("second fragment");
+                assert_eq!(
+                    scanner.detection,
+                    Some(EmbeddedFileDetection { format, offset: 17 }),
+                    "split {split} for {format}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_incomplete_and_short_file_signatures() {
+        for (format, magic) in FILE_MAGICS {
+            let mut scanner = FileMagicScanner::default();
+            scanner
+                .write_all(&magic[..magic.len() - 1])
+                .expect("truncated signature");
+            assert_eq!(scanner.detection, None, "truncated {format}");
+        }
+
+        for short in [b"\x1f\x8b".as_slice(), b"\xff\xd8\xff".as_slice()] {
+            let mut scanner = FileMagicScanner::default();
+            scanner.write_all(short).expect("short signature");
+            assert_eq!(scanner.detection, None);
+        }
+    }
+
+    #[test]
+    fn recognizes_strong_file_magic_in_raw_transaction_bytes() {
+        let mut payload = vec![0x42; 23];
+        payload.extend(b"%PDF-1.7");
+        let transaction = transaction(Witness::from_slice(&[payload]));
+        let raw = bitcoin::consensus::serialize(&transaction);
+        let expected_offset = raw
+            .windows(b"%PDF-".len())
+            .position(|window| window == b"%PDF-")
+            .expect("embedded PDF signature");
+
+        let result = data_carriage_shape(
+            &transaction,
+            &PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(p2tr(), None))]),
+        );
+        assert_eq!(result.labels, ["embedded_file_magic"]);
+        assert_eq!(
+            result.evidence.as_ref().unwrap()["detections"][0],
+            json!({
+                "label": "embedded_file_magic",
+                "format": "pdf",
+                "offset": expected_offset,
+            })
+        );
+    }
+
+    #[test]
+    fn scans_a_maximum_weight_scale_witness_without_buffering_it() {
+        let mut payload = vec![0x42; 390_000];
+        let offset = payload.len() - FILE_MAGICS[10].1.len();
+        payload[offset..].copy_from_slice(FILE_MAGICS[10].1);
+        let transaction = transaction(Witness::from_slice(&[payload]));
+
+        assert_eq!(
+            embedded_file_magic(&transaction).map(|detection| detection.format),
+            Some("jpeg_xl_container")
+        );
     }
 
     #[test]

@@ -267,7 +267,7 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
         },
         ClassifierDescriptor {
             id: DATA_CARRIAGE_SHAPE_CLASSIFIER_ID.to_owned(),
-            version: "4".to_owned(),
+            version: "5".to_owned(),
             title: "Data carriage shapes".to_owned(),
             methodology: ClassifierMethodology::Heuristic,
             semantics: ClassifierSemantics::MultiLabel,
@@ -305,6 +305,11 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
                     "off_curve_p2tr",
                     "Off-curve P2TR key",
                     "A P2TR output contains bytes that are not a valid secp256k1 x-only public key.",
+                ),
+                label(
+                    "embedded_file_magic",
+                    "Embedded file signature",
+                    "Canonical raw transaction bytes contain a strong registered file-format signature.",
                 ),
                 label(
                     "no_detected_carriage_shape",

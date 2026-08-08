@@ -101,10 +101,11 @@ naive file-carving recover it directly.
 
 `data_protocols` version 3 recognizes the compliant bare-`ord` push/drop
 envelope as the existing `inscription` and `brc20` protocol fingerprints.
-`data_carriage_shape` version 4 independently recognizes balanced push/drop
+`data_carriage_shape` version 5 independently recognizes balanced push/drop
 witness runs, self-framed OP_PLENTY v2, the exact committed JXL-n-hide P2WSH
 envelope, exact 255-byte witness-argument/drop channels, exact OLGA-style P2WSH
-output runs, and off-curve P2TR output keys.
+output runs, off-curve P2TR output keys, and strong file signatures in canonical
+raw transaction bytes.
 
 The remaining concrete gaps are:
 
@@ -117,8 +118,12 @@ The remaining concrete gaps are:
    not infer generic on-curve P2TR carriage or concatenate P2PKH, P2SH, or
    P2WPKH hash fields.
 
-3. **No embedded-file scan.** The raw-transaction polyglot signatures in
-   [P1](#p1) are not classified.
+3. **The embedded-file scan is intentionally conservative.** It recognizes
+   strong, format-specific headers. Bare two-byte gzip and generic three-byte
+   JPEG markers are excluded because random transaction identifiers,
+   signatures, and witness payloads make their mempool-wide collision rate too
+   high. A signature is a fingerprint, not proof that the suffix is a valid
+   file.
 
 4. **`structure.op_return_bytes` measures only OP_RETURN.** Every technique in
    Section 4 that is not [O4](#o4) contributes zero to it, so a 400 KB witness
@@ -614,13 +619,15 @@ resolved for the existing lenses, so no new RPC surface is required. That
 matters: it means this lens costs no extra node round-trips.
 
 Implementation status: A shipped as `data_protocols` version 3. B shipped in
-four stages and is now `data_carriage_shape` version 4. The implemented B
+five stages and is now `data_carriage_shape` version 5. The implemented B
 labels are `push_drop_witness`, `opcode_value_coding`, `p2wsh_envelope`,
-`witness_argument_carrier`, `output_key_carrier`, and `off_curve_p2tr`. The
-P2WSH envelope recognizes only the exact six-push JXL-n-hide grammar, the
-witness-argument label requires exact 255-byte item-to-drop correlation, and
-the output carrier recognizes only the self-consistent OLGA P2WSH grammar, not
-arbitrary O1 or O3 reassembly. `embedded_file_magic` remains a candidate.
+`witness_argument_carrier`, `output_key_carrier`, `off_curve_p2tr`, and
+`embedded_file_magic`. The P2WSH envelope recognizes only the exact six-push
+JXL-n-hide grammar, the witness-argument label requires exact 255-byte
+item-to-drop correlation, and the output carrier recognizes only the
+self-consistent OLGA P2WSH grammar, not arbitrary O1 or O3 reassembly. The file
+signature label uses a constant-memory consensus-serialization scan and
+deliberately excludes short collision-prone prefixes.
 
 **C. Extend `structure` with a carried-bytes fact.**
 `op_return_bytes` measures one channel. A sibling `witness_carried_bytes` (or

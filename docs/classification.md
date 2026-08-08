@@ -255,7 +255,7 @@ Version 3 adds the RDTS-compatible Ordinals push/drop framing. It keeps the
 existing `inscription` and `brc20` questions and label keys because only the
 recognized wire representation changed.
 
-## `data_carriage_shape` version 4
+## `data_carriage_shape` version 5
 
 This heuristic, multi-label lens asks whether a transaction contains a
 high-confidence bulk-carrier witness or output-field shape, independently of
@@ -292,22 +292,30 @@ Taproot commitment.
 - `off_curve_p2tr` requires a 34-byte P2TR output whose 32-byte program cannot
   be parsed as a secp256k1 x-only public key. That proves the output key is
   unusable, but it does not prove why those bytes were chosen.
+- `embedded_file_magic` requires a strong registered file-format signature in
+  the canonical raw transaction serialization. Version 5 recognizes PDF, the
+  full PNG signature, GIF87a/GIF89a, WASM version 1, the JPEG XL container,
+  JFIF JPEG, and common ISO-BMFF `ftyp` brands. The scanner retains only a fixed
+  overlap window and the first matching byte offset; it never buffers another
+  serialized transaction.
 - `no_detected_carriage_shape` is emitted only when every input script is known
-  and none of the six registered heuristics fires.
+  and none of the seven registered heuristics fires.
 
-The six positive labels are shapes, not proof of intent, protocol validity, or
+The seven positive labels are shapes, not proof of intent, protocol validity, or
 policy rejection. A partial result preserves a positive match while naming
 `input_script_pubkeys` as missing. If a spent-output script is unavailable and
 no positive match is proven, the lens emits no negative label.
 
-Version 4 adds the exact witness-argument/drop correlation. Version 3 added the
-exact committed P2WSH conditional envelope; version 2 added the exact OLGA
-output-run grammar and the off-curve P2TR test; version 1 contained only the
-two general witness-resident labels. The lens still does not claim generic
-on-curve output-key carriers, hash160 carriers, file polyglots, other
-witness-argument ratios or item sizes, field steganography, signature channels,
-or commitments. It also does not estimate carried bytes. Those require
-separate definitions rather than inheriting the OP_RETURN byte measure.
+Version 5 adds the bounded raw-transaction file-signature scan. Version 4 added
+the exact witness-argument/drop correlation; version 3 added the exact
+committed P2WSH conditional envelope; version 2 added the exact OLGA output-run
+grammar and the off-curve P2TR test; version 1 contained only the two general
+witness-resident labels. The lens still does not claim generic on-curve
+output-key carriers, hash160 carriers, file validity from a signature alone,
+short collision-prone gzip or generic JPEG magic, other witness-argument ratios
+or item sizes, field steganography, signature channels, or commitments. It also
+does not estimate carried bytes. Those require separate definitions rather
+than inheriting the OP_RETURN byte measure.
 
 ## `knots_bip110` version 1
 
