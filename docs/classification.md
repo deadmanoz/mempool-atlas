@@ -251,9 +251,11 @@ output indexes.
   offsets. An unrelated Counterparty message whose text contains one of the
   markers would also match.
 
-Version 3 adds the RDTS-compatible Ordinals push/drop framing. It keeps the
-existing `inscription` and `brc20` questions and label keys because only the
-recognized wire representation changed.
+Version 3 adds the RDTS-compatible Ordinals push/drop framing. It scans the
+complete revealed script and reports every valid classic and push/drop
+envelope, so an earlier inscription cannot hide a later BRC-20 marker. It keeps
+the existing `inscription` and `brc20` questions and label keys because only
+the recognized wire representation changed.
 
 ## `data_carriage_shape` version 5
 

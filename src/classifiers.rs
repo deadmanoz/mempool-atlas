@@ -405,9 +405,13 @@ struct DataAnalysis {
 
 impl DataAnalysis {
     fn detect(&mut self, label: &'static str, evidence: Value) {
+        self.detect_lazy(label, || evidence);
+    }
+
+    fn detect_lazy(&mut self, label: &'static str, evidence: impl FnOnce() -> Value) {
         self.labels.insert(label);
         if self.detections.len() < MAX_DETECTION_EVIDENCE {
-            self.detections.push(evidence);
+            self.detections.push(evidence());
         }
     }
 }
@@ -468,38 +472,35 @@ fn analyze_witness(input: usize, witness: &bitcoin::Witness, analysis: &mut Data
                 && (control.len() - 33) % 32 == 0
                 && control.first().is_some_and(|leaf| leaf & 0xfe == 0xc0)
         });
-    if let Some((element_index, element, _control)) = tapscript
-        && let Some(detection) = parse_ord_envelope(element)
-    {
-        strong_envelope = true;
-        let framing = match detection.encoding {
-            OrdEnvelopeEncoding::ClassicIf => "classic_if",
-            OrdEnvelopeEncoding::PushDrop => "push_drop",
-        };
-        analysis.detect(
-            "inscription",
-            json!({
-                "label": "inscription",
-                "carrier": "witness",
-                "input": input,
-                "element": element_index,
-                "detection": "decoded_envelope",
-                "framing": framing,
-            }),
-        );
-        if detection.envelope.is_brc20() {
-            analysis.detect(
-                "brc20",
+    if let Some((element_index, element, _control)) = tapscript {
+        strong_envelope = visit_ord_envelopes(element, |detection| {
+            let framing = match detection.encoding {
+                OrdEnvelopeEncoding::ClassicIf => "classic_if",
+                OrdEnvelopeEncoding::PushDrop => "push_drop",
+            };
+            analysis.detect_lazy("inscription", || {
                 json!({
-                    "label": "brc20",
+                    "label": "inscription",
                     "carrier": "witness",
                     "input": input,
                     "element": element_index,
                     "detection": "decoded_envelope",
                     "framing": framing,
-                }),
-            );
-        }
+                })
+            });
+            if detection.brc20 {
+                analysis.detect_lazy("brc20", || {
+                    json!({
+                        "label": "brc20",
+                        "carrier": "witness",
+                        "input": input,
+                        "element": element_index,
+                        "detection": "decoded_envelope",
+                        "framing": framing,
+                    })
+                });
+            }
+        });
     }
     if !strong_envelope
         && witness.iter().any(|element| {
@@ -831,48 +832,109 @@ fn detect_multisig_counterparty(
     }
 }
 
-#[derive(Default)]
-struct OrdEnvelope {
-    body_window: Vec<u8>,
-    brc20_marker: bool,
-}
-
-impl OrdEnvelope {
-    fn push_body(&mut self, bytes: &[u8]) {
-        for byte in bytes
-            .iter()
-            .copied()
-            .filter(|byte| !byte.is_ascii_whitespace())
-        {
-            if self.body_window.len() == BRC20_PROTOCOL_MARKER.len() {
-                self.body_window.remove(0);
-            }
-            self.body_window.push(byte);
-            if self.body_window == BRC20_PROTOCOL_MARKER {
-                self.brc20_marker = true;
-            }
-        }
-    }
-
-    fn is_brc20(&self) -> bool {
-        self.brc20_marker
-    }
-}
-
 enum DecodedInstruction<'a> {
     Push(&'a [u8]),
     Op(u8),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OrdEnvelopeEncoding {
     ClassicIf,
     PushDrop,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OrdEnvelopeDetection {
-    envelope: OrdEnvelope,
     encoding: OrdEnvelopeEncoding,
+    brc20: bool,
+}
+
+struct OrdEnvelopeRange {
+    encoding: OrdEnvelopeEncoding,
+    body_start: Option<usize>,
+    body_end: usize,
+}
+
+struct OrdBodyIndex {
+    instruction_byte_offsets: Vec<usize>,
+    brc20_occurrences: Vec<usize>,
+}
+
+impl OrdBodyIndex {
+    fn new(instructions: &[DecodedInstruction<'_>]) -> Self {
+        let mut instruction_byte_offsets = Vec::with_capacity(instructions.len() + 1);
+        let mut brc20_occurrences = Vec::new();
+        let mut body_window = Vec::with_capacity(BRC20_PROTOCOL_MARKER.len());
+        let mut body_bytes = 0_usize;
+        instruction_byte_offsets.push(body_bytes);
+
+        for instruction in instructions {
+            match instruction {
+                DecodedInstruction::Push(bytes) => scan_ord_body_bytes(
+                    bytes,
+                    &mut body_window,
+                    &mut body_bytes,
+                    &mut brc20_occurrences,
+                ),
+                DecodedInstruction::Op(opcode) => {
+                    if let Some(value) = ord_pushnum(*opcode) {
+                        scan_ord_body_bytes(
+                            &[value],
+                            &mut body_window,
+                            &mut body_bytes,
+                            &mut brc20_occurrences,
+                        );
+                    }
+                }
+            }
+            instruction_byte_offsets.push(body_bytes);
+        }
+
+        Self {
+            instruction_byte_offsets,
+            brc20_occurrences,
+        }
+    }
+
+    fn contains_brc20(&self, body_start: usize, body_end: usize) -> bool {
+        let Some(&start) = self.instruction_byte_offsets.get(body_start) else {
+            return false;
+        };
+        let Some(&end) = self.instruction_byte_offsets.get(body_end) else {
+            return false;
+        };
+        if end.saturating_sub(start) < BRC20_PROTOCOL_MARKER.len() {
+            return false;
+        }
+        let occurrence = self
+            .brc20_occurrences
+            .partition_point(|offset| *offset < start);
+        self.brc20_occurrences
+            .get(occurrence)
+            .is_some_and(|offset| offset + BRC20_PROTOCOL_MARKER.len() <= end)
+    }
+}
+
+fn scan_ord_body_bytes(
+    bytes: &[u8],
+    body_window: &mut Vec<u8>,
+    body_bytes: &mut usize,
+    brc20_occurrences: &mut Vec<usize>,
+) {
+    for byte in bytes
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+    {
+        if body_window.len() == BRC20_PROTOCOL_MARKER.len() {
+            body_window.remove(0);
+        }
+        body_window.push(byte);
+        *body_bytes += 1;
+        if body_window == BRC20_PROTOCOL_MARKER {
+            brc20_occurrences.push(*body_bytes - BRC20_PROTOCOL_MARKER.len());
+        }
+    }
 }
 
 fn decoded_instructions(script: &[u8]) -> Option<Vec<DecodedInstruction<'_>>> {
@@ -885,109 +947,161 @@ fn decoded_instructions(script: &[u8]) -> Option<Vec<DecodedInstruction<'_>>> {
         .collect()
 }
 
-fn parse_ord_envelope(script: &[u8]) -> Option<OrdEnvelopeDetection> {
-    let instructions = decoded_instructions(script)?;
-    parse_classic_ord_envelope(&instructions)
-        .or_else(|| parse_push_drop_ord_envelope(&instructions))
-}
-
-fn parse_classic_ord_envelope(
-    instructions: &[DecodedInstruction<'_>],
-) -> Option<OrdEnvelopeDetection> {
-    let start = instructions.windows(3).position(|window| {
-        matches!(&window[0], DecodedInstruction::Push(bytes) if bytes.is_empty())
-            && matches!(&window[1], DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_IF.to_u8())
-            && matches!(&window[2], DecodedInstruction::Push(bytes) if *bytes == ORD_PROTOCOL_ID)
-    })?;
-    let mut envelope = OrdEnvelope::default();
-    let mut in_body = false;
-    let mut index = start + 3;
-    while index < instructions.len() {
-        match &instructions[index] {
-            DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_ENDIF.to_u8() => {
-                break;
-            }
-            DecodedInstruction::Push(bytes) if in_body => {
-                envelope.push_body(bytes);
-                index += 1;
-            }
-            DecodedInstruction::Push([]) => {
-                in_body = true;
-                index += 1;
-            }
-            DecodedInstruction::Push(_) => {
-                let Some(DecodedInstruction::Push(_)) = instructions.get(index + 1) else {
-                    break;
-                };
-                index += 2;
-            }
-            DecodedInstruction::Op(_) => break,
-        }
+fn visit_ord_envelopes(script: &[u8], mut visit: impl FnMut(OrdEnvelopeDetection)) -> bool {
+    let Some(instructions) = decoded_instructions(script) else {
+        return false;
+    };
+    let mut ranges = Vec::new();
+    collect_classic_ord_envelopes(&instructions, &mut ranges);
+    collect_push_drop_ord_envelopes(&instructions, &mut ranges);
+    if ranges.is_empty() {
+        return false;
     }
-    Some(OrdEnvelopeDetection {
-        envelope,
-        encoding: OrdEnvelopeEncoding::ClassicIf,
-    })
+    let body_index = OrdBodyIndex::new(&instructions);
+    for range in ranges {
+        visit(OrdEnvelopeDetection {
+            encoding: range.encoding,
+            brc20: range
+                .body_start
+                .is_some_and(|start| body_index.contains_brc20(start, range.body_end)),
+        });
+    }
+    true
 }
 
-fn parse_push_drop_ord_envelope(
+fn collect_classic_ord_envelopes(
     instructions: &[DecodedInstruction<'_>],
-) -> Option<OrdEnvelopeDetection> {
-    for marker in 0..instructions.len() {
-        if !matches!(instructions[marker], DecodedInstruction::Push(bytes) if bytes == ORD_PROTOCOL_ID)
-        {
+    ranges: &mut Vec<OrdEnvelopeRange>,
+) {
+    let mut cursor = 0_usize;
+    while cursor < instructions.len() {
+        if !is_classic_ord_marker(instructions, cursor) {
+            cursor += 1;
             continue;
         }
-        if marker >= 2
-            && matches!(instructions[marker - 2], DecodedInstruction::Push(bytes) if bytes.is_empty())
-            && matches!(instructions[marker - 1], DecodedInstruction::Op(opcode) if opcode == opcodes::all::OP_IF.to_u8())
-        {
-            continue;
-        }
-        let mut payload = Vec::<Vec<u8>>::new();
-        let mut depth = 1_usize;
-        for instruction in &instructions[marker + 1..] {
-            match instruction {
-                DecodedInstruction::Push(bytes) if bytes.len() <= MAX_RDTS_PUSH_BYTES => {
-                    payload.push(bytes.to_vec());
-                    depth += 1;
-                }
-                DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_2DROP.to_u8() => {
-                    if depth < 2 {
-                        break;
-                    }
-                    depth -= 2;
-                }
-                DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_DROP.to_u8() => {
-                    if depth == 0 {
-                        break;
-                    }
-                    depth -= 1;
-                }
-                DecodedInstruction::Op(opcode) => {
-                    let Some(value) = ord_pushnum(*opcode) else {
-                        break;
-                    };
-                    payload.push(vec![value]);
-                    depth += 1;
-                }
-                DecodedInstruction::Push(_) => break,
+
+        let mut body_start = None;
+        let mut index = cursor + 3;
+        let (body_end, next_cursor) = loop {
+            if index >= instructions.len() {
+                break (instructions.len(), instructions.len());
             }
-            if depth == 0 {
-                let mut envelope = OrdEnvelope::default();
-                if let Some(body_start) = payload.iter().position(Vec::is_empty) {
-                    for body in &payload[body_start + 1..] {
-                        envelope.push_body(body);
+            // A later marker starts a separate envelope. Stop the current
+            // grammar before it so every marker is enumerated exactly once.
+            if is_classic_ord_marker(instructions, index) {
+                break (index, index);
+            }
+            match &instructions[index] {
+                DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_ENDIF.to_u8() => {
+                    break (index, index + 1);
+                }
+                DecodedInstruction::Push(_) if body_start.is_some() => index += 1,
+                DecodedInstruction::Push([]) => {
+                    body_start = Some(index + 1);
+                    index += 1;
+                }
+                DecodedInstruction::Push(_) => {
+                    if is_classic_ord_marker(instructions, index + 1) {
+                        break (index, index + 1);
+                    }
+                    if matches!(
+                        instructions.get(index + 1),
+                        Some(DecodedInstruction::Push(_))
+                    ) {
+                        index += 2;
+                    } else {
+                        break (index, index + 1);
                     }
                 }
-                return Some(OrdEnvelopeDetection {
-                    envelope,
-                    encoding: OrdEnvelopeEncoding::PushDrop,
+                DecodedInstruction::Op(_) => break (index, index + 1),
+            }
+        };
+
+        ranges.push(OrdEnvelopeRange {
+            encoding: OrdEnvelopeEncoding::ClassicIf,
+            body_start,
+            body_end,
+        });
+        cursor = next_cursor;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OrdPushFrame {
+    is_ord_marker: bool,
+    first_empty: Option<usize>,
+}
+
+fn collect_push_drop_ord_envelopes(
+    instructions: &[DecodedInstruction<'_>],
+    ranges: &mut Vec<OrdEnvelopeRange>,
+) {
+    let mut stack = Vec::<OrdPushFrame>::new();
+    for (instruction, decoded) in instructions.iter().enumerate() {
+        match decoded {
+            DecodedInstruction::Push(bytes) if bytes.len() <= MAX_RDTS_PUSH_BYTES => {
+                stack.push(OrdPushFrame {
+                    is_ord_marker: *bytes == ORD_PROTOCOL_ID
+                        && !is_classic_ord_payload_marker(instructions, instruction),
+                    first_empty: bytes.is_empty().then_some(instruction),
                 });
             }
+            DecodedInstruction::Op(opcode) if ord_pushnum(*opcode).is_some() => {
+                stack.push(OrdPushFrame {
+                    is_ord_marker: false,
+                    first_empty: None,
+                });
+            }
+            DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_DROP.to_u8() => {
+                if let Some(completed) = stack.pop() {
+                    collect_completed_ord_push_frame(completed, instruction, &mut stack, ranges);
+                } else {
+                    stack.clear();
+                }
+            }
+            DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_2DROP.to_u8() => {
+                let Some(later) = stack.pop() else {
+                    stack.clear();
+                    continue;
+                };
+                if let Some(mut completed) = stack.pop() {
+                    completed.first_empty = completed.first_empty.or(later.first_empty);
+                    collect_completed_ord_push_frame(completed, instruction, &mut stack, ranges);
+                } else {
+                    stack.clear();
+                }
+            }
+            _ => stack.clear(),
         }
     }
-    None
+}
+
+fn collect_completed_ord_push_frame(
+    completed: OrdPushFrame,
+    end: usize,
+    stack: &mut [OrdPushFrame],
+    ranges: &mut Vec<OrdEnvelopeRange>,
+) {
+    if completed.is_ord_marker {
+        ranges.push(OrdEnvelopeRange {
+            encoding: OrdEnvelopeEncoding::PushDrop,
+            body_start: completed.first_empty.map(|empty| empty + 1),
+            body_end: end,
+        });
+    }
+    if let Some(parent) = stack.last_mut() {
+        parent.first_empty = parent.first_empty.or(completed.first_empty);
+    }
+}
+
+fn is_classic_ord_marker(instructions: &[DecodedInstruction<'_>], start: usize) -> bool {
+    matches!(instructions.get(start), Some(DecodedInstruction::Push(bytes)) if bytes.is_empty())
+        && matches!(instructions.get(start + 1), Some(DecodedInstruction::Op(opcode)) if *opcode == opcodes::all::OP_IF.to_u8())
+        && matches!(instructions.get(start + 2), Some(DecodedInstruction::Push(bytes)) if *bytes == ORD_PROTOCOL_ID)
+}
+
+fn is_classic_ord_payload_marker(instructions: &[DecodedInstruction<'_>], marker: usize) -> bool {
+    marker >= 2 && is_classic_ord_marker(instructions, marker - 2)
 }
 
 fn op_return_payload(script: &[u8]) -> Vec<u8> {
@@ -1505,6 +1619,23 @@ mod tests {
         script
     }
 
+    fn classic_ord(body: &[u8]) -> Vec<u8> {
+        let mut script = vec![0, opcodes::all::OP_IF.to_u8()];
+        push_data(&mut script, b"ord");
+        push_data(&mut script, &[1]);
+        push_data(&mut script, b"application/json");
+        push_data(&mut script, &[]);
+        push_data(&mut script, body);
+        script.push(opcodes::all::OP_ENDIF.to_u8());
+        script
+    }
+
+    fn ord_envelope_detections(script: &[u8]) -> Vec<OrdEnvelopeDetection> {
+        let mut detections = Vec::new();
+        visit_ord_envelopes(script, |detection| detections.push(detection));
+        detections
+    }
+
     #[test]
     fn rdts_push_drop_ord_envelope_preserves_protocol_labels() {
         let body = br#"{ "p" : "brc-20" }"#;
@@ -1531,8 +1662,110 @@ mod tests {
         let accepted = push_drop_ord(&[&[], &[1; 256]]);
         let rejected = push_drop_ord(&[&[], &[1; 257]]);
 
-        assert!(parse_ord_envelope(&accepted).is_some());
-        assert!(parse_ord_envelope(&rejected).is_none());
+        assert!(!ord_envelope_detections(&accepted).is_empty());
+        assert!(ord_envelope_detections(&rejected).is_empty());
+    }
+
+    #[test]
+    fn ord_scan_handles_many_unmatched_marker_lookalikes() {
+        let mut script = Vec::new();
+        for _ in 0..50_000 {
+            push_data(&mut script, b"ord");
+        }
+
+        assert!(ord_envelope_detections(&script).is_empty());
+    }
+
+    #[test]
+    fn classic_and_push_drop_ord_envelopes_are_both_enumerated() {
+        let mut script = classic_ord(br#"{"message":"classic"}"#);
+        script.extend(push_drop_ord(&[
+            &[1],
+            b"application/json",
+            &[],
+            br#"{"message":"push-drop"}"#,
+        ]));
+
+        let detections = ord_envelope_detections(&script);
+
+        assert_eq!(
+            detections
+                .iter()
+                .map(|detection| detection.encoding)
+                .collect::<Vec<_>>(),
+            [
+                OrdEnvelopeEncoding::ClassicIf,
+                OrdEnvelopeEncoding::PushDrop,
+            ]
+        );
+    }
+
+    #[test]
+    fn later_brc20_ord_envelope_is_not_hidden_by_an_earlier_envelope() {
+        let mut script = classic_ord(br#"{"message":"not a token"}"#);
+        script.extend(push_drop_ord(&[
+            &[1],
+            b"application/json",
+            &[],
+            br#"{ "p" : "brc-20" }"#,
+        ]));
+        let mut control = vec![0xc0];
+        control.extend([2; 32]);
+        let witness = Witness::from_slice(&[script, control]);
+        let tx = transaction(
+            vec![input(Sequence::MAX, witness)],
+            vec![output(1_000, p2tr(2))],
+        );
+
+        let result = data_protocols(&tx);
+
+        assert_eq!(result.labels, ["inscription", "brc20"]);
+        let detections = result.evidence.as_ref().unwrap()["detections"]
+            .as_array()
+            .expect("detection evidence");
+        assert!(detections.iter().any(|detection| {
+            detection["label"] == "inscription" && detection["framing"] == "classic_if"
+        }));
+        assert!(detections.iter().any(|detection| {
+            detection["label"] == "brc20" && detection["framing"] == "push_drop"
+        }));
+    }
+
+    #[test]
+    fn later_brc20_label_survives_bounded_envelope_evidence() {
+        let mut script = Vec::new();
+        for _ in 0..MAX_DETECTION_EVIDENCE + 2 {
+            script.extend(push_drop_ord(&[
+                &[1],
+                b"application/json",
+                &[],
+                br#"{"message":"not a token"}"#,
+            ]));
+        }
+        script.extend(push_drop_ord(&[
+            &[1],
+            b"application/json",
+            &[],
+            br#"{ "p" : "brc-20" }"#,
+        ]));
+        let mut control = vec![0xc0];
+        control.extend([2; 32]);
+        let witness = Witness::from_slice(&[script, control]);
+        let tx = transaction(
+            vec![input(Sequence::MAX, witness)],
+            vec![output(1_000, p2tr(2))],
+        );
+
+        let result = data_protocols(&tx);
+
+        assert_eq!(result.labels, ["inscription", "brc20"]);
+        assert_eq!(
+            result.evidence.as_ref().unwrap()["detections"]
+                .as_array()
+                .expect("bounded detection evidence")
+                .len(),
+            MAX_DETECTION_EVIDENCE
+        );
     }
 
     #[test]

@@ -378,54 +378,82 @@ struct PushDropDetection {
     pushed_bytes: usize,
 }
 
+#[derive(Clone, Copy)]
+struct PushDropFrame {
+    instruction: usize,
+    pushed_elements: usize,
+    pushed_bytes: usize,
+}
+
 fn push_drop_carriage(instructions: &[DecodedInstruction<'_>]) -> Option<PushDropDetection> {
-    for start in 0..instructions.len() {
-        let mut depth = 0_usize;
-        let mut pushed_elements = 0_usize;
-        let mut pushed_bytes = 0_usize;
-        let mut saw_drop = false;
-        for instruction in &instructions[start..] {
-            match instruction {
-                DecodedInstruction::Push(bytes) if bytes.len() <= MAX_RDTS_PUSH_BYTES => {
-                    depth += 1;
-                    pushed_elements += 1;
-                    pushed_bytes += bytes.len();
-                }
-                DecodedInstruction::Op(opcode) if ord_pushnum(*opcode).is_some() => {
-                    depth += 1;
-                    pushed_elements += 1;
-                    pushed_bytes += 1;
-                }
-                DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_DROP.to_u8() => {
-                    if depth == 0 {
-                        break;
-                    }
-                    depth -= 1;
-                    saw_drop = true;
-                }
-                DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_2DROP.to_u8() => {
-                    if depth < 2 {
-                        break;
-                    }
-                    depth -= 2;
-                    saw_drop = true;
-                }
-                _ => break,
+    let mut stack = Vec::<PushDropFrame>::new();
+    let mut earliest = None::<PushDropDetection>;
+
+    for (instruction, decoded) in instructions.iter().enumerate() {
+        match decoded {
+            DecodedInstruction::Push(bytes) if bytes.len() <= MAX_RDTS_PUSH_BYTES => {
+                stack.push(PushDropFrame {
+                    instruction,
+                    pushed_elements: 1,
+                    pushed_bytes: bytes.len(),
+                });
             }
-            if depth == 0 && saw_drop {
-                if pushed_elements >= MIN_PUSH_DROP_ELEMENTS && pushed_bytes >= MIN_PUSH_DROP_BYTES
-                {
-                    return Some(PushDropDetection {
-                        instruction: start,
-                        pushed_elements,
-                        pushed_bytes,
-                    });
-                }
-                break;
+            DecodedInstruction::Op(opcode) if ord_pushnum(*opcode).is_some() => {
+                stack.push(PushDropFrame {
+                    instruction,
+                    pushed_elements: 1,
+                    pushed_bytes: 1,
+                });
             }
+            DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_DROP.to_u8() => {
+                let Some(completed) = stack.pop() else {
+                    stack.clear();
+                    continue;
+                };
+                complete_push_drop_frame(completed, &mut stack, &mut earliest);
+            }
+            DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_2DROP.to_u8() => {
+                let Some(later) = stack.pop() else {
+                    stack.clear();
+                    continue;
+                };
+                let Some(mut completed) = stack.pop() else {
+                    stack.clear();
+                    continue;
+                };
+                completed.pushed_elements += later.pushed_elements;
+                completed.pushed_bytes += later.pushed_bytes;
+                complete_push_drop_frame(completed, &mut stack, &mut earliest);
+            }
+            _ => stack.clear(),
         }
     }
-    None
+
+    earliest
+}
+
+fn complete_push_drop_frame(
+    completed: PushDropFrame,
+    stack: &mut [PushDropFrame],
+    earliest: &mut Option<PushDropDetection>,
+) {
+    if completed.pushed_elements >= MIN_PUSH_DROP_ELEMENTS
+        && completed.pushed_bytes >= MIN_PUSH_DROP_BYTES
+        && earliest
+            .as_ref()
+            .is_none_or(|detection| completed.instruction < detection.instruction)
+    {
+        *earliest = Some(PushDropDetection {
+            instruction: completed.instruction,
+            pushed_elements: completed.pushed_elements,
+            pushed_bytes: completed.pushed_bytes,
+        });
+    }
+
+    if let Some(parent) = stack.last_mut() {
+        parent.pushed_elements += completed.pushed_elements;
+        parent.pushed_bytes += completed.pushed_bytes;
+    }
 }
 
 struct P2wshEnvelopeDetection {
@@ -899,6 +927,118 @@ mod tests {
 
         assert_eq!(result.labels, ["push_drop_witness"]);
         assert_eq!(result.state, ClassificationResultState::Complete);
+    }
+
+    #[test]
+    fn push_drop_scan_handles_long_unmatched_sequences() {
+        let byte = [7_u8];
+        let instructions = (0..100_000)
+            .map(|_| DecodedInstruction::Push(byte.as_slice()))
+            .collect::<Vec<_>>();
+
+        assert!(push_drop_carriage(&instructions).is_none());
+    }
+
+    #[test]
+    fn push_drop_scan_preserves_earliest_start_semantics() {
+        let small = [1_u8];
+        let large = [7_u8; MIN_PUSH_DROP_BYTES];
+        let instructions = [
+            DecodedInstruction::Push(small.as_slice()),
+            DecodedInstruction::Push(large.as_slice()),
+            DecodedInstruction::Push(large.as_slice()),
+            DecodedInstruction::Op(opcodes::all::OP_2DROP.to_u8()),
+            DecodedInstruction::Push(large.as_slice()),
+            DecodedInstruction::Push(large.as_slice()),
+            DecodedInstruction::Op(opcodes::all::OP_2DROP.to_u8()),
+        ];
+
+        let detection = push_drop_carriage(&instructions).expect("balanced inner run");
+        assert_eq!(detection.instruction, 1);
+        assert_eq!(detection.pushed_elements, 2);
+        assert_eq!(detection.pushed_bytes, MIN_PUSH_DROP_BYTES * 2);
+    }
+
+    fn reference_push_drop_carriage(
+        instructions: &[DecodedInstruction<'_>],
+    ) -> Option<(usize, usize, usize)> {
+        for start in 0..instructions.len() {
+            let mut depth = 0_usize;
+            let mut pushed_elements = 0_usize;
+            let mut pushed_bytes = 0_usize;
+            let mut saw_drop = false;
+            for instruction in &instructions[start..] {
+                match instruction {
+                    DecodedInstruction::Push(bytes) if bytes.len() <= MAX_RDTS_PUSH_BYTES => {
+                        depth += 1;
+                        pushed_elements += 1;
+                        pushed_bytes += bytes.len();
+                    }
+                    DecodedInstruction::Op(opcode) if ord_pushnum(*opcode).is_some() => {
+                        depth += 1;
+                        pushed_elements += 1;
+                        pushed_bytes += 1;
+                    }
+                    DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_DROP.to_u8() => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                        saw_drop = true;
+                    }
+                    DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_2DROP.to_u8() => {
+                        if depth < 2 {
+                            break;
+                        }
+                        depth -= 2;
+                        saw_drop = true;
+                    }
+                    _ => break,
+                }
+                if depth == 0 && saw_drop {
+                    if pushed_elements >= MIN_PUSH_DROP_ELEMENTS
+                        && pushed_bytes >= MIN_PUSH_DROP_BYTES
+                    {
+                        return Some((start, pushed_elements, pushed_bytes));
+                    }
+                    break;
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn push_drop_scan_matches_the_previous_grammar_exhaustively() {
+        const TOKEN_KINDS: usize = 6;
+        let small = [1_u8];
+        let large = [7_u8; MIN_PUSH_DROP_BYTES];
+
+        for length in 0..=6_u32 {
+            for mut encoded in 0..TOKEN_KINDS.pow(length) {
+                let mut instructions = Vec::with_capacity(length as usize);
+                for _ in 0..length {
+                    instructions.push(match encoded % TOKEN_KINDS {
+                        0 => DecodedInstruction::Push(small.as_slice()),
+                        1 => DecodedInstruction::Push(large.as_slice()),
+                        2 => DecodedInstruction::Op(opcodes::all::OP_PUSHNUM_1.to_u8()),
+                        3 => DecodedInstruction::Op(opcodes::all::OP_DROP.to_u8()),
+                        4 => DecodedInstruction::Op(opcodes::all::OP_2DROP.to_u8()),
+                        _ => DecodedInstruction::Op(opcodes::all::OP_NOP.to_u8()),
+                    });
+                    encoded /= TOKEN_KINDS;
+                }
+                let expected = reference_push_drop_carriage(&instructions);
+                let actual = push_drop_carriage(&instructions).map(|detection| {
+                    (
+                        detection.instruction,
+                        detection.pushed_elements,
+                        detection.pushed_bytes,
+                    )
+                });
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]
