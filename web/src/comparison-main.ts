@@ -27,6 +27,7 @@ import {
   compactComparisonEvidence,
   comparisonAssessmentText,
 } from "./comparison-detail-format";
+import { ComparisonDetailScheduler } from "./comparison-detail-scheduler";
 import { hitTestComparison } from "./comparison-layout";
 import {
   cursorMoveForKey,
@@ -257,6 +258,7 @@ const setTransactionSearchStatus = (
 };
 
 const clearDetailPanel = (message: string): void => {
+  selectedTransactionDetailScheduler.cancel();
   detailController?.abort();
   detailController = null;
   detailSequence += 1;
@@ -1169,6 +1171,13 @@ const loadSelectedTransactionDetail = async (
   );
 };
 
+const selectedTransactionDetailScheduler = new ComparisonDetailScheduler(
+  (entry: ComparedTransaction) => {
+    void loadSelectedTransactionDetail(entry);
+  },
+  300,
+);
+
 const renderComparison = async (
   current: CurrentComparison,
   view: ComparisonPolicyView,
@@ -1245,35 +1254,55 @@ const renderComparison = async (
   );
 };
 
-const transitionComparisonView = (requested: ComparisonViewState): void => {
+const transitionComparisonView = (
+  requested: ComparisonViewState,
+  detailTiming: "immediate" | "settled" = "immediate",
+): void => {
   const current = comparison;
   if (current === null) {
+    selectedTransactionDetailScheduler.cancel();
     preparePendingView(requested);
     updateQuery();
     return;
   }
 
   const previous = currentViewState();
-  executeComparisonViewTransition(current, previous, requested, {
-    applyResolvedView: (resolved) => {
-      applyResolvedLoadedView(current, resolved);
+  const resolved = executeComparisonViewTransition(
+    current,
+    previous,
+    requested,
+    {
+      applyResolvedView: (resolved) => {
+        applyResolvedLoadedView(current, resolved);
+      },
+      renderPopulation: () => {
+        renderRegionControls(current);
+        syncPolicyMatrixSelection();
+        renderInspector();
+      },
+      renderTransactionNavigator,
+      updateQuery,
+      scheduleCanvasRender,
+      handleCanvasRenderFailure: comparisonCanvasRenderFailureHandler(
+        () => comparison === current,
+        setStatus,
+      ),
+      loadTransactionDetail: (entry) => {
+        if (detailTiming === "settled") {
+          selectedTransactionDetailScheduler.schedule(entry);
+        } else {
+          selectedTransactionDetailScheduler.loadNow(entry);
+        }
+      },
     },
-    renderPopulation: () => {
-      renderRegionControls(current);
-      syncPolicyMatrixSelection();
-      renderInspector();
-    },
-    renderTransactionNavigator,
-    updateQuery,
-    scheduleCanvasRender,
-    handleCanvasRenderFailure: comparisonCanvasRenderFailureHandler(
-      () => comparison === current,
-      setStatus,
-    ),
-    loadTransactionDetail: (entry) => {
-      void loadSelectedTransactionDetail(entry);
-    },
-  });
+  );
+  if (
+    detailTiming === "immediate" &&
+    resolved.updateKind === "none" &&
+    resolved.selectedEntry !== null
+  ) {
+    selectedTransactionDetailScheduler.loadNow(resolved.selectedEntry);
+  }
 };
 
 const renderSelectedSourceMetadata = (message: string): void => {
@@ -1463,7 +1492,7 @@ const loadComparison = async (
       retainActiveComparison,
     );
     if (applied.selectedEntry !== null) {
-      void loadSelectedTransactionDetail(applied.selectedEntry);
+      selectedTransactionDetailScheduler.loadNow(applied.selectedEntry);
     }
   } catch (error) {
     if (
@@ -1747,10 +1776,13 @@ const handleTransactionNavigation = (event: KeyboardEvent): void => {
     if (nextIndex !== null) {
       const entry = entries[nextIndex];
       if (entry !== undefined) {
-        transitionComparisonView({
-          ...currentViewState(),
-          txid: entry.txid,
-        });
+        transitionComparisonView(
+          {
+            ...currentViewState(),
+            txid: entry.txid,
+          },
+          "settled",
+        );
       }
     }
     return;
