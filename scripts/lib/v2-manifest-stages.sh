@@ -50,7 +50,7 @@ atlas_v2_manifest_stage_records() {
                 error("invalid stage dependency_ids")
             else
                 . as $stage |
-                if $stage.kind == "classifier" then
+                (if $stage.kind == "classifier" then
                     if ($stage.classifier_id | classifier_id | not) then
                         error("invalid classifier stage classifier_id")
                     else
@@ -67,7 +67,7 @@ atlas_v2_manifest_stage_records() {
                     end
                 else
                     error("invalid stage kind")
-                end as $stage_path |
+                end) as $stage_path |
                 [
                     $stage.kind,
                     ($stage.classifier_id // ""),
