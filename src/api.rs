@@ -808,7 +808,10 @@ mod tests {
         assert_eq!(response["schema_version"], 2);
         assert_eq!(response["transaction_count"], 1);
         assert_eq!(response["row_count"], 1);
-        assert_eq!(response["stages"].as_array().map(Vec::len), Some(7));
+        assert_eq!(
+            response["stages"].as_array().map(Vec::len),
+            Some(crate::model::classifier_catalog().len() + 3)
+        );
 
         let (ready_status, ready) = get_json(application, "/readyz").await;
         assert_eq!(ready_status, StatusCode::OK);

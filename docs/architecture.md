@@ -104,7 +104,7 @@ generation cannot update current state.
 
 ## Independent classifier lenses
 
-`src/classifiers.rs` implements four versioned lenses over the
+`src/classifiers.rs` implements five versioned lenses over the
 resolved fact set:
 
 | Lens                     | Method                   | Question answered                                                       |
@@ -112,6 +112,7 @@ resolved fact set:
 | `transaction_properties` | Exact, multi-label       | Which serialized and script-family properties are present?              |
 | `transaction_shape`      | Heuristic, multi-label   | Which explicitly defined transaction-shape patterns match?              |
 | `data_protocols`         | Fingerprint, multi-label | Which supported data-carrier byte patterns are present?                 |
+| `data_carriage_shape`    | Heuristic, multi-label   | Which high-confidence bulk-carrier witness shapes are present?          |
 | `knots_bip110`           | Policy rule set          | How does this witness variant evaluate against deployed BIP-110 policy? |
 
 The catalog, rules, thresholds, missing-fact behavior, and limitations are

@@ -165,15 +165,15 @@ while IFS= read -r -d '' kind &&
 
 done <"$records"
 
-require_equal "stage count" "$stage_count" 7
+require_equal "stage count" "$stage_count" 8
 require_equal "population stage count" "$population_count" 1
 require_equal "membership stage count" "$membership_count" 1
 require_equal "structure stage count" "$structure_count" 1
-require_equal "classifier stage count" "$classifier_count" 4
+require_equal "classifier stage count" "$classifier_count" 5
 require_equal \
     "classifier stage order" \
     "$classifier_ids" \
-    "transaction_properties transaction_shape data_protocols knots_bip110"
+    "transaction_properties transaction_shape data_protocols data_carriage_shape knots_bip110"
 expected_uncompressed_sizes=$(
     jq --raw-output \
         '[.stages[].uncompressed_bytes | tostring] | join(" ")' \

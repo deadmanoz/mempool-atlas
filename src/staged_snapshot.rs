@@ -1331,10 +1331,7 @@ mod tests {
             state,
             primary_label: primary_label.map(str::to_owned),
             labels: labels.iter().map(|value| (*value).to_owned()).collect(),
-            missing_facts: missing_facts
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect(),
+            missing_facts: missing_facts.iter().copied().map(str::to_owned).collect(),
             evidence: None,
         }
     }
@@ -1383,6 +1380,13 @@ mod tests {
                     ClassificationResultState::Complete,
                     Some("no_detected_protocol"),
                     &["no_detected_protocol"],
+                    &[],
+                ),
+                result(
+                    "data_carriage_shape",
+                    ClassificationResultState::Complete,
+                    Some("no_detected_carriage_shape"),
+                    &["no_detected_carriage_shape"],
                     &[],
                 ),
                 result(

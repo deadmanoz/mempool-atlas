@@ -3,8 +3,9 @@
 Mempool Atlas classifies current transactions through independent lenses. A
 lens answers one bounded question and never attempts to infer a single
 universal transaction type. The same transaction can therefore carry exact
-structural labels, one or more heuristic shape labels, data-protocol
-fingerprints, and a source-local policy assessment at the same time.
+structural labels, transaction and data-carriage shape heuristics,
+data-protocol fingerprints, and a source-local policy assessment at the same
+time.
 
 This specification is original to Mempool Atlas. The transaction-properties
 vocabulary is intended to be familiar to users of public mempool explorers,
@@ -127,7 +128,7 @@ no labels at all rather than claiming that no shape applies. Version 1 emitted
 `other_shape` in that case, which asserted a negative fact while a rule was
 still unresolved.
 
-## `data_protocols` version 2
+## `data_protocols` version 3
 
 This fingerprint, multi-label lens locates recognizable data-carrier patterns
 in transaction bytes. It does not execute a protocol state machine or prove
@@ -148,9 +149,12 @@ relies on ARC4 for any security property.
 
 ### Witness carriers
 
-- `inscription` identifies `OP_FALSE OP_IF <push "ord">` in an inferred
-  Taproot leaf script. A raw witness-byte fallback may also identify the same
-  opening and records lower-confidence evidence.
+- `inscription` identifies either the classic `OP_FALSE OP_IF <push "ord">`
+  envelope or the RDTS-compatible bare `ord` push followed by data pushes
+  balanced back to zero depth with `OP_DROP` and `OP_2DROP`. The latter accepts
+  data pushes through 256 bytes and rejects a 257-byte push. Evidence records
+  which framing matched. A raw witness-byte fallback may also identify the
+  classic opening and records lower-confidence evidence.
 - `brc20` additionally requires an inscription body containing the
   whitespace-insensitive marker `"p":"brc-20"`. Every `brc20` result also
   includes `inscription`. Atlas does not validate the JSON document.
@@ -246,6 +250,43 @@ output indexes.
   at a fixed field offset, because deployed transactions place it at several
   offsets. An unrelated Counterparty message whose text contains one of the
   markers would also match.
+
+Version 3 adds the RDTS-compatible Ordinals push/drop framing. It keeps the
+existing `inscription` and `brc20` questions and label keys because only the
+recognized wire representation changed.
+
+## `data_carriage_shape` version 1
+
+This heuristic, multi-label lens asks whether a transaction contains a
+high-confidence bulk-carrier witness shape, independently of protocol branding
+or BIP-110 policy outcome. It inspects scripts revealed by known P2TR and P2WSH
+inputs. P2WSH witness scripts must match the spent output's SHA256 commitment.
+For P2TR, Atlas checks the control-block shape but does not recompute the
+Taproot commitment.
+
+- `push_drop_witness` requires one contiguous, stack-neutral sequence made only
+  of data pushes no larger than 256 bytes, push-number opcodes, `OP_DROP`, and
+  `OP_2DROP`. The sequence must contain at least two pushed elements, carry at
+  least 64 pushed bytes, and balance to zero depth without an underflow or an
+  intervening opcode. This recognizes large push/drop carrier shapes without
+  treating an ordinary single value cleanup as bulk carriage.
+- `opcode_value_coding` requires OP_PLENTY's self-framing v2 form: seven
+  consecutive `OP_5` opcodes, eight valid modulo-22 length nibbles, an even and
+  fully present payload length, only registered encoding opcodes in the body,
+  and one of the three defined footers. Atlas does not infer this label from a
+  merely unusual opcode distribution.
+- `no_detected_carriage_shape` is emitted only when every input script is known
+  and neither registered heuristic fires.
+
+The two positive labels are shapes, not proof of intent, protocol validity, or
+policy rejection. A partial result preserves a positive match while naming
+`input_script_pubkeys` as missing. If a spent-output script is unavailable and
+no positive match is proven, the lens emits no negative label.
+
+Version 1 deliberately does not label output-key, file-polyglot, field,
+signature, or commitment channels. It also does not estimate carried bytes.
+Those require separate definitions rather than inheriting the OP_RETURN byte
+measure.
 
 ## `knots_bip110` version 1
 

@@ -917,6 +917,13 @@ fn make_entry(
             Some(data_labels[0].to_owned()),
             Vec::new(),
         ),
+        classification_result(
+            "data_carriage_shape",
+            false,
+            vec!["no_detected_carriage_shape".to_owned()],
+            Some("no_detected_carriage_shape".to_owned()),
+            Vec::new(),
+        ),
         policy_result,
     ];
     entry.bip110 = Some(assessment);

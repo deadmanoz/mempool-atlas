@@ -5,6 +5,7 @@
 //! third-party explorer's classifier source.
 
 mod arc4;
+mod data_carriage;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,6 +20,7 @@ use crate::model::{
     DATA_PROTOCOLS_CLASSIFIER_ID, KNOTS_BIP110_CLASSIFIER_ID, ModelError,
     TRANSACTION_PROPERTIES_CLASSIFIER_ID, TRANSACTION_SHAPE_CLASSIFIER_ID, TransactionStructure,
 };
+use data_carriage::data_carriage_shape;
 
 const ORD_ENVELOPE_BYTES: [u8; 6] = [0x00, 0x63, 0x03, 0x6f, 0x72, 0x64];
 const ORD_PROTOCOL_ID: &[u8] = b"ord";
@@ -46,6 +48,7 @@ const COINJOIN_MIN_OUTPUTS: usize = 5;
 const COINJOIN_MIN_EQUAL_OUTPUTS: usize = 3;
 const SHAPE_RATIO: usize = 5;
 const MAX_DETECTION_EVIDENCE: usize = 16;
+const MAX_RDTS_PUSH_BYTES: usize = 256;
 
 const PROPERTY_LABEL_ORDER: [&str; 18] = [
     "version_1",
@@ -131,6 +134,7 @@ pub fn classify_transaction(
         transaction_properties(transaction, prevouts),
         transaction_shape(transaction, prevouts, &data),
         data,
+        data_carriage_shape(transaction, prevouts),
         bip110_result(bip110),
     ]
 }
@@ -456,9 +460,13 @@ fn analyze_witness(input: usize, witness: &bitcoin::Witness, analysis: &mut Data
                 && control.first().is_some_and(|leaf| leaf & 0xfe == 0xc0)
         });
     if let Some((element_index, element, _control)) = tapscript
-        && let Some(envelope) = parse_ord_envelope(element)
+        && let Some(detection) = parse_ord_envelope(element)
     {
         strong_envelope = true;
+        let framing = match detection.encoding {
+            OrdEnvelopeEncoding::ClassicIf => "classic_if",
+            OrdEnvelopeEncoding::PushDrop => "push_drop",
+        };
         analysis.detect(
             "inscription",
             json!({
@@ -467,9 +475,10 @@ fn analyze_witness(input: usize, witness: &bitcoin::Witness, analysis: &mut Data
                 "input": input,
                 "element": element_index,
                 "detection": "decoded_envelope",
+                "framing": framing,
             }),
         );
-        if envelope.is_brc20() {
+        if detection.envelope.is_brc20() {
             analysis.detect(
                 "brc20",
                 json!({
@@ -478,6 +487,7 @@ fn analyze_witness(input: usize, witness: &bitcoin::Witness, analysis: &mut Data
                     "input": input,
                     "element": element_index,
                     "detection": "decoded_envelope",
+                    "framing": framing,
                 }),
             );
         }
@@ -845,6 +855,17 @@ enum DecodedInstruction<'a> {
     Op(u8),
 }
 
+#[derive(Clone, Copy)]
+enum OrdEnvelopeEncoding {
+    ClassicIf,
+    PushDrop,
+}
+
+struct OrdEnvelopeDetection {
+    envelope: OrdEnvelope,
+    encoding: OrdEnvelopeEncoding,
+}
+
 fn decoded_instructions(script: &[u8]) -> Option<Vec<DecodedInstruction<'_>>> {
     Script::from_bytes(script)
         .instructions()
@@ -855,8 +876,15 @@ fn decoded_instructions(script: &[u8]) -> Option<Vec<DecodedInstruction<'_>>> {
         .collect()
 }
 
-fn parse_ord_envelope(script: &[u8]) -> Option<OrdEnvelope> {
+fn parse_ord_envelope(script: &[u8]) -> Option<OrdEnvelopeDetection> {
     let instructions = decoded_instructions(script)?;
+    parse_classic_ord_envelope(&instructions)
+        .or_else(|| parse_push_drop_ord_envelope(&instructions))
+}
+
+fn parse_classic_ord_envelope(
+    instructions: &[DecodedInstruction<'_>],
+) -> Option<OrdEnvelopeDetection> {
     let start = instructions.windows(3).position(|window| {
         matches!(&window[0], DecodedInstruction::Push(bytes) if bytes.is_empty())
             && matches!(&window[1], DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_IF.to_u8())
@@ -887,7 +915,70 @@ fn parse_ord_envelope(script: &[u8]) -> Option<OrdEnvelope> {
             DecodedInstruction::Op(_) => break,
         }
     }
-    Some(envelope)
+    Some(OrdEnvelopeDetection {
+        envelope,
+        encoding: OrdEnvelopeEncoding::ClassicIf,
+    })
+}
+
+fn parse_push_drop_ord_envelope(
+    instructions: &[DecodedInstruction<'_>],
+) -> Option<OrdEnvelopeDetection> {
+    for marker in 0..instructions.len() {
+        if !matches!(instructions[marker], DecodedInstruction::Push(bytes) if bytes == ORD_PROTOCOL_ID)
+        {
+            continue;
+        }
+        if marker >= 2
+            && matches!(instructions[marker - 2], DecodedInstruction::Push(bytes) if bytes.is_empty())
+            && matches!(instructions[marker - 1], DecodedInstruction::Op(opcode) if opcode == opcodes::all::OP_IF.to_u8())
+        {
+            continue;
+        }
+        let mut payload = Vec::<Vec<u8>>::new();
+        let mut depth = 1_usize;
+        for instruction in &instructions[marker + 1..] {
+            match instruction {
+                DecodedInstruction::Push(bytes) if bytes.len() <= MAX_RDTS_PUSH_BYTES => {
+                    payload.push(bytes.to_vec());
+                    depth += 1;
+                }
+                DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_2DROP.to_u8() => {
+                    if depth < 2 {
+                        break;
+                    }
+                    depth -= 2;
+                }
+                DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_DROP.to_u8() => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                DecodedInstruction::Op(opcode) => {
+                    let Some(value) = ord_pushnum(*opcode) else {
+                        break;
+                    };
+                    payload.push(vec![value]);
+                    depth += 1;
+                }
+                DecodedInstruction::Push(_) => break,
+            }
+            if depth == 0 {
+                let mut envelope = OrdEnvelope::default();
+                if let Some(body_start) = payload.iter().position(Vec::is_empty) {
+                    for body in &payload[body_start + 1..] {
+                        envelope.push_body(body);
+                    }
+                }
+                return Some(OrdEnvelopeDetection {
+                    envelope,
+                    encoding: OrdEnvelopeEncoding::PushDrop,
+                });
+            }
+        }
+    }
+    None
 }
 
 fn op_return_payload(script: &[u8]) -> Vec<u8> {
@@ -945,6 +1036,14 @@ fn parse_bare_multisig(script: &Script) -> Option<(u8, Vec<&[u8]>)> {
 
 fn pushnum(opcode: u8) -> Option<u8> {
     (0x51..=0x60).contains(&opcode).then(|| opcode - 0x50)
+}
+
+fn ord_pushnum(opcode: u8) -> Option<u8> {
+    if opcode == 0x4f {
+        Some(0x81)
+    } else {
+        pushnum(opcode)
+    }
 }
 
 fn bip110_result(assessment: &Bip110Assessment) -> ClassificationResult {
@@ -1328,6 +1427,69 @@ mod tests {
         assert!(result.labels.contains(&"brc20".to_owned()));
         assert!(result.labels.contains(&"runes".to_owned()));
         assert!(!result.labels.contains(&"other_op_return".to_owned()));
+    }
+
+    fn push_data(script: &mut Vec<u8>, data: &[u8]) {
+        match data.len() {
+            0 => script.push(0),
+            1..=75 => script.push(u8::try_from(data.len()).expect("direct push length")),
+            76..=255 => {
+                script.extend([0x4c, u8::try_from(data.len()).expect("pushdata1 length")]);
+            }
+            _ => {
+                let length = u16::try_from(data.len()).expect("pushdata2 length");
+                script.push(0x4d);
+                script.extend(length.to_le_bytes());
+            }
+        }
+        script.extend_from_slice(data);
+    }
+
+    fn push_drop_ord(payload: &[&[u8]]) -> Vec<u8> {
+        let mut script = Vec::new();
+        push_data(&mut script, b"ord");
+        for element in payload {
+            push_data(&mut script, element);
+        }
+        let mut depth = payload.len() + 1;
+        while depth >= 2 {
+            script.push(opcodes::all::OP_2DROP.to_u8());
+            depth -= 2;
+        }
+        if depth == 1 {
+            script.push(opcodes::all::OP_DROP.to_u8());
+        }
+        script
+    }
+
+    #[test]
+    fn rdts_push_drop_ord_envelope_preserves_protocol_labels() {
+        let body = br#"{ "p" : "brc-20" }"#;
+        let ord_script = push_drop_ord(&[&[1], b"application/json", &[], body]);
+        let mut control = vec![0xc0];
+        control.extend([2; 32]);
+        let witness = Witness::from_slice(&[ord_script, control]);
+        let tx = transaction(
+            vec![input(Sequence::MAX, witness)],
+            vec![output(1_000, p2tr(2))],
+        );
+
+        let result = data_protocols(&tx);
+
+        assert_eq!(result.labels, ["inscription", "brc20"]);
+        assert_eq!(
+            result.evidence.as_ref().unwrap()["detections"][0]["framing"],
+            "push_drop"
+        );
+    }
+
+    #[test]
+    fn rdts_push_drop_ord_enforces_the_256_byte_boundary() {
+        let accepted = push_drop_ord(&[&[], &[1; 256]]);
+        let rejected = push_drop_ord(&[&[], &[1; 257]]);
+
+        assert!(parse_ord_envelope(&accepted).is_some());
+        assert!(parse_ord_envelope(&rejected).is_none());
     }
 
     #[test]

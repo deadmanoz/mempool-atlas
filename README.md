@@ -1,7 +1,7 @@
 # Mempool Atlas
 
 Mempool Atlas shows the current mempool reported by one to four Bitcoin nodes.
-It classifies each transaction through four independent lenses. Comparison
+It classifies each transaction through five independent lenses. Comparison
 happens in the browser; the server never combines mempools.
 
 ![Classifier buckets rendered from deterministic fixture data](docs/assets/node-buckets.png)
@@ -13,6 +13,7 @@ happens in the browser; the server never combines mempools.
 | Transaction properties | Which exact version, witness, replaceability, and script-family properties are present? |
 | Transaction shape      | Which conservative CoinJoin, consolidation, or batch-payout heuristics match?           |
 | Data protocols         | Which supported inscription, token, or OP_RETURN byte patterns are present?             |
+| Data carriage shapes   | Which high-confidence bulk-carrier script shapes are present?                            |
 | Knots BIP-110          | Would this witness variant violate Bitcoin Knots' deployed policy?                      |
 
 Atlas also shows fee rate, age, virtual size, ancestor fee rate, ancestry,

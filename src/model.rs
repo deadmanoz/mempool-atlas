@@ -12,6 +12,7 @@ pub const BIP110_EVALUATOR_VERSION: &str = ATLAS_VERSION;
 pub const TRANSACTION_PROPERTIES_CLASSIFIER_ID: &str = "transaction_properties";
 pub const TRANSACTION_SHAPE_CLASSIFIER_ID: &str = "transaction_shape";
 pub const DATA_PROTOCOLS_CLASSIFIER_ID: &str = "data_protocols";
+pub const DATA_CARRIAGE_SHAPE_CLASSIFIER_ID: &str = "data_carriage_shape";
 pub const KNOTS_BIP110_CLASSIFIER_ID: &str = "knots_bip110";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -220,7 +221,7 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
         },
         ClassifierDescriptor {
             id: DATA_PROTOCOLS_CLASSIFIER_ID.to_owned(),
-            version: "2".to_owned(),
+            version: "3".to_owned(),
             title: "Data protocols".to_owned(),
             methodology: ClassifierMethodology::Fingerprint,
             semantics: ClassifierSemantics::MultiLabel,
@@ -261,6 +262,34 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
                     "no_detected_protocol",
                     "No detected protocol",
                     "No registered data-protocol fingerprint fired.",
+                ),
+            ],
+        },
+        ClassifierDescriptor {
+            id: DATA_CARRIAGE_SHAPE_CLASSIFIER_ID.to_owned(),
+            version: "1".to_owned(),
+            title: "Data carriage shapes".to_owned(),
+            methodology: ClassifierMethodology::Heuristic,
+            semantics: ClassifierSemantics::MultiLabel,
+            required_facts: vec![
+                "raw_transaction".to_owned(),
+                "input_script_pubkeys".to_owned(),
+            ],
+            labels: vec![
+                label(
+                    "push_drop_witness",
+                    "Push/drop witness carrier",
+                    "A revealed witness script contains a large balanced data-push and drop run.",
+                ),
+                label(
+                    "opcode_value_coding",
+                    "Opcode-value coding",
+                    "A revealed witness script contains a valid self-framed OP_PLENTY opcode sequence.",
+                ),
+                label(
+                    "no_detected_carriage_shape",
+                    "No detected carriage shape",
+                    "No registered data-carriage shape heuristic fired.",
                 ),
             ],
         },
@@ -325,6 +354,14 @@ pub(crate) fn test_classifier_results(assessment: &Bip110Assessment) -> Vec<Clas
             state: ClassificationResultState::Complete,
             primary_label: Some("no_detected_protocol".to_owned()),
             labels: vec!["no_detected_protocol".to_owned()],
+            missing_facts: Vec::new(),
+            evidence: Some(serde_json::json!({ "fixture": true })),
+        },
+        ClassificationResult {
+            classifier_id: DATA_CARRIAGE_SHAPE_CLASSIFIER_ID.to_owned(),
+            state: ClassificationResultState::Complete,
+            primary_label: Some("no_detected_carriage_shape".to_owned()),
+            labels: vec!["no_detected_carriage_shape".to_owned()],
             missing_facts: Vec::new(),
             evidence: Some(serde_json::json!({ "fixture": true })),
         },
