@@ -20,6 +20,8 @@ lenses, and serves source-local node and comparison views.
 - `src/runtime.rs` coordinates source turns and the shared RPC work gate.
   `src/runtime/publisher.rs` owns atomic current-state publication. Tests live
   in `src/runtime/`.
+- `src/conflict_facts.rs` owns the bounded binary fingerprint and exact-outpoint
+  encodings used only by lazy different-tip comparison analysis.
 - `src/model.rs` defines public snapshots, lifecycle, assessments,
   and transaction detail.
 - `src/api.rs` serves health, readiness, source APIs, and static web
@@ -64,6 +66,9 @@ lenses, and serves source-local node and comparison views.
   filter totals. `web/src/comparison-view-transition.ts` classifies
   interactive state changes before the controller applies effects, including
   observed asynchronous canvas scheduling.
+- `web/src/comparison-conflict-view.ts` owns optional different-tip
+  conflicting-spend loading, cooperative candidate matching, exact
+  verification, coverage copy, and its abort/reset lifecycle.
 - `web/src/terrain-selection-view.ts` restores the last bounded terrain paint
   and overlays transaction-local focus without replaying the full population.
 - `web/src/styles.css` owns shared shell, header, toolbar, and terrain rules,
@@ -188,6 +193,11 @@ newer and npm 10 or newer.
   in transaction detail.
 - Publish one matching `ETag` with every cached source representation. Waiting
   responses have no validator and remain non-cacheable.
+- Retain exact input outpoints only as an internal optional fact under a
+  dedicated 64 MiB per-source generation budget. Keep them out of ordinary
+  manifests, stages, and transaction detail. Budget exhaustion yields partial
+  conflict-fact coverage and never reduces classifier coverage or source
+  availability.
 
 ### Browser
 
@@ -240,6 +250,12 @@ newer and npm 10 or newer.
   repaint the wider comparison canvas.
 - Absence from a source is not evidence of rejection, filtering, or relay
   causality.
+- Offer conflicting-spend analysis only as an explicit, lazy action when the
+  reported tips differ and both classification lifecycles are terminal. Normal
+  same-tip comparisons make no conflict-fact request. Treat compact fingerprint
+  matches only as candidates, exclude the same txid, and require exact 36-byte
+  outpoint equality before reporting a pair. Always state per-source coverage
+  and never infer replacement intent, replay protection, rejection, or safety.
 - Keep source, classifier, Classifications label set and match mode, optional
   policy region, filter, and optional transaction in canonical URL state.
 - Present Node and Compare as the shared primary view switch in both page

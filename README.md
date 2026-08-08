@@ -74,8 +74,15 @@ right. Within the shared region, it also derives overlapping counts for
 different witness variants, unconfirmed ancestor packages, and effective
 replaceability directly from the two packed source snapshots. Outlined cells
 carry at least one such difference, and selected transaction detail names the
-exact source-local values. Snapshot timing states which source was observed
-later and whether the two collection windows overlapped. A prominent txid
+exact source-local values. When the reported chain tips differ, Snapshot timing
+also offers an explicit conflicting-spend analysis. It lazily compares compact
+source-local input fingerprints, then verifies every candidate against the full
+36-byte outpoints before reporting a pair. Coverage remains explicit when
+classification or the optional fact budget leaves rows unavailable. The result
+does not establish replacement intent, replay protection, rejection, relay
+cause, or safety. Same-tip comparisons make none of these optional requests.
+Snapshot timing states which source was observed later and whether the two
+collection windows overlapped. A prominent txid
 lookup immediately below that context opens one transaction across both
 current snapshots. The lookup and three membership populations share one
 transaction panel. Selected transaction IDs in both Node and Compare link to
@@ -196,16 +203,22 @@ contract, reconciled baseline, and current checkpoints.
   content-addressed population, membership, or structure stage.
 - `GET /api/v2/sources/{source_id}/mempool/stages/classifier/{classifier_id}/{content_id}`
   returns one content-addressed classifier stage.
+- `GET /api/v2/sources/{source_id}/mempool/conflict-fingerprints/{population_id}/{structure_id}`
+  lazily returns the bounded binary candidate index for one terminal source
+  publication.
+- `GET /api/v2/sources/{source_id}/mempool/conflict-outpoints/{population_id}/{structure_id}/{txid}`
+  returns exact binary input outpoints for one covered transaction so a
+  candidate fingerprint match can be verified.
 - `GET /api/v2/sources/{source_id}/transactions/{txid}` returns classifier and
   policy detail for one current transaction.
 
 Source discovery, transaction detail, operational responses, and errors disable
 caching. Published manifests have `ETag` validators and require revalidation.
-Successful stage responses use their SHA-256 content ID in the URL and remain
-fresh and immutable for one year. Stage validators remain available, so an
+Successful stage and conflict-fact responses are publication-bound and remain
+fresh and immutable for one year. Their validators remain available, so an
 explicit matching conditional request returns `304` without transferring the
-JSON body. The browser refresh action reads Atlas' latest in-memory publication;
-it does not trigger a Bitcoin RPC poll.
+body. The browser refresh action reads Atlas' latest in-memory publication; it
+does not trigger a Bitcoin RPC poll.
 
 ## Public deployment
 

@@ -405,6 +405,16 @@ classifier, while Fee rate by age remains independent of every classifier. The
 comparison page remains a source-local policy matrix rather than combining
 classifier taxonomies.
 
+Cross-source conflicting-spend analysis is also not a classifier. It answers a
+relationship question over two independent populations, so it stays in the
+browser-derived comparison product and never adds a label to either source.
+When chain tips differ and both classification lifecycles are terminal, the
+user can explicitly load a bounded source-local input fingerprint index.
+Fingerprint matches identify candidates only. Atlas reports a pair only after
+full 36-byte outpoints compare equal, excludes the same transaction ID, and
+states analyzed-row coverage for both sources. A match does not prove
+replacement intent, replay protection, rejection, relay cause, or safety.
+
 ## Structure facts
 
 Structure facts are exact per-transaction derivations, not a classifier lens.

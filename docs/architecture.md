@@ -206,6 +206,23 @@ conditional validation. Source discovery, transaction detail, failures, and
 responses before the first publication remain non-cacheable. Clients that
 advertise gzip support receive compressed JSON.
 
+Classification also retains exact input outpoints as an internal optional fact
+under a dedicated 64 MiB per-source generation budget. These facts use the same
+`txid` plus `wtxid` carry-forward gate as their classification and never enter
+the manifest, ordinary stages, or transaction-detail JSON. Exhausting the
+optional budget leaves later rows uncovered without reducing classifier
+coverage, failing publication, or making a source stale.
+
+Two lazy binary conflict-fact routes are bound to the current population and
+structure content identifiers. The first hashes exact outpoints with a
+domain-separated SHA-256 construction, publishes only an eight-byte candidate
+fingerprint plus source row, and caches the bounded sorted body after one
+blocking preparation. The second returns full 36-byte outpoints for one covered
+transaction. A fingerprint match is never a result by itself. The browser must
+verify exact equality, and a superseded dependency returns `409` rather than
+mixing publications. Successful bodies are immutable and conditionally
+cacheable. This optional path is absent from the ordinary stage graph.
+
 The process retains no application data on disk. Restarting discards current
 state and readiness returns only after a new valid observation is available.
 
@@ -358,7 +375,15 @@ timing panel to an amber warning. At equal height it names the chain divergence
 directly; at different heights it preserves lag as an alternative explanation.
 The shared region then describes cross-tip observation without predicting
 confirmation. Source-difference flags likewise describe observations and do
-not infer why either node holds a transaction.
+not infer why either node holds a transaction. Once both classification
+lifecycles are terminal, the same panel offers an explicit conflicting-spend
+analysis. Same-tip comparisons make zero conflict-fact requests. Different-tip
+analysis cooperatively merge-joins the two fingerprint indexes, excludes the
+same transaction ID, bounds candidate expansion, and fetches exact outpoints
+only for candidate pairs. It reports covered rows on both sources and keeps the
+live comparison usable if loading, verification, or supersession fails. A
+verified shared outpoint remains an observation, not a claim about replacement,
+double-spend intent, chain-specific coin separation, rejection, or safety.
 Transaction detail exposes source-local base fee, virtual size, and base fee
 rate so differing witness variants quantify their actual size and fee-rate
 effect. Atlas applies the same BIP-110 evaluator to both source-local fact sets;
