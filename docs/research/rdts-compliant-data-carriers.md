@@ -4,11 +4,13 @@ Research notes on published techniques that pass all seven BIP-110 (RDTS /
 `REDUCED_DATA`) transaction rules and the retained Knots datacarrier policy,
 yet still carry arbitrary data.
 
-**Status:** research input, not a specification. Nothing here is implemented.
-This document exists so a classifier extension can be designed and reviewed
-against real, cited techniques rather than guesses.
+**Status:** research input, not a specification. The implemented subset is
+identified below; remaining techniques are research candidates or documented
+limits. This document exists so classifier extensions can be designed and
+reviewed against real, cited techniques rather than guesses.
 
 **Compiled:** 2026-08-08.
+**Implementation status updated:** 2026-08-09.
 
 ---
 
@@ -95,39 +97,30 @@ naive file-carving recover it directly.
 
 ---
 
-## 3. What Atlas detects today, and the exact gaps
+## 3. What Atlas detects today, and the remaining gaps
 
-Current `data_protocols` vocabulary (`src/classifiers.rs:78`):
-`inscription`, `brc20`, `runes`, `stamps`, `counterparty`, `omni`,
-`other_op_return`, `no_detected_protocol`.
+`data_protocols` version 3 recognizes the compliant bare-`ord` push/drop
+envelope as the existing `inscription` and `brc20` protocol fingerprints.
+`data_carriage_shape` version 2 independently recognizes balanced push/drop
+witness runs, self-framed OP_PLENTY v2, exact OLGA-style P2WSH output runs, and
+off-curve P2TR output keys.
 
-Concrete gaps found while reading the classifier:
+The remaining concrete gaps are:
 
-1. **The compliant `ord` envelope is invisible.**
-   `src/classifiers.rs:23` defines
-   `ORD_ENVELOPE_BYTES = [0x00, 0x63, 0x03, 0x6f, 0x72, 0x64]`, the classic
-   `OP_FALSE OP_IF <push "ord">` opening, and `parse_ord_envelope`
-   (`src/classifiers.rs:858`) requires the exact
-   `empty-push, OP_IF, "ord"` instruction triple. The compliant envelope in
-   [W1](#w1) drops the `00 63` prefix entirely and keeps the same `ord`
-   protocol push. It will not match either the byte-window scan or the
-   instruction parser, so a BIP-110-ready inscription currently receives no
-   `inscription` label.
+1. **P2WSH conditional envelopes and witness-argument drop channels do not
+   have their own exact labels.** A balanced push/drop script can match the
+   generic witness shape, but the never-taken W3 envelope and W4 argument-to-
+   drop correlation remain distinct unimplemented grammars.
 
-2. **No push-drop shape detection.** Nothing looks for long
-   `push -> OP_DROP/OP_2DROP` runs, which is the shared fingerprint of W1, W3,
-   and W4 regardless of protocol branding.
+2. **Output-field analysis is deliberately narrow.** Atlas recognizes the
+   self-consistent OLGA length framing and provably off-curve P2TR keys. It does
+   not infer generic on-curve P2TR carriage or concatenate P2PKH, P2SH, or
+   P2WPKH hash fields.
 
-3. **OLGA / P2WSH-carrier Stamps are already documented as undetected.**
-   `docs/classification.md` states this under "What this lens does not cover".
-   [O2](#o2) is the RDTS-compliant form that Stamps migrated to, so this gap
-   now sits directly on the compliant path.
+3. **No embedded-file scan.** The raw-transaction polyglot signatures in
+   [P1](#p1) are not classified.
 
-4. **No output-field carrier analysis at all.** Nothing reassembles hash or key
-   fields across outputs ([O1](#o1), [O2](#o2), [O3](#o3)), and nothing tests
-   P2TR output keys for being off-curve.
-
-5. **`structure.op_return_bytes` measures only OP_RETURN.** Every technique in
+4. **`structure.op_return_bytes` measures only OP_RETURN.** Every technique in
    Section 4 that is not [O4](#o4) contributes zero to it, so a 400 KB witness
    carrier reports zero carried bytes. Any "data carriage" distribution built
    on it will read these transactions as empty.
@@ -619,6 +612,14 @@ Required facts: raw transaction (already fetched for classification) and, for
 the input-side labels, spent-output scripts. Everything needed is already
 resolved for the existing lenses, so no new RPC surface is required. That
 matters: it means this lens costs no extra node round-trips.
+
+Implementation status: A shipped as `data_protocols` version 3. B shipped in
+two stages and is now `data_carriage_shape` version 2. The implemented B labels
+are `push_drop_witness`, `opcode_value_coding`, `output_key_carrier`, and
+`off_curve_p2tr`. The output carrier is intentionally narrower than the
+original candidate: it recognizes only the self-consistent OLGA P2WSH grammar,
+not arbitrary O1 or O3 reassembly. `p2wsh_envelope` and
+`embedded_file_magic` remain candidates.
 
 **C. Extend `structure` with a carried-bytes fact.**
 `op_return_bytes` measures one channel. A sibling `witness_carried_bytes` (or

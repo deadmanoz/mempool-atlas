@@ -267,7 +267,7 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
         },
         ClassifierDescriptor {
             id: DATA_CARRIAGE_SHAPE_CLASSIFIER_ID.to_owned(),
-            version: "1".to_owned(),
+            version: "2".to_owned(),
             title: "Data carriage shapes".to_owned(),
             methodology: ClassifierMethodology::Heuristic,
             semantics: ClassifierSemantics::MultiLabel,
@@ -285,6 +285,16 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
                     "opcode_value_coding",
                     "Opcode-value coding",
                     "A revealed witness script contains a valid self-framed OP_PLENTY opcode sequence.",
+                ),
+                label(
+                    "output_key_carrier",
+                    "Output-field carrier",
+                    "A self-consistent OLGA-style payload spans an exact equal-value P2WSH output run.",
+                ),
+                label(
+                    "off_curve_p2tr",
+                    "Off-curve P2TR key",
+                    "A P2TR output contains bytes that are not a valid secp256k1 x-only public key.",
                 ),
                 label(
                     "no_detected_carriage_shape",

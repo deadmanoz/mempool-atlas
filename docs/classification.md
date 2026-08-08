@@ -255,13 +255,14 @@ Version 3 adds the RDTS-compatible Ordinals push/drop framing. It keeps the
 existing `inscription` and `brc20` questions and label keys because only the
 recognized wire representation changed.
 
-## `data_carriage_shape` version 1
+## `data_carriage_shape` version 2
 
 This heuristic, multi-label lens asks whether a transaction contains a
-high-confidence bulk-carrier witness shape, independently of protocol branding
-or BIP-110 policy outcome. It inspects scripts revealed by known P2TR and P2WSH
-inputs. P2WSH witness scripts must match the spent output's SHA256 commitment.
-For P2TR, Atlas checks the control-block shape but does not recompute the
+high-confidence bulk-carrier witness or output-field shape, independently of
+protocol branding or BIP-110 policy outcome. It inspects every output directly
+from the raw transaction and scripts revealed by known P2TR and P2WSH inputs.
+P2WSH witness scripts must match the spent output's SHA256 commitment. For
+P2TR inputs, Atlas checks the control-block shape but does not recompute the
 Taproot commitment.
 
 - `push_drop_witness` requires one contiguous, stack-neutral sequence made only
@@ -275,18 +276,28 @@ Taproot commitment.
   fully present payload length, only registered encoding opcodes in the body,
   and one of the three defined footers. Atlas does not infer this label from a
   merely unusual opcode distribution.
+- `output_key_carrier` requires OLGA's two-byte big-endian payload length to
+  select exactly two or more consecutive equal-value P2WSH outputs. The
+  declared payload must consume that complete run, and every unused byte in
+  the final 32-byte program must be zero padding. An adjacent equal-value
+  P2WSH output makes the run ambiguous and prevents the label.
+- `off_curve_p2tr` requires a 34-byte P2TR output whose 32-byte program cannot
+  be parsed as a secp256k1 x-only public key. That proves the output key is
+  unusable, but it does not prove why those bytes were chosen.
 - `no_detected_carriage_shape` is emitted only when every input script is known
-  and neither registered heuristic fires.
+  and none of the four registered heuristics fires.
 
-The two positive labels are shapes, not proof of intent, protocol validity, or
+The four positive labels are shapes, not proof of intent, protocol validity, or
 policy rejection. A partial result preserves a positive match while naming
 `input_script_pubkeys` as missing. If a spent-output script is unavailable and
 no positive match is proven, the lens emits no negative label.
 
-Version 1 deliberately does not label output-key, file-polyglot, field,
-signature, or commitment channels. It also does not estimate carried bytes.
-Those require separate definitions rather than inheriting the OP_RETURN byte
-measure.
+Version 2 adds the exact OLGA output-run grammar and the off-curve P2TR test.
+Version 1 contained only the two witness-resident labels. The lens still does
+not claim generic on-curve output-key carriers, hash160 carriers, file
+polyglots, field steganography, signature channels, or commitments. It also
+does not estimate carried bytes. Those require separate definitions rather
+than inheriting the OP_RETURN byte measure.
 
 ## `knots_bip110` version 1
 

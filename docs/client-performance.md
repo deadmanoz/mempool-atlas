@@ -257,16 +257,16 @@ current wire format measures:
 
 | Release gate        | Exact worst case |          Ceiling | Result |
 | ------------------- | ---------------: | ---------------: | ------ |
-| Node primary        |  2,413,615 bytes |  3,189,229 bytes | pass   |
-| Node complete       |  5,316,336 bytes |  6,059,535 bytes | pass   |
-| Comparison primary  |  4,877,752 bytes |  5,740,612 bytes | pass   |
-| Comparison complete | 10,613,592 bytes | 12,119,070 bytes | pass   |
+| Node primary        |  2,413,743 bytes |  3,189,229 bytes | pass   |
+| Node complete       |  5,316,590 bytes |  6,059,535 bytes | pass   |
+| Comparison primary  |  4,878,007 bytes |  5,740,612 bytes | pass   |
+| Comparison complete | 10,614,100 bytes | 12,119,070 bytes | pass   |
 
 At the pinned throughput, the corresponding projected wall clocks are 25.137,
-47.340, 44.589, and 84.559 seconds. Each includes a two-second request
+47.341, 44.591, and 84.563 seconds. Each includes a two-second request
 allowance and, respectively, an 8, 12, 12, or 16-second processing allowance.
-The remaining margins against the release gates are 4.863, 4.660, 5.411, and
-9.441 seconds. `just perf-web` verifies the end-to-end browser outcome rather
+The remaining margins against the release gates are 4.863, 4.659, 5.409, and
+9.437 seconds. `just perf-web` verifies the end-to-end browser outcome rather
 than treating the projection as a substitute for an interactive product.
 
 ## Functional guarantees

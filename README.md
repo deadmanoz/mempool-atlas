@@ -13,7 +13,7 @@ happens in the browser; the server never combines mempools.
 | Transaction properties | Which exact version, witness, replaceability, and script-family properties are present? |
 | Transaction shape      | Which conservative CoinJoin, consolidation, or batch-payout heuristics match?           |
 | Data protocols         | Which supported inscription, token, or OP_RETURN byte patterns are present?             |
-| Data carriage shapes   | Which high-confidence bulk-carrier script shapes are present?                            |
+| Data carriage shapes   | Which high-confidence witness or output-field carrier shapes are present?                 |
 | Knots BIP-110          | Would this witness variant violate Bitcoin Knots' deployed policy?                      |
 
 Atlas also shows fee rate, age, virtual size, ancestor fee rate, ancestry,

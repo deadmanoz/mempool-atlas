@@ -1082,7 +1082,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::model::{Bip110RuleId, classifier_catalog};
+    use crate::model::{Bip110RuleId, DATA_CARRIAGE_SHAPE_CLASSIFIER_ID, classifier_catalog};
 
     fn input(sequence: Sequence, witness: Witness) -> TxIn {
         spend(Txid::from_byte_array([1; 32]), sequence, witness)
@@ -1223,6 +1223,30 @@ mod tests {
                 .iter()
                 .map(|descriptor| descriptor.id.as_str())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn data_carriage_catalog_declares_v2_output_labels() {
+        let descriptor = classifier_catalog()
+            .into_iter()
+            .find(|descriptor| descriptor.id == DATA_CARRIAGE_SHAPE_CLASSIFIER_ID)
+            .expect("data carriage classifier");
+
+        assert_eq!(descriptor.version, "2");
+        assert_eq!(
+            descriptor
+                .labels
+                .iter()
+                .map(|label| label.key.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "push_drop_witness",
+                "opcode_value_coding",
+                "output_key_carrier",
+                "off_curve_p2tr",
+                "no_detected_carriage_shape",
+            ]
         );
     }
 

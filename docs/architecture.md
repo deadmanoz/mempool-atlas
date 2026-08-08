@@ -112,7 +112,7 @@ resolved fact set:
 | `transaction_properties` | Exact, multi-label       | Which serialized and script-family properties are present?              |
 | `transaction_shape`      | Heuristic, multi-label   | Which explicitly defined transaction-shape patterns match?              |
 | `data_protocols`         | Fingerprint, multi-label | Which supported data-carrier byte patterns are present?                 |
-| `data_carriage_shape`    | Heuristic, multi-label   | Which high-confidence bulk-carrier witness shapes are present?          |
+| `data_carriage_shape`    | Heuristic, multi-label   | Which high-confidence witness or output-field carrier shapes are present? |
 | `knots_bip110`           | Policy rule set          | How does this witness variant evaluate against deployed BIP-110 policy? |
 
 The catalog, rules, thresholds, missing-fact behavior, and limitations are
