@@ -31,6 +31,8 @@ const markCandidate = (
   performance.mark(`atlas:${detail.surface}:${phase}`, { detail });
 };
 
+// Intentionally unbounded: docs/client-performance.md#measurement-hooks explains
+// why only request abort, rather than a local timeout, releases a held sample.
 const awaitHook = async (
   hookResult: Promise<void>,
   signal: AbortSignal,

@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AtlasRequestError } from "./api";
-import { presentation } from "./first-publication-failure";
-import type { SourceSummary } from "./types";
+vi.mock("./api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api")>();
+  return { ...actual, fetchSources: vi.fn() };
+});
+
+import { AtlasRequestError, fetchSources } from "./api";
+import { presentation, refreshSources } from "./first-publication-failure";
+import type { SourceSummary, SourcesResponse } from "./types";
 
 const source = (
   availability: SourceSummary["availability"],
@@ -28,6 +33,56 @@ const unavailable = () =>
     detail:
       "Atlas has not published a current complete snapshot for this source.",
   });
+
+const sourcesResponse: SourcesResponse = {
+  atlas_version: "test",
+  sources: [source("ready")],
+};
+
+afterEach(() => {
+  vi.resetAllMocks();
+});
+
+describe("first publication source refresh", () => {
+  it("returns undefined without rediscovery when the failure is not applicable", async () => {
+    const result = await refreshSources(
+      new Error("request failed"),
+      false,
+      new AbortController().signal,
+    );
+
+    expect(result).toBeUndefined();
+    expect(fetchSources).not.toHaveBeenCalled();
+  });
+
+  it("returns null when rediscovery fails", async () => {
+    vi.mocked(fetchSources).mockRejectedValueOnce(
+      new Error("discovery failed"),
+    );
+
+    const result = await refreshSources(
+      unavailable(),
+      false,
+      new AbortController().signal,
+    );
+
+    expect(result).toBeNull();
+    expect(fetchSources).toHaveBeenCalledOnce();
+  });
+
+  it("returns the refreshed source response after successful rediscovery", async () => {
+    vi.mocked(fetchSources).mockResolvedValueOnce(sourcesResponse);
+
+    const result = await refreshSources(
+      unavailable(),
+      false,
+      new AbortController().signal,
+    );
+
+    expect(result).toBe(sourcesResponse);
+    expect(fetchSources).toHaveBeenCalledOnce();
+  });
+});
 
 describe("first publication failure presentation", () => {
   it("treats only v2 unavailable plus fresh waiting metadata as expected", () => {
