@@ -206,6 +206,7 @@ export const renderJointChart = (
   }
   if (!hasWeight) {
     jointInteractionCleanup.get(canvas)?.();
+    jointInteractionCleanup.delete(canvas);
     container.append(emptyPanelState(options.emptyMessage));
     options.yAxis?.replaceChildren();
     return null;
