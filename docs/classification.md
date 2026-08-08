@@ -255,7 +255,7 @@ Version 3 adds the RDTS-compatible Ordinals push/drop framing. It keeps the
 existing `inscription` and `brc20` questions and label keys because only the
 recognized wire representation changed.
 
-## `data_carriage_shape` version 3
+## `data_carriage_shape` version 4
 
 This heuristic, multi-label lens asks whether a transaction contains a
 high-confidence bulk-carrier witness or output-field shape, independently of
@@ -280,6 +280,10 @@ Taproot commitment.
   commitment matches the spent output and whose complete instruction sequence
   is the JXL-n-hide grammar: `OP_1 OP_NOTIF`, exactly six 255-byte pushes, then
   `OP_ENDIF OP_1`. The same byte sequence in Tapscript does not match.
+- `witness_argument_carrier` requires at least four preceding witness arguments
+  of exactly 255 bytes each. The complete revealed P2WSH or P2TR script must
+  consist only of `OP_DROP` and `OP_2DROP` operations that consume exactly
+  those arguments, followed by `OP_1`.
 - `output_key_carrier` requires OLGA's two-byte big-endian payload length to
   select exactly two or more consecutive equal-value P2WSH outputs. The
   declared payload must consume that complete run, and every unused byte in
@@ -289,21 +293,21 @@ Taproot commitment.
   be parsed as a secp256k1 x-only public key. That proves the output key is
   unusable, but it does not prove why those bytes were chosen.
 - `no_detected_carriage_shape` is emitted only when every input script is known
-  and none of the five registered heuristics fires.
+  and none of the six registered heuristics fires.
 
-The five positive labels are shapes, not proof of intent, protocol validity, or
+The six positive labels are shapes, not proof of intent, protocol validity, or
 policy rejection. A partial result preserves a positive match while naming
 `input_script_pubkeys` as missing. If a spent-output script is unavailable and
 no positive match is proven, the lens emits no negative label.
 
-Version 3 adds the exact committed P2WSH conditional envelope. Version 2 added
-the exact OLGA output-run grammar and the off-curve P2TR test; version 1
-contained only the two general witness-resident labels. The lens still does
-not claim generic on-curve output-key carriers, hash160 carriers, file
-polyglots, witness-argument drop channels, field steganography, signature
-channels, or commitments. It also does not estimate carried bytes. Those
-require separate definitions rather than inheriting the OP_RETURN byte
-measure.
+Version 4 adds the exact witness-argument/drop correlation. Version 3 added the
+exact committed P2WSH conditional envelope; version 2 added the exact OLGA
+output-run grammar and the off-curve P2TR test; version 1 contained only the
+two general witness-resident labels. The lens still does not claim generic
+on-curve output-key carriers, hash160 carriers, file polyglots, other
+witness-argument ratios or item sizes, field steganography, signature channels,
+or commitments. It also does not estimate carried bytes. Those require
+separate definitions rather than inheriting the OP_RETURN byte measure.
 
 ## `knots_bip110` version 1
 

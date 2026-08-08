@@ -17,6 +17,8 @@ use super::{
 
 const MIN_PUSH_DROP_ELEMENTS: usize = 2;
 const MIN_PUSH_DROP_BYTES: usize = 64;
+const MIN_WITNESS_ARGUMENT_ITEMS: usize = 4;
+const WITNESS_ARGUMENT_BYTES: usize = 255;
 const JXL_ENVELOPE_PUSHES: usize = 6;
 const JXL_ENVELOPE_PUSH_BYTES: usize = 255;
 const OP_PLENTY_MAGIC: [u8; 7] = [0x55; 7];
@@ -28,10 +30,11 @@ const OP_PLENTY_ENCODING_ALPHABET: [u8; 28] = [
 const WITNESS_PROGRAM_BYTES: usize = 32;
 const OLGA_LENGTH_PREFIX_BYTES: usize = 2;
 const OLGA_MIN_OUTPUTS: usize = 2;
-const LABEL_ORDER: [&str; 6] = [
+const LABEL_ORDER: [&str; 7] = [
     "push_drop_witness",
     "opcode_value_coding",
     "p2wsh_envelope",
+    "witness_argument_carrier",
     "output_key_carrier",
     "off_curve_p2tr",
     "no_detected_carriage_shape",
@@ -145,6 +148,22 @@ pub(super) fn data_carriage_shape(
                     "framing": "jxl_n_hide",
                     "pushed_elements": detection.pushed_elements,
                     "pushed_bytes": detection.pushed_bytes,
+                }),
+            );
+        }
+        if let Some(detection) =
+            witness_argument_carriage(&elements[..element_index], &instructions)
+        {
+            analysis.detect(
+                "witness_argument_carrier",
+                json!({
+                    "label": "witness_argument_carrier",
+                    "carrier": carrier,
+                    "input": input_index,
+                    "first_element": 0,
+                    "script_element": element_index,
+                    "witness_items": detection.witness_items,
+                    "payload_bytes": detection.payload_bytes,
                 }),
             );
         }
@@ -391,6 +410,47 @@ fn p2wsh_envelope(instructions: &[DecodedInstruction<'_>]) -> Option<P2wshEnvelo
     })
 }
 
+struct WitnessArgumentDetection {
+    witness_items: usize,
+    payload_bytes: usize,
+}
+
+fn witness_argument_carriage(
+    arguments: &[&[u8]],
+    instructions: &[DecodedInstruction<'_>],
+) -> Option<WitnessArgumentDetection> {
+    if arguments.len() < MIN_WITNESS_ARGUMENT_ITEMS
+        || !arguments
+            .iter()
+            .all(|argument| argument.len() == WITNESS_ARGUMENT_BYTES)
+    {
+        return None;
+    }
+    let (success, drops) = instructions.split_last()?;
+    if !matches!(
+        success,
+        DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_PUSHNUM_1.to_u8()
+    ) {
+        return None;
+    }
+    let mut dropped_items = 0_usize;
+    for instruction in drops {
+        let dropped = match instruction {
+            DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_DROP.to_u8() => 1,
+            DecodedInstruction::Op(opcode) if *opcode == opcodes::all::OP_2DROP.to_u8() => 2,
+            _ => return None,
+        };
+        dropped_items = dropped_items.checked_add(dropped)?;
+    }
+    if dropped_items != arguments.len() {
+        return None;
+    }
+    Some(WitnessArgumentDetection {
+        witness_items: arguments.len(),
+        payload_bytes: arguments.len().checked_mul(WITNESS_ARGUMENT_BYTES)?,
+    })
+}
+
 struct OpPlentyDetection {
     instruction: usize,
     payload_bytes: usize,
@@ -554,9 +614,14 @@ mod tests {
     }
 
     fn tapscript_witness(script: Vec<u8>) -> Witness {
+        tapscript_witness_with_arguments(Vec::new(), script)
+    }
+
+    fn tapscript_witness_with_arguments(mut arguments: Vec<Vec<u8>>, script: Vec<u8>) -> Witness {
         let mut control = vec![0xc0];
         control.extend([3; 32]);
-        Witness::from_slice(&[script, control])
+        arguments.extend([script, control]);
+        Witness::from_slice(&arguments)
     }
 
     fn jxl_p2wsh_envelope(pushes: usize, push_bytes: usize) -> Vec<u8> {
@@ -577,6 +642,21 @@ mod tests {
             opcodes::all::OP_PUSHNUM_1.to_u8(),
         ]);
         script
+    }
+
+    fn witness_argument_drop_script(items: usize) -> Vec<u8> {
+        let mut script = vec![opcodes::all::OP_2DROP.to_u8(); items / 2];
+        if !items.is_multiple_of(2) {
+            script.push(opcodes::all::OP_DROP.to_u8());
+        }
+        script.push(opcodes::all::OP_PUSHNUM_1.to_u8());
+        script
+    }
+
+    fn witness_arguments(items: usize, bytes: usize) -> Vec<Vec<u8>> {
+        (0..items)
+            .map(|value| vec![u8::try_from(value).expect("test byte"); bytes])
+            .collect()
     }
 
     #[test]
@@ -774,6 +854,81 @@ mod tests {
         for (transaction, prevout) in cases {
             let result =
                 data_carriage_shape(&transaction, &PrevoutSet::from_vec(vec![Some(prevout)]));
+            assert_eq!(result.labels, ["no_detected_carriage_shape"]);
+        }
+    }
+
+    #[test]
+    fn recognizes_exact_witness_argument_drop_channels() {
+        let script = witness_argument_drop_script(MIN_WITNESS_ARGUMENT_ITEMS);
+        let arguments = witness_arguments(MIN_WITNESS_ARGUMENT_ITEMS, WITNESS_ARGUMENT_BYTES);
+        let mut p2wsh_elements = arguments.clone();
+        p2wsh_elements.push(script.clone());
+        let cases = [
+            (
+                transaction(Witness::from_slice(&p2wsh_elements)),
+                PrevoutFacts::new(p2wsh(&script), None),
+                "p2wsh",
+                MIN_WITNESS_ARGUMENT_ITEMS,
+            ),
+            (
+                transaction(tapscript_witness_with_arguments(arguments, script)),
+                PrevoutFacts::new(p2tr(), None),
+                "tapscript",
+                MIN_WITNESS_ARGUMENT_ITEMS,
+            ),
+        ];
+
+        for (transaction, prevout, carrier, script_element) in cases {
+            let result =
+                data_carriage_shape(&transaction, &PrevoutSet::from_vec(vec![Some(prevout)]));
+            assert_eq!(result.labels, ["witness_argument_carrier"]);
+            assert_eq!(
+                result.evidence.as_ref().unwrap()["detections"][0],
+                json!({
+                    "label": "witness_argument_carrier",
+                    "carrier": carrier,
+                    "input": 0,
+                    "first_element": 0,
+                    "script_element": script_element,
+                    "witness_items": 4,
+                    "payload_bytes": 1020,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_weak_or_inexact_witness_argument_drop_channels() {
+        let too_few = witness_arguments(MIN_WITNESS_ARGUMENT_ITEMS - 1, WITNESS_ARGUMENT_BYTES);
+        let mut short_item = witness_arguments(MIN_WITNESS_ARGUMENT_ITEMS, WITNESS_ARGUMENT_BYTES);
+        short_item[0].pop();
+        let exact = witness_arguments(MIN_WITNESS_ARGUMENT_ITEMS, WITNESS_ARGUMENT_BYTES);
+        let mut extra_logic = witness_argument_drop_script(MIN_WITNESS_ARGUMENT_ITEMS);
+        extra_logic.insert(0, opcodes::all::OP_NOP.to_u8());
+        let cases = [
+            (
+                too_few,
+                witness_argument_drop_script(MIN_WITNESS_ARGUMENT_ITEMS - 1),
+            ),
+            (
+                short_item,
+                witness_argument_drop_script(MIN_WITNESS_ARGUMENT_ITEMS),
+            ),
+            (
+                exact.clone(),
+                witness_argument_drop_script(MIN_WITNESS_ARGUMENT_ITEMS - 1),
+            ),
+            (exact, extra_logic),
+        ];
+
+        for (arguments, script) in cases {
+            let mut elements = arguments;
+            elements.push(script.clone());
+            let result = data_carriage_shape(
+                &transaction(Witness::from_slice(&elements)),
+                &PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(p2wsh(&script), None))]),
+            );
             assert_eq!(result.labels, ["no_detected_carriage_shape"]);
         }
     }

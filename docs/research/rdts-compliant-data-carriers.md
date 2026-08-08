@@ -101,16 +101,16 @@ naive file-carving recover it directly.
 
 `data_protocols` version 3 recognizes the compliant bare-`ord` push/drop
 envelope as the existing `inscription` and `brc20` protocol fingerprints.
-`data_carriage_shape` version 3 independently recognizes balanced push/drop
+`data_carriage_shape` version 4 independently recognizes balanced push/drop
 witness runs, self-framed OP_PLENTY v2, the exact committed JXL-n-hide P2WSH
-envelope, exact OLGA-style P2WSH output runs, and off-curve P2TR output keys.
+envelope, exact 255-byte witness-argument/drop channels, exact OLGA-style P2WSH
+output runs, and off-curve P2TR output keys.
 
 The remaining concrete gaps are:
 
-1. **Witness-argument drop channels do not have their own exact label.** The
-   implemented P2WSH label is deliberately limited to W3's committed
-   JXL-n-hide grammar. W4's argument-to-drop correlation remains a distinct
-   unimplemented grammar.
+1. **Witness-argument analysis is deliberately narrow.** Atlas recognizes only
+   four or more 255-byte arguments consumed exactly by a drop-only script. It
+   does not infer W4 from weaker push-to-logic ratios or other item sizes.
 
 2. **Output-field analysis is deliberately narrow.** Atlas recognizes the
    self-consistent OLGA length framing and provably off-curve P2TR keys. It does
@@ -614,12 +614,13 @@ resolved for the existing lenses, so no new RPC surface is required. That
 matters: it means this lens costs no extra node round-trips.
 
 Implementation status: A shipped as `data_protocols` version 3. B shipped in
-three stages and is now `data_carriage_shape` version 3. The implemented B
+four stages and is now `data_carriage_shape` version 4. The implemented B
 labels are `push_drop_witness`, `opcode_value_coding`, `p2wsh_envelope`,
-`output_key_carrier`, and `off_curve_p2tr`. The P2WSH envelope recognizes only
-the exact six-push JXL-n-hide grammar, and the output carrier recognizes only
-the self-consistent OLGA P2WSH grammar, not arbitrary O1 or O3 reassembly.
-`embedded_file_magic` remains a candidate.
+`witness_argument_carrier`, `output_key_carrier`, and `off_curve_p2tr`. The
+P2WSH envelope recognizes only the exact six-push JXL-n-hide grammar, the
+witness-argument label requires exact 255-byte item-to-drop correlation, and
+the output carrier recognizes only the self-consistent OLGA P2WSH grammar, not
+arbitrary O1 or O3 reassembly. `embedded_file_magic` remains a candidate.
 
 **C. Extend `structure` with a carried-bytes fact.**
 `op_return_bytes` measures one channel. A sibling `witness_carried_bytes` (or

@@ -267,7 +267,7 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
         },
         ClassifierDescriptor {
             id: DATA_CARRIAGE_SHAPE_CLASSIFIER_ID.to_owned(),
-            version: "3".to_owned(),
+            version: "4".to_owned(),
             title: "Data carriage shapes".to_owned(),
             methodology: ClassifierMethodology::Heuristic,
             semantics: ClassifierSemantics::MultiLabel,
@@ -290,6 +290,11 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
                     "p2wsh_envelope",
                     "P2WSH conditional envelope",
                     "A committed P2WSH witness script has the exact JXL-n-hide never-taken conditional grammar.",
+                ),
+                label(
+                    "witness_argument_carrier",
+                    "Witness-argument carrier",
+                    "Large witness arguments are exactly consumed by a drop-only revealed script.",
                 ),
                 label(
                     "output_key_carrier",
