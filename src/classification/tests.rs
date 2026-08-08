@@ -946,6 +946,55 @@ async fn exhausted_candidate_raw_retry_finishes_unclassified_without_looping() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn non_coinbase_null_prevout_is_rejected_without_panicking() {
+    let transaction = transaction_spending([OutPoint::null(), confirmed_outpoint(9, 0)]);
+    assert!(!transaction.is_coinbase());
+    let txid = transaction.compute_txid();
+    let rpc = RpcFixture::new([transaction.clone()]);
+    let (fixture, address, server) = start_rpc_fixture(rpc).await;
+    let pipeline = test_pipeline(address);
+    pipeline
+        .install_snapshot(test_snapshot(1, &[transaction]))
+        .expect("membership");
+
+    for expected_remaining in [1, 0] {
+        let report = pipeline
+            .classify_next()
+            .await
+            .expect("malformed raw transaction remains bounded");
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.response_failures, 1);
+        assert_eq!(report.newly_classified, 0);
+        assert_eq!(report.remaining, expected_remaining);
+    }
+
+    let drained = pipeline
+        .classify_next()
+        .await
+        .expect("completed generation remains healthy");
+    server.abort();
+
+    assert_eq!(drained.attempted, 0);
+    assert_eq!(drained.remaining, 0);
+    assert_eq!(drained.disposition, ClassificationDisposition::Complete);
+    let fixture = fixture.fixture.lock().await;
+    assert_eq!(
+        fixture
+            .calls
+            .iter()
+            .filter(|(method, params)| {
+                method == "getrawtransaction" && params[0] == txid.to_string()
+            })
+            .count(),
+        2
+    );
+    assert!(
+        fixture.calls.iter().all(|(method, _)| method != "gettxout"),
+        "a rejected raw transaction must not advance into fact collection"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn confirmed_fetch_distinguishes_null_from_omitted_malformed_error_and_missing() {
     let literal_null = confirmed_outpoint(6, 0);
     let omitted_result = confirmed_outpoint(7, 0);

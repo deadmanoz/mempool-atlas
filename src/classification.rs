@@ -997,6 +997,19 @@ impl ClassificationPipeline {
                     {
                         return Err(());
                     }
+                    // A coinbase has exactly one null prevout. Any other raw
+                    // shape containing a null prevout cannot resolve the
+                    // per-input facts required by the classifiers and must
+                    // remain an unavailable assessment rather than reaching
+                    // the terminal-candidate path with a missing fact.
+                    if !transaction.is_coinbase()
+                        && transaction
+                            .input
+                            .iter()
+                            .any(|input| input.previous_output.is_null())
+                    {
+                        return Err(());
+                    }
                     // Reject transactions whose structural facts cannot be
                     // represented exactly, so every admitted candidate can
                     // later derive its structure infallibly.
