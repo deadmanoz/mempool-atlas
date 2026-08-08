@@ -6,14 +6,14 @@
       "availability": "ready",
       "last_poll_started_at_ms": 1785999990000,
       "last_error": null,
-      "publication_id": "ddb42504928b2093fd8d1a87ebe00498f121a0fa3208d3cc59d71b4e2b3e8869"
+      "publication_id": "3b0a2935f13247a5c80f187675ba74f7ce3610284fefbb0dbf692ac8845ddce8"
     },
     {
       "name": "stale_retained_failure",
       "availability": "stale",
       "last_poll_started_at_ms": null,
       "last_error": "Bitcoin node RPC is unavailable",
-      "publication_id": "a5fa43ec4b46b2e0bd7ff56b721a47e12a4f96dbb6c339a64998d14bfde8675c"
+      "publication_id": "a3a3769404038edb7eece322bd9a61da312f210c9abe012c5cc3dd25f3e93916"
     }
   ]
 }

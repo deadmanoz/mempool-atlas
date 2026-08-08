@@ -1227,13 +1227,13 @@ mod tests {
     }
 
     #[test]
-    fn data_carriage_catalog_declares_v2_output_labels() {
+    fn data_carriage_catalog_declares_v3_labels() {
         let descriptor = classifier_catalog()
             .into_iter()
             .find(|descriptor| descriptor.id == DATA_CARRIAGE_SHAPE_CLASSIFIER_ID)
             .expect("data carriage classifier");
 
-        assert_eq!(descriptor.version, "2");
+        assert_eq!(descriptor.version, "3");
         assert_eq!(
             descriptor
                 .labels
@@ -1243,6 +1243,7 @@ mod tests {
             [
                 "push_drop_witness",
                 "opcode_value_coding",
+                "p2wsh_envelope",
                 "output_key_carrier",
                 "off_curve_p2tr",
                 "no_detected_carriage_shape",

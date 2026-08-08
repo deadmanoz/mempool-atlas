@@ -17,6 +17,8 @@ use super::{
 
 const MIN_PUSH_DROP_ELEMENTS: usize = 2;
 const MIN_PUSH_DROP_BYTES: usize = 64;
+const JXL_ENVELOPE_PUSHES: usize = 6;
+const JXL_ENVELOPE_PUSH_BYTES: usize = 255;
 const OP_PLENTY_MAGIC: [u8; 7] = [0x55; 7];
 const OP_PLENTY_LENGTH_NIBBLES: usize = 8;
 const OP_PLENTY_ENCODING_ALPHABET: [u8; 28] = [
@@ -26,9 +28,10 @@ const OP_PLENTY_ENCODING_ALPHABET: [u8; 28] = [
 const WITNESS_PROGRAM_BYTES: usize = 32;
 const OLGA_LENGTH_PREFIX_BYTES: usize = 2;
 const OLGA_MIN_OUTPUTS: usize = 2;
-const LABEL_ORDER: [&str; 5] = [
+const LABEL_ORDER: [&str; 6] = [
     "push_drop_witness",
     "opcode_value_coding",
+    "p2wsh_envelope",
     "output_key_carrier",
     "off_curve_p2tr",
     "no_detected_carriage_shape",
@@ -125,6 +128,23 @@ pub(super) fn data_carriage_shape(
                     "instruction": detection.instruction,
                     "framing": "op_plenty_v2",
                     "payload_bytes": detection.payload_bytes,
+                }),
+            );
+        }
+        if carrier == "p2wsh"
+            && let Some(detection) = p2wsh_envelope(&instructions)
+        {
+            analysis.detect(
+                "p2wsh_envelope",
+                json!({
+                    "label": "p2wsh_envelope",
+                    "carrier": carrier,
+                    "input": input_index,
+                    "element": element_index,
+                    "instruction": 0,
+                    "framing": "jxl_n_hide",
+                    "pushed_elements": detection.pushed_elements,
+                    "pushed_bytes": detection.pushed_bytes,
                 }),
             );
         }
@@ -335,6 +355,42 @@ fn push_drop_carriage(instructions: &[DecodedInstruction<'_>]) -> Option<PushDro
     None
 }
 
+struct P2wshEnvelopeDetection {
+    pushed_elements: usize,
+    pushed_bytes: usize,
+}
+
+fn p2wsh_envelope(instructions: &[DecodedInstruction<'_>]) -> Option<P2wshEnvelopeDetection> {
+    let expected_instructions = JXL_ENVELOPE_PUSHES + 4;
+    if instructions.len() != expected_instructions
+        || !matches!(
+            instructions.first(),
+            Some(DecodedInstruction::Op(opcode)) if *opcode == opcodes::all::OP_PUSHNUM_1.to_u8()
+        )
+        || !matches!(
+            instructions.get(1),
+            Some(DecodedInstruction::Op(opcode)) if *opcode == opcodes::all::OP_NOTIF.to_u8()
+        )
+        || !instructions[2..2 + JXL_ENVELOPE_PUSHES].iter().all(
+            |instruction| matches!(instruction, DecodedInstruction::Push(bytes) if bytes.len() == JXL_ENVELOPE_PUSH_BYTES),
+        )
+        || !matches!(
+            instructions.get(expected_instructions - 2),
+            Some(DecodedInstruction::Op(opcode)) if *opcode == opcodes::all::OP_ENDIF.to_u8()
+        )
+        || !matches!(
+            instructions.last(),
+            Some(DecodedInstruction::Op(opcode)) if *opcode == opcodes::all::OP_PUSHNUM_1.to_u8()
+        )
+    {
+        return None;
+    }
+    Some(P2wshEnvelopeDetection {
+        pushed_elements: JXL_ENVELOPE_PUSHES,
+        pushed_bytes: JXL_ENVELOPE_PUSHES * JXL_ENVELOPE_PUSH_BYTES,
+    })
+}
+
 struct OpPlentyDetection {
     instruction: usize,
     payload_bytes: usize,
@@ -503,6 +559,26 @@ mod tests {
         Witness::from_slice(&[script, control])
     }
 
+    fn jxl_p2wsh_envelope(pushes: usize, push_bytes: usize) -> Vec<u8> {
+        let push_bytes = u8::try_from(push_bytes).expect("PUSHDATA1 test length");
+        let mut script = vec![
+            opcodes::all::OP_PUSHNUM_1.to_u8(),
+            opcodes::all::OP_NOTIF.to_u8(),
+        ];
+        for value in 0..pushes {
+            script.extend([opcodes::all::OP_PUSHDATA1.to_u8(), push_bytes]);
+            script.extend(vec![
+                u8::try_from(value).expect("test byte");
+                usize::from(push_bytes)
+            ]);
+        }
+        script.extend([
+            opcodes::all::OP_ENDIF.to_u8(),
+            opcodes::all::OP_PUSHNUM_1.to_u8(),
+        ]);
+        script
+    }
+
     #[test]
     fn recognizes_large_balanced_push_drop_runs() {
         let mut script = vec![0x4c, 80];
@@ -644,6 +720,62 @@ mod tests {
                 "reason": "invalid_xonly_public_key",
             })
         );
+    }
+
+    #[test]
+    fn recognizes_the_exact_committed_p2wsh_envelope() {
+        let script = jxl_p2wsh_envelope(JXL_ENVELOPE_PUSHES, JXL_ENVELOPE_PUSH_BYTES);
+        let transaction = transaction(Witness::from_slice(std::slice::from_ref(&script)));
+        let result = data_carriage_shape(
+            &transaction,
+            &PrevoutSet::from_vec(vec![Some(PrevoutFacts::new(p2wsh(&script), None))]),
+        );
+
+        assert_eq!(result.labels, ["p2wsh_envelope"]);
+        assert_eq!(
+            result.evidence.as_ref().unwrap()["detections"][0],
+            json!({
+                "label": "p2wsh_envelope",
+                "carrier": "p2wsh",
+                "input": 0,
+                "element": 0,
+                "instruction": 0,
+                "framing": "jxl_n_hide",
+                "pushed_elements": 6,
+                "pushed_bytes": 1530,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_envelope_lookalikes_outside_the_exact_committed_p2wsh_grammar() {
+        let exact = jxl_p2wsh_envelope(JXL_ENVELOPE_PUSHES, JXL_ENVELOPE_PUSH_BYTES);
+        let wrong_count = jxl_p2wsh_envelope(JXL_ENVELOPE_PUSHES - 1, JXL_ENVELOPE_PUSH_BYTES);
+        let short_pushes = jxl_p2wsh_envelope(JXL_ENVELOPE_PUSHES, JXL_ENVELOPE_PUSH_BYTES - 1);
+        let cases = [
+            (
+                transaction(tapscript_witness(exact.clone())),
+                PrevoutFacts::new(p2tr(), None),
+            ),
+            (
+                transaction(Witness::from_slice(std::slice::from_ref(&wrong_count))),
+                PrevoutFacts::new(p2wsh(&wrong_count), None),
+            ),
+            (
+                transaction(Witness::from_slice(std::slice::from_ref(&short_pushes))),
+                PrevoutFacts::new(p2wsh(&short_pushes), None),
+            ),
+            (
+                transaction(Witness::from_slice(&[exact])),
+                PrevoutFacts::new(p2wsh(b"different witness script"), None),
+            ),
+        ];
+
+        for (transaction, prevout) in cases {
+            let result =
+                data_carriage_shape(&transaction, &PrevoutSet::from_vec(vec![Some(prevout)]));
+            assert_eq!(result.labels, ["no_detected_carriage_shape"]);
+        }
     }
 
     #[test]
