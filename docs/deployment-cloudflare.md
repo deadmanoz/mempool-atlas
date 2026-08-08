@@ -303,7 +303,8 @@ launch budgets pass under the intended host and Cloudflare plan.
 
 Run the smoke test only after at least one source has a ready snapshot and the
 Cloudflare rules are active. The host running it must provide `awk`, `cp`,
-`curl`, `grep`, `head`, `jq`, `mktemp`, `openssl`, `rm`, and `xxd` on `PATH`:
+`curl`, `grep`, `head`, `jq`, `mkdir`, `mktemp`, `openssl`, `rm`, and `xxd` on
+`PATH`:
 
 ```bash
 just smoke-public https://atlas.example.com node-a

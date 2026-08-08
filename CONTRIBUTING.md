@@ -8,9 +8,9 @@ be agreed first.
 
 Install Rust 1.88 or newer, Node.js 20.19.x or 22.12 or newer, npm 10 or newer,
 and [`just`](https://github.com/casey/just). The local public-contract smoke run
-by `just test` also requires `awk`, `cp`, `curl`, `grep`, `head`, `jq`, `mktemp`,
-`node`, `openssl`, `rm`, `sleep`, and `xxd` on `PATH`. Then install the locked
-frontend dependencies and run the quality gate:
+by `just test` also requires `awk`, `cp`, `curl`, `grep`, `head`, `jq`, `mkdir`,
+`mktemp`, `node`, `openssl`, `rm`, `sleep`, and `xxd` on `PATH`. Then install the
+locked frontend dependencies and run the quality gate:
 
 ```sh
 npm --prefix web ci
