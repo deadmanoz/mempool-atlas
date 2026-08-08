@@ -330,7 +330,10 @@ every glyph. Changing the layout size, metric, or selection kind replaces that
 raster pair. Selecting a transaction does not replace the active label, rule,
 or bucket emphasis. It repaints the existing composition with one local glow,
 while explicit region and filter controls remain the only interactions that
-restyle the wider terrain. Fee rate by age remains a secondary view.
+restyle the wider terrain. Marginal-label inspectors read count, virtual size,
+and share directly from the compact row index, so selecting a dominant label
+does not sort or materialize its transaction population. Fee rate by age
+remains a secondary view.
 
 The comparison page fetches two independent snapshots and merge-joins their
 sorted `txid` arrays in the browser. It derives present-in-both and two

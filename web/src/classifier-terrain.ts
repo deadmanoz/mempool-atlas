@@ -65,6 +65,11 @@ export interface ClassifierLabelPopulation {
   totalShare: number;
 }
 
+export type ClassifierLabelPopulationSummary = Omit<
+  ClassifierLabelPopulation,
+  "transactions"
+>;
+
 export type ClassifierLabelMatchMode = "any" | "all";
 
 export interface ClassifierLabelQueryPopulation extends ClassifierLabelPopulation {
@@ -635,6 +640,28 @@ const ensureClassifierLabelPopulations = (
     cacheBip110RuleIndex(transactions, builder.bip110Rules);
   }
   return labels;
+};
+
+/**
+ * Return aggregate metadata for one marginal classifier label without sorting
+ * or materializing its transaction population. Publication preparation already
+ * retains the row count and virtual-size total in the compact label index.
+ */
+export const classifierLabelPopulationSummary = (
+  transactions: readonly MempoolTransaction[],
+  descriptor: ClassifierDescriptor,
+  labelKey: string,
+): ClassifierLabelPopulationSummary | null => {
+  const index = ensureClassifierLabelPopulations(transactions, descriptor).get(
+    labelKey,
+  );
+  if (index === undefined) return null;
+  return {
+    count: index.rows.length,
+    vsize: index.vsize,
+    totalShare:
+      transactions.length === 0 ? 0 : index.rows.length / transactions.length,
+  };
 };
 
 /**

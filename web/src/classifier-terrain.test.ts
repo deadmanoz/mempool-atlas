@@ -23,6 +23,7 @@ import {
   classifierBuckets,
   classifierAllMatchCompatibility,
   classifierLabelPopulation,
+  classifierLabelPopulationSummary,
   classifierLabelRowMembership,
   classifierLabelQueryPopulation,
   precomputeClassifierBuckets,
@@ -351,6 +352,18 @@ describe("classifier terrain", () => {
     const firstBuckets = classifierBuckets(transactions, descriptor);
     const secondBuckets = classifierBuckets(transactions, secondDescriptor);
     const groups = classifierTerrainGroups(transactions, descriptor);
+    const rowSort = vi.spyOn(Uint32Array.prototype, "sort");
+    let alphaSummary: ReturnType<typeof classifierLabelPopulationSummary>;
+    try {
+      alphaSummary = classifierLabelPopulationSummary(
+        transactions,
+        descriptor,
+        "alpha",
+      );
+      expect(rowSort).not.toHaveBeenCalled();
+    } finally {
+      rowSort.mockRestore();
+    }
     const alpha = classifierLabelPopulation(transactions, descriptor, "alpha");
     const alphaRows = classifierLabelRowMembership(
       transactions,
@@ -372,6 +385,8 @@ describe("classifier terrain", () => {
       groups.reduce((total, group) => total + group.transactions.length, 0),
     ).toBe(70_000);
     expect(alpha?.count).toBe(35_000);
+    expect(alphaSummary).toMatchObject({ count: 35_000, totalShare: 0.5 });
+    expect(alphaSummary?.vsize).toBe(alpha?.vsize);
     expect(alphaRows).toHaveLength(Math.ceil(70_000 / 8));
     expect(alphaRows?.[0] ?? 0).toBe(0b1010_1010);
     expect(layout.glyphs).toHaveLength(70_000);

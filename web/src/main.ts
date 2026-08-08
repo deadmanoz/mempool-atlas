@@ -45,7 +45,7 @@ import {
   classifierBucketForTransaction,
   classifierBucketIsSummary,
   classifierBucketLabel,
-  classifierLabelPopulation,
+  classifierLabelPopulationSummary,
   classifierLabelRowMembership,
   classifierBucketPopulation,
   classifierTerrainPaint,
@@ -1132,7 +1132,7 @@ const renderInspector = (): void => {
       descriptor === null ||
       selectedClassifierLabel === null
         ? null
-        : classifierLabelPopulation(
+        : classifierLabelPopulationSummary(
             currentSnapshot.transactions,
             descriptor,
             selectedClassifierLabel,
