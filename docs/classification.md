@@ -290,6 +290,10 @@ in separate Canvas sections. A proven label in a partial result remains
 queryable, while unavailable results never match. Selecting a block by pointer
 or keyboard opens only the transaction's membership facts and active-lens
 result. The label set and match mode are canonical URL state.
+In ALL mode, an unselected label is disabled when adding it would produce an
+empty intersection. Selected labels remain enabled so an impossible query
+restored from the URL can always be reduced, and the empty result explains how
+to recover by removing a label or switching to ANY.
 
 For an exact, heuristic, or fingerprint lens, Buckets partitions transactions
 by result coverage and a lens-specific presentation adapter. Complete,

@@ -3,7 +3,11 @@ import {
   classifierDescriptor,
   classifierSummary,
 } from "./classification-view";
-import type { ClassifierLabelMatchMode } from "./classifier-terrain";
+import {
+  classifierAllMatchCompatibility,
+  type ClassifierAllMatchCompatibility,
+  type ClassifierLabelMatchMode,
+} from "./classifier-terrain";
 import { countFormat } from "./format";
 import type { MempoolSnapshot } from "./types";
 
@@ -41,6 +45,12 @@ export const createClassificationOverviewView = (
   elements.matchAny.addEventListener("click", () => onSetMatchMode("any"));
   elements.matchAll.addEventListener("click", () => onSetMatchMode("all"));
   elements.clear.addEventListener("click", onClear);
+
+  let compatibilityTransactions: MempoolSnapshot["transactions"] | null = null;
+  let compatibilityDescriptor:
+    MempoolSnapshot["classifier_catalog"][number] | null = null;
+  let compatibilityLabels = "";
+  let compatibility: ClassifierAllMatchCompatibility | null = null;
 
   return {
     render: (snapshot, selection) => {
@@ -113,6 +123,28 @@ export const createClassificationOverviewView = (
       const matchMode =
         descriptor.semantics === "multi_label" ? selection.matchMode : "any";
       const selectedLabels = new Set(labels);
+      const compatibilityKey = labels.join("\u0000");
+      if (
+        matchMode === "all" &&
+        labels.length > 0 &&
+        (compatibilityTransactions !== snapshot.transactions ||
+          compatibilityDescriptor !== descriptor ||
+          compatibilityLabels !== compatibilityKey)
+      ) {
+        compatibilityTransactions = snapshot.transactions;
+        compatibilityDescriptor = descriptor;
+        compatibilityLabels = compatibilityKey;
+        compatibility = classifierAllMatchCompatibility(
+          snapshot.transactions,
+          descriptor,
+          labels,
+        );
+      }
+      const compatibleLabels = new Set(
+        matchMode === "all" && labels.length > 0
+          ? (compatibility?.compatibleLabelKeys ?? [])
+          : descriptor.labels.map(({ key }) => key),
+      );
       elements.empty.hidden = snapshot.transaction_count !== 0;
       elements.empty.textContent = "This snapshot contains an empty mempool.";
       const methodDetail = document.createElement("span");
@@ -148,14 +180,22 @@ export const createClassificationOverviewView = (
             onToggleLabel(descriptorLabel.key);
           });
         }
-        button.setAttribute(
-          "aria-pressed",
-          String(selectedLabels.has(descriptorLabel.key)),
-        );
+        const selected = selectedLabels.has(descriptorLabel.key);
+        const incompatible =
+          !selected && !compatibleLabels.has(descriptorLabel.key);
+        button.disabled = incompatible;
+        button.dataset.compatibility = incompatible ? "impossible" : "possible";
+        button.setAttribute("aria-pressed", String(selected));
+        const interactionHint = incompatible
+          ? "Unavailable with the current ALL selection because no transaction carries every selected label."
+          : "Toggle this label in the transaction query.";
         button.setAttribute(
           "aria-label",
-          `${descriptorLabel.label}: ${countFormat.format(count)} transactions. Toggle this label in the transaction query.`,
+          `${descriptorLabel.label}: ${countFormat.format(count)} transactions. ${interactionHint}`,
         );
+        button.title = incompatible
+          ? interactionHint
+          : descriptorLabel.description;
         button.style.setProperty("--label-share", `${share * 100}%`);
         const heading = button.querySelector("span");
         const total = button.querySelector("strong");
@@ -181,9 +221,11 @@ export const createClassificationOverviewView = (
       elements.selectedSummary.textContent =
         selectedNames.length === 0
           ? "Choose labels to reveal their transactions."
-          : selectedNames.length === 1
-            ? `${selectedNames[0]} selected.`
-            : `${selectedNames.length} labels selected: ${selectedNames.join(", ")}.`;
+          : matchMode === "all" && compatibility?.matchCount === 0
+            ? `${selectedNames.length} labels selected, but no transaction carries every selected label. Remove a label or switch to ANY.`
+            : selectedNames.length === 1
+              ? `${selectedNames[0]} selected.`
+              : `${selectedNames.length} labels selected: ${selectedNames.join(", ")}.`;
       const canCombine =
         descriptor.semantics === "multi_label" && selectedNames.length >= 2;
       elements.matchAny.disabled = !canCombine;

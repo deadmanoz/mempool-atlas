@@ -73,6 +73,11 @@ export interface ClassifierLabelQueryPopulation extends ClassifierLabelPopulatio
   partialTransactions: MempoolTransaction[];
 }
 
+export interface ClassifierAllMatchCompatibility {
+  compatibleLabelKeys: string[];
+  matchCount: number;
+}
+
 export interface ClassifierTerrainTotals {
   complete: number;
   partial: number;
@@ -659,6 +664,54 @@ const normalizedQueryLabels = (
   return descriptor.labels.flatMap(({ key }) =>
     selected.has(key) ? [key] : [],
   );
+};
+
+/**
+ * Report which labels can extend the current ALL query without making its
+ * intersection empty. Selected labels remain compatible so every query can be
+ * reduced, including an impossible combination restored from the URL.
+ */
+export const classifierAllMatchCompatibility = (
+  transactions: readonly MempoolTransaction[],
+  descriptor: ClassifierDescriptor,
+  labelKeys: readonly string[],
+): ClassifierAllMatchCompatibility => {
+  const normalized = normalizedQueryLabels(descriptor, labelKeys);
+  if (normalized.length === 0) {
+    return {
+      compatibleLabelKeys: descriptor.labels.map(({ key }) => key),
+      matchCount: 0,
+    };
+  }
+
+  const indexes = ensureClassifierLabelPopulations(transactions, descriptor);
+  const membership = new Uint16Array(transactions.length);
+  for (const labelKey of normalized) {
+    const index = indexes.get(labelKey);
+    if (index === undefined) continue;
+    for (const row of index.rows) {
+      membership[row] = (membership[row] ?? 0) + 1;
+    }
+  }
+
+  const compatible = new Set(normalized);
+  let matchCount = 0;
+  for (let row = 0; row < membership.length; row += 1) {
+    if (membership[row] !== normalized.length) continue;
+    const transaction = transactions[row];
+    if (transaction === undefined) continue;
+    const result = classificationResult(transaction, descriptor.id);
+    if (result === null) continue;
+    matchCount += 1;
+    for (const labelKey of result.labels) compatible.add(labelKey);
+  }
+
+  return {
+    compatibleLabelKeys: descriptor.labels.flatMap(({ key }) =>
+      compatible.has(key) ? [key] : [],
+    ),
+    matchCount,
+  };
 };
 
 /**

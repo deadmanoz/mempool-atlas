@@ -24,8 +24,9 @@ or more labels from the active classifier, combine them with ANY or ALL, and
 inspect the full matching population as complete and partial transaction
 blocks. Choosing a block, or reaching it by keyboard, opens that transaction's
 detail without replacing the active query. The selected labels and match mode
-are preserved in the page URL. Independent classifier taxonomies are never
-combined.
+are preserved in the page URL. In ALL mode, Atlas dims labels that cannot occur
+with the current selection while keeping selected labels available for removal.
+Independent classifier taxonomies are never combined.
 
 Partial and unavailable results are reported separately, not counted as
 negatives. The

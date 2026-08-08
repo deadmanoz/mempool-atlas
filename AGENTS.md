@@ -203,7 +203,9 @@ newer and npm 10 or newer.
   and render every matching transaction once in a selectable Canvas. Keep
   complete and partial matches separate, exclude unavailable results, preserve
   the query in canonical URL state, and show only selected-transaction detail
-  in its inspector. Keep Buckets label and rule controls independent.
+  in its inspector. In ALL mode, disable an unselected label when adding it
+  would empty the intersection, while keeping selected labels removable. Keep
+  Buckets label and rule controls independent.
 - Each transaction appears in exactly one terrain region. Lenses keep complete,
   partial, and unavailable results separate. Transaction properties uses broad
   script-profile presentation groups while retaining exact labels on each

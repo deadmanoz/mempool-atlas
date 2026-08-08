@@ -334,7 +334,10 @@ export const createClassificationQueryView = (
       elements.stage.hidden = true;
       elements.hint.hidden = true;
       elements.empty.hidden = false;
-      elements.empty.textContent = `No transactions match ${next.matchMode === "all" ? "all" : "any"} of the selected labels.`;
+      elements.empty.textContent =
+        next.matchMode === "all"
+          ? "No transaction carries every selected label. Remove a label or switch to ANY."
+          : "No transactions carry any of the selected labels.";
       layout = null;
       selectionView.reset();
       elements.regions.replaceChildren();

@@ -970,6 +970,9 @@ test.describe("progressive v2 publications", () => {
     const p2wsh = page.locator(
       '#classification-labels button[data-label="p2wsh"]',
     );
+    const versionOne = page.locator(
+      '#classification-labels button[data-label="version_1"]',
+    );
     const matchAny = page.locator("#classification-match-any");
     const matchAll = page.locator("#classification-match-all");
     const querySummary = page.locator("#classification-query-summary");
@@ -995,6 +998,13 @@ test.describe("progressive v2 publications", () => {
     await expect(querySummary).toContainText(
       "114 transactions match Version 2 and P2WSH.",
     );
+    await expect(versionOne).toBeDisabled();
+    await expect(versionOne).toHaveAttribute(
+      "aria-label",
+      /Unavailable with the current ALL selection/,
+    );
+    await expect(versionTwo).toBeEnabled();
+    await expect(p2wsh).toBeEnabled();
     expect(new URL(page.url()).searchParams.get("match")).toBe("all");
     await expect(queryStage).toBeVisible();
     const sectionCounts = await page

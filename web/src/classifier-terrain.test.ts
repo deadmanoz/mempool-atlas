@@ -20,6 +20,7 @@ import {
   classifierBucketLabel,
   classifierBucketPopulation,
   classifierBuckets,
+  classifierAllMatchCompatibility,
   classifierLabelPopulation,
   classifierLabelQueryPopulation,
   precomputeClassifierBuckets,
@@ -665,6 +666,38 @@ describe("classifier terrain", () => {
       transactions[1]?.txid,
       transactions[3]?.txid,
     ]);
+  });
+
+  it("identifies labels that can extend an ALL query", () => {
+    const transactions = [
+      transaction(1, 100, result("complete", ["alpha"])),
+      transaction(2, 200, result("complete", ["alpha", "gamma"])),
+      transaction(3, 300, result("partial", ["alpha", "gamma"])),
+      transaction(4, 400, result("complete", ["beta"])),
+      transaction(5, 500, null),
+    ];
+
+    expect(
+      classifierAllMatchCompatibility(transactions, descriptor, ["alpha"]),
+    ).toEqual({
+      compatibleLabelKeys: ["alpha", "gamma"],
+      matchCount: 3,
+    });
+    expect(
+      classifierAllMatchCompatibility(transactions, descriptor, [
+        "alpha",
+        "beta",
+      ]),
+    ).toEqual({
+      compatibleLabelKeys: ["alpha", "beta"],
+      matchCount: 0,
+    });
+    expect(
+      classifierAllMatchCompatibility(transactions, descriptor, []),
+    ).toEqual({
+      compatibleLabelKeys: ["alpha", "beta", "gamma"],
+      matchCount: 0,
+    });
   });
 
   it("returns an explicit empty population when no valid labels are selected", () => {

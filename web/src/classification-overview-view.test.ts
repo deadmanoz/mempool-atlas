@@ -3,7 +3,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createClassificationOverviewView } from "./classification-overview-view";
+import { mempoolTransaction } from "./test-fixtures";
 import type { MempoolSnapshot } from "./types";
+
+const transaction = (value: number, labels: string[] | null) =>
+  mempoolTransaction(value, {
+    classifications:
+      labels === null
+        ? []
+        : [
+            {
+              classifier_id: "transaction_shape",
+              state: "complete",
+              primary_label: null,
+              labels,
+              missing_facts: [],
+              evidence: null,
+            },
+          ],
+  });
 
 const snapshot = (): MempoolSnapshot => ({
   source_id: "core",
@@ -27,6 +45,7 @@ const snapshot = (): MempoolSnapshot => ({
       labels: [
         { key: "first", label: "First", description: "First shape." },
         { key: "second", label: "Second", description: "Second shape." },
+        { key: "third", label: "Third", description: "Third shape." },
       ],
     },
   ],
@@ -36,7 +55,7 @@ const snapshot = (): MempoolSnapshot => ({
       complete_count: 2,
       partial_count: 0,
       unclassified_count: 1,
-      label_counts: { first: 1, second: 2 },
+      label_counts: { first: 1, second: 1, third: 1 },
     },
   ],
   bip110_summary: {
@@ -48,7 +67,11 @@ const snapshot = (): MempoolSnapshot => ({
     indeterminate_count: 0,
     unclassified_count: 1,
   },
-  transactions: [],
+  transactions: [
+    transaction(1, ["first", "third"]),
+    transaction(2, ["second"]),
+    transaction(3, null),
+  ],
 });
 
 describe("classification overview view", () => {
@@ -129,11 +152,25 @@ describe("classification overview view", () => {
     expect(method.textContent).toBe("Labels can overlap within this lens.");
     expect(method.textContent).not.toContain("version");
     expect(summary.textContent).toContain("2 complete");
-    expect(selectedSummary.textContent).toContain("2 labels selected");
+    expect(selectedSummary.textContent).toContain(
+      "no transaction carries every selected label",
+    );
+    const first = labels.querySelector<HTMLButtonElement>(
+      'button[data-label="first"]',
+    );
     const second = labels.querySelector<HTMLButtonElement>(
       'button[data-label="second"]',
     );
+    const third = labels.querySelector<HTMLButtonElement>(
+      'button[data-label="third"]',
+    );
+    expect(first?.disabled).toBe(false);
     expect(second?.getAttribute("aria-pressed")).toBe("true");
+    expect(second?.disabled).toBe(false);
+    expect(third?.disabled).toBe(true);
+    expect(third?.getAttribute("aria-label")).toContain(
+      "Unavailable with the current ALL selection",
+    );
     second?.click();
     expect(onToggleLabel).toHaveBeenCalledWith("second");
     expect(matchAny.disabled).toBe(false);
@@ -143,6 +180,14 @@ describe("classification overview view", () => {
     clear.click();
     expect(onSetMatchMode).toHaveBeenCalledWith("any");
     expect(onClear).toHaveBeenCalledOnce();
+
+    view.render(snapshot(), {
+      classifierId: "transaction_shape",
+      labels: ["first"],
+      matchMode: "all",
+    });
+    expect(second?.disabled).toBe(true);
+    expect(third?.disabled).toBe(false);
 
     view.render(snapshot(), selection);
     expect(
