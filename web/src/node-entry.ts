@@ -14,5 +14,10 @@ const hasExplicitNodeState = [
 if (hasExplicitNodeState) {
   void import("./main");
 } else {
-  window.location.replace("/compare/");
+  const comparisonUrl = new URL("/compare/", window.location.origin);
+  comparisonUrl.search = window.location.search;
+  comparisonUrl.hash = window.location.hash;
+  window.location.replace(
+    `${comparisonUrl.pathname}${comparisonUrl.search}${comparisonUrl.hash}`,
+  );
 }

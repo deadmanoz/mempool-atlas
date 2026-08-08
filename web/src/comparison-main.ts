@@ -384,7 +384,10 @@ const chooseInitialSources = (requested: ComparisonViewState | null): void => {
 
 const updateQuery = (): void => {
   const url = new URL(window.location.href);
-  url.search = serializeComparisonViewState(currentViewState());
+  url.search = serializeComparisonViewState(
+    currentViewState(),
+    window.location.search,
+  );
   window.history.replaceState(null, "", url);
 };
 

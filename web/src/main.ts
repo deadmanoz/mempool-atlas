@@ -540,7 +540,7 @@ const updateCompareLink = (): void => {
 };
 
 const replaceViewUrl = (): void => {
-  const query = serializeNodeViewState(nodeViewState);
+  const query = serializeNodeViewState(nodeViewState, window.location.search);
   const next = `${window.location.pathname}${query.length === 0 ? "" : `?${query}`}${window.location.hash}`;
   window.history.replaceState(null, "", next);
   updateCompareLink();

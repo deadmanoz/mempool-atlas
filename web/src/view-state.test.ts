@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ComparisonPolicyFilter } from "./comparison-model";
 import {
+  mergeCampaignQuery,
   parseComparisonPolicyFilter,
   parseComparisonViewState,
   parseNodeViewState,
@@ -11,6 +12,28 @@ import {
 } from "./view-state";
 
 const TXID = "ab".repeat(32);
+
+describe("campaign URL state", () => {
+  it("preserves repeated UTM parameters without retaining unrelated input", () => {
+    expect(
+      mergeCampaignQuery(
+        "source=core",
+        "?utm_source=social&utm_source=nostr&utm_campaign=launch&ignored=value",
+      ),
+    ).toBe(
+      "source=core&utm_source=social&utm_source=nostr&utm_campaign=launch",
+    );
+  });
+
+  it("keeps serialized application state authoritative", () => {
+    expect(
+      mergeCampaignQuery(
+        "left=core&right=knots&region=common",
+        "?left=ignored&utm_medium=profile",
+      ),
+    ).toBe("left=core&right=knots&region=common&utm_medium=profile");
+  });
+});
 
 describe("node URL state", () => {
   it("parses source, classifier, rule, and transaction state", () => {

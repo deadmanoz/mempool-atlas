@@ -37,10 +37,24 @@ const SOURCE_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const CLASSIFIER_LABEL_PATTERN = /^[a-z][a-z0-9_]*$/;
 const MAX_CLASSIFIER_LABELS = 32;
 const TXID_PATTERN = /^[0-9a-f]{64}$/i;
+const CAMPAIGN_PARAMETER_PATTERN = /^utm_[a-z0-9_]+$/i;
 const SIGNATURE_MASK_LIMIT = (1 << RULE_IDS.length) - 1;
 
 const searchParams = (input: SearchInput): URLSearchParams =>
   typeof input === "string" ? new URLSearchParams(input) : input;
+
+export const mergeCampaignQuery = (
+  serializedState: string,
+  initialSearch: SearchInput,
+): string => {
+  const merged = new URLSearchParams(serializedState);
+  for (const [key, value] of searchParams(initialSearch)) {
+    if (CAMPAIGN_PARAMETER_PATTERN.test(key)) {
+      merged.append(key, value);
+    }
+  }
+  return merged.toString();
+};
 
 const singleValue = (params: URLSearchParams, key: string): string | null => {
   const values = params.getAll(key);
@@ -199,7 +213,10 @@ export const parseNodeViewState = (input: SearchInput): NodeViewState => {
   };
 };
 
-export const serializeNodeViewState = (state: NodeViewState): string => {
+export const serializeNodeViewState = (
+  state: NodeViewState,
+  campaignSearch: SearchInput = "",
+): string => {
   const params = new URLSearchParams();
   const source = sourceId(state.source);
   if (source !== null) {
@@ -234,7 +251,7 @@ export const serializeNodeViewState = (state: NodeViewState): string => {
   if (selectedTxid !== null) {
     params.set("txid", selectedTxid);
   }
-  return params.toString();
+  return mergeCampaignQuery(params.toString(), campaignSearch);
 };
 
 export const parseComparisonViewState = (
@@ -260,6 +277,7 @@ export const parseComparisonViewState = (
 
 export const serializeComparisonViewState = (
   state: ComparisonViewState,
+  campaignSearch: SearchInput = "",
 ): string => {
   const params = new URLSearchParams();
   const left = sourceId(state.left);
@@ -284,5 +302,5 @@ export const serializeComparisonViewState = (
   if (selectedTxid !== null) {
     params.set("txid", selectedTxid);
   }
-  return params.toString();
+  return mergeCampaignQuery(params.toString(), campaignSearch);
 };
