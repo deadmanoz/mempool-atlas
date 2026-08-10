@@ -48,6 +48,17 @@ reads. A failed poll leaves the previous successful snapshot visible and marks
 it stale. Failure of one source does not prevent later sources in the same
 round from being attempted.
 
+A block arriving mid-collection is ordinary rather than a node fault, so step 7
+retries the whole sequence within a bounded attempt count and a whole-turn time
+budget. The tip-match requirement itself is never relaxed: only a collection
+that observed one stable tip across both reads is ever published. The budget
+matters because the shared RPC work gate is held for the entire membership
+round. Without it, a source whose collection outlasts the roughly ten-minute
+block interval could never satisfy the tip check and would fail every round
+indefinitely while starving the other sources. Exhausting the budget reports
+the attempt count, which distinguishes a systematically slow source from a
+single unlucky block.
+
 Membership requests go through the shared bounded HTTP policy in
 `src/rpc_transport.rs`: redirects are never followed, so the Basic credential
 can only reach the configured origin; every request carries an explicit

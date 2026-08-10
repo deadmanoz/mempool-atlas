@@ -6,7 +6,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::{Amount, BlockHash, SignedAmount, Txid, Wtxid};
 use serde::de::{DeserializeOwned, IgnoredAny, MapAccess, Visitor};
@@ -25,6 +25,15 @@ const JSON_RPC_VERSION: &str = "2.0";
 /// write, and bounded read. Matches the 30-second budget the service has
 /// always allowed verbose mempool reads.
 const MEMBERSHIP_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounded attempts to observe one mempool against a stable chain tip. A block
+/// arriving mid-collection is ordinary, so one moved tip must not strand a
+/// source on its last good snapshot for the whole round.
+const TIP_STABILITY_ATTEMPTS: u32 = 3;
+/// Whole-turn retry budget for one source. The shared RPC work gate is held for
+/// the entire membership round, so retries stop once a source has spent this
+/// long. A source slower than this cannot outrun the roughly ten-minute block
+/// interval, and retrying it would only widen the stall for every other source.
+const TIP_STABILITY_RETRY_BUDGET: Duration = Duration::from_secs(120);
 /// `getblockchaininfo` and `getmempoolinfo` are small control reads.
 const CONTROL_RESPONSE_LIMIT_BYTES: usize = 256 * 1024;
 /// Worst-case verbose mempool entry budget. Under the default 25-ancestor and
@@ -84,6 +93,14 @@ impl RpcClient {
     /// Fetches one complete mempool snapshot when the chain-tip reads before
     /// and after membership collection match, then binds it to the reported
     /// ending tip.
+    ///
+    /// A block arriving mid-collection is an ordinary event, not a node fault,
+    /// so a moved tip is retried within [`TIP_STABILITY_ATTEMPTS`] and
+    /// [`TIP_STABILITY_RETRY_BUDGET`]. The tip-match requirement itself is
+    /// never relaxed: only a collection that observed one stable tip is ever
+    /// returned. A source whose collection outlasts the block interval
+    /// exhausts the budget and reports how many attempts it spent, rather than
+    /// silently failing every round forever.
     pub async fn get_mempool_snapshot(
         &self,
         source_id: &str,
@@ -94,61 +111,91 @@ impl RpcClient {
         let source_id = source_id.to_owned();
         let source_label = source_label.to_owned();
         tokio::task::spawn_blocking(move || {
-            let collection_started_at_ms = system_now_ms()?;
-            let starting_tip = decode_chain_tip(
-                client
-                    .call::<BlockchainInfoWire>(
-                        "getblockchaininfo",
-                        &[],
-                        CONTROL_RESPONSE_LIMIT_BYTES,
-                    )
-                    .map_err(RpcError::GetBlockchainInfo)?,
-            )?;
-
-            let info = client
-                .call::<MempoolInfoWire>("getmempoolinfo", &[], CONTROL_RESPONSE_LIMIT_BYTES)
-                .map_err(RpcError::GetMempoolInfo)?;
-            validate_reported_mempool_size(info.size, maximum)?;
-
-            let _decode_limit = DecodeEntryLimitGuard::set(maximum);
-            let entries = client
-                .call::<RawMempoolWire>(
-                    "getrawmempool",
-                    &[serde_json::Value::Bool(true)],
-                    raw_mempool_response_limit(maximum),
-                )
-                .map_err(RpcError::GetRawMempool)?
-                .into_entries(maximum)?;
-
-            let ending_chain = client
-                .call::<BlockchainInfoWire>("getblockchaininfo", &[], CONTROL_RESPONSE_LIMIT_BYTES)
-                .map_err(RpcError::GetBlockchainInfo)?;
-            let collection_completed_at_ms = system_now_ms()?;
-            let ending_tip = decode_chain_tip(ending_chain)?;
-            if starting_tip != ending_tip {
-                return Err(RpcError::UnstableChainTip {
-                    starting_height: starting_tip.height,
-                    starting_hash: starting_tip.hash,
-                    ending_height: ending_tip.height,
-                    ending_hash: ending_tip.hash,
-                });
+            let turn_started_at = Instant::now();
+            let mut attempts = 1;
+            loop {
+                let outcome = collect_snapshot_against_stable_tip(
+                    &client,
+                    &source_id,
+                    &source_label,
+                    maximum,
+                    attempts,
+                );
+                let unstable = matches!(outcome, Err(RpcError::UnstableChainTip { .. }));
+                if !unstable
+                    || attempts >= TIP_STABILITY_ATTEMPTS
+                    || turn_started_at.elapsed() >= TIP_STABILITY_RETRY_BUDGET
+                {
+                    return outcome;
+                }
+                attempts += 1;
             }
-            let collection_duration_ms =
-                collection_completed_at_ms.saturating_sub(collection_started_at_ms);
-
-            MempoolSnapshot::new_with_collection_window(
-                source_id,
-                source_label,
-                collection_started_at_ms,
-                collection_completed_at_ms,
-                collection_duration_ms,
-                ending_tip,
-                entries,
-            )
-            .map_err(RpcError::InvalidSnapshot)
         })
         .await?
     }
+}
+
+/// Performs one complete membership collection and accepts it only when the
+/// chain-tip reads taken before and after the collection match.
+///
+/// `attempts` is carried into [`RpcError::UnstableChainTip`] so an exhausted
+/// retry budget is distinguishable in logs from a single unlucky block.
+fn collect_snapshot_against_stable_tip(
+    client: &MembershipRpcClient,
+    source_id: &str,
+    source_label: &str,
+    maximum: u64,
+    attempts: u32,
+) -> Result<MempoolSnapshot, RpcError> {
+    let collection_started_at_ms = system_now_ms()?;
+    let starting_tip = decode_chain_tip(
+        client
+            .call::<BlockchainInfoWire>("getblockchaininfo", &[], CONTROL_RESPONSE_LIMIT_BYTES)
+            .map_err(RpcError::GetBlockchainInfo)?,
+    )?;
+
+    let info = client
+        .call::<MempoolInfoWire>("getmempoolinfo", &[], CONTROL_RESPONSE_LIMIT_BYTES)
+        .map_err(RpcError::GetMempoolInfo)?;
+    validate_reported_mempool_size(info.size, maximum)?;
+
+    let _decode_limit = DecodeEntryLimitGuard::set(maximum);
+    let entries = client
+        .call::<RawMempoolWire>(
+            "getrawmempool",
+            &[serde_json::Value::Bool(true)],
+            raw_mempool_response_limit(maximum),
+        )
+        .map_err(RpcError::GetRawMempool)?
+        .into_entries(maximum)?;
+
+    let ending_chain = client
+        .call::<BlockchainInfoWire>("getblockchaininfo", &[], CONTROL_RESPONSE_LIMIT_BYTES)
+        .map_err(RpcError::GetBlockchainInfo)?;
+    let collection_completed_at_ms = system_now_ms()?;
+    let ending_tip = decode_chain_tip(ending_chain)?;
+    if starting_tip != ending_tip {
+        return Err(RpcError::UnstableChainTip {
+            starting_height: starting_tip.height,
+            starting_hash: starting_tip.hash,
+            ending_height: ending_tip.height,
+            ending_hash: ending_tip.hash,
+            attempts,
+        });
+    }
+    let collection_duration_ms =
+        collection_completed_at_ms.saturating_sub(collection_started_at_ms);
+
+    MempoolSnapshot::new_with_collection_window(
+        source_id.to_owned(),
+        source_label.to_owned(),
+        collection_started_at_ms,
+        collection_completed_at_ms,
+        collection_duration_ms,
+        ending_tip,
+        entries,
+    )
+    .map_err(RpcError::InvalidSnapshot)
 }
 
 /// Bounded single-request JSON-RPC client for membership collection. It
@@ -325,13 +372,14 @@ pub enum RpcError {
     )]
     InvalidBlockHeight(u64),
     #[error(
-        "Bitcoin node chain tip changed during mempool collection from {starting_height}:{starting_hash} to {ending_height}:{ending_hash}"
+        "Bitcoin node chain tip changed during mempool collection from {starting_height}:{starting_hash} to {ending_height}:{ending_hash} across {attempts} attempts"
     )]
     UnstableChainTip {
         starting_height: u64,
         starting_hash: String,
         ending_height: u64,
         ending_hash: String,
+        attempts: u32,
     },
     #[error("system clock is before the Unix epoch")]
     InvalidSystemClock,
@@ -695,6 +743,40 @@ mod tests {
         })
     }
 
+    /// Reports a fresh tip on every read, modelling a source whose collection
+    /// never fits inside one block interval.
+    #[derive(Debug)]
+    struct AlwaysMovingTipFixture {
+        chain_reads: AtomicUsize,
+    }
+
+    async fn always_moving_tip_rpc_fixture(
+        State(fixture): State<Shared<AlwaysMovingTipFixture>>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        let method = request["method"].as_str().expect("RPC method");
+        let result = match method {
+            "getblockchaininfo" => {
+                let read = fixture.chain_reads.fetch_add(1, Ordering::SeqCst);
+                json!({
+                    "blocks": 900_000 + read as u64,
+                    "bestblockhash": TXID_A
+                })
+            }
+            "getmempoolinfo" => json!({ "size": 1 }),
+            "getrawmempool" => {
+                json!({ TXID_A: verbose_entry(TXID_A, 141, 1_721_234_000, 0.00001200) })
+            }
+            other => panic!("unexpected RPC method {other}"),
+        };
+        Json(json!({
+            "jsonrpc": "2.0",
+            "result": result,
+            "error": null,
+            "id": request["id"]
+        }))
+    }
+
     async fn changing_tip_rpc_fixture(
         State(fixture): State<Shared<ChangingTipFixture>>,
         Json(request): Json<Value>,
@@ -791,7 +873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_snapshot_when_chain_tip_changes_during_collection() {
+    async fn retries_and_recovers_when_the_chain_tip_moves_once_during_collection() {
         for (expected_height, expected_hash) in [(900_001, TXID_A), (900_000, TXID_B)] {
             let fixture = Shared::new(ChangingTipFixture {
                 chain_reads: AtomicUsize::new(0),
@@ -810,22 +892,52 @@ mod tests {
                 MAX_SUPPORTED_MEMPOOL_ENTRIES,
             )
             .expect("RPC client");
-            let result = client.get_mempool_snapshot("core", "Bitcoin Core").await;
+            let snapshot = client
+                .get_mempool_snapshot("core", "Bitcoin Core")
+                .await
+                .expect("snapshot recovered on the second attempt");
             server.abort();
 
-            assert!(matches!(
-                result,
-                Err(RpcError::UnstableChainTip {
-                    starting_height: 900_000,
-                    starting_hash,
-                    ending_height,
-                    ending_hash,
-                }) if starting_hash == TXID_A
-                    && ending_height == expected_height
-                    && ending_hash == expected_hash
-            ));
-            assert_eq!(fixture.chain_reads.load(Ordering::SeqCst), 2);
+            // The first attempt spans the new block and is discarded; the
+            // second observes the settled tip on both reads and is published.
+            assert_eq!(snapshot.chain_tip.height, expected_height);
+            assert_eq!(snapshot.chain_tip.hash, expected_hash);
+            assert_eq!(fixture.chain_reads.load(Ordering::SeqCst), 4);
         }
+    }
+
+    #[tokio::test]
+    async fn rejects_snapshot_when_the_chain_tip_never_settles() {
+        let fixture = Shared::new(AlwaysMovingTipFixture {
+            chain_reads: AtomicUsize::new(0),
+        });
+        let application = Router::new()
+            .route("/", post(always_moving_tip_rpc_fixture))
+            .with_state(Shared::clone(&fixture));
+        let (address, server) = crate::spawn_test_server(application).await;
+
+        let client = RpcClient::new(
+            &format!("http://{address}/"),
+            "atlas",
+            "secret",
+            MAX_SUPPORTED_MEMPOOL_ENTRIES,
+        )
+        .expect("RPC client");
+        let result = client.get_mempool_snapshot("core", "Bitcoin Core").await;
+        server.abort();
+
+        // Retries are bounded, so a source that can never observe a stable tip
+        // fails its turn instead of holding the shared work gate indefinitely,
+        // and reports the exhausted attempt count.
+        assert!(matches!(
+            result,
+            Err(RpcError::UnstableChainTip { attempts, .. })
+                if attempts == TIP_STABILITY_ATTEMPTS
+        ));
+        assert_eq!(
+            fixture.chain_reads.load(Ordering::SeqCst),
+            2 * TIP_STABILITY_ATTEMPTS as usize
+        );
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
