@@ -8,7 +8,7 @@
 //! rejected before any decoding happens.
 
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -33,8 +33,9 @@ pub(crate) fn post_json_bounded(
     body: Vec<u8>,
     maximum_response_bytes: usize,
 ) -> Result<(u16, Vec<u8>), RpcTransportError> {
+    let request_started_at = Instant::now();
     let response = minreq::post(url)
-        .with_timeout(timeout.as_secs())
+        .with_timeout(timeout.as_secs().max(1))
         .with_follow_redirects(false)
         .with_max_headers_size(MAX_RESPONSE_HEADER_BYTES)
         .with_max_status_line_length(MAX_RESPONSE_STATUS_LINE_BYTES)
@@ -44,17 +45,27 @@ pub(crate) fn post_json_bounded(
         .with_body(body)
         .send_lazy()
         .map_err(RpcTransportError::Transport)?;
+    if request_started_at.elapsed() >= timeout {
+        return Err(RpcTransportError::DeadlineExceeded);
+    }
     if response.status_code != 200 {
         return Err(RpcTransportError::UnexpectedHttpStatus(
             response.status_code,
         ));
     }
-    read_bounded_response(response, maximum_response_bytes)
+    read_bounded_response(
+        response,
+        maximum_response_bytes,
+        request_started_at,
+        timeout,
+    )
 }
 
 fn read_bounded_response(
     mut response: minreq::ResponseLazy,
     maximum: usize,
+    request_started_at: Instant,
+    timeout: Duration,
 ) -> Result<(u16, Vec<u8>), RpcTransportError> {
     let status_code = response.status_code;
     if response
@@ -78,6 +89,9 @@ fn read_bounded_response(
     let mut body = Vec::with_capacity(announced_length.unwrap_or(0).min(maximum));
     let mut buffer = [0_u8; 8 * 1024];
     loop {
+        if request_started_at.elapsed() >= timeout {
+            return Err(RpcTransportError::DeadlineExceeded);
+        }
         let remaining = maximum.saturating_sub(body.len());
         let read_limit = remaining.saturating_add(1).min(buffer.len());
         let read = response
@@ -85,6 +99,9 @@ fn read_bounded_response(
             .map_err(|source| RpcTransportError::Transport(source.into()))?;
         if read == 0 {
             break;
+        }
+        if request_started_at.elapsed() >= timeout {
+            return Err(RpcTransportError::DeadlineExceeded);
         }
         if read > remaining {
             return Err(RpcTransportError::ResponseTooLarge {
@@ -109,6 +126,8 @@ fn read_bounded_response(
 pub enum RpcTransportError {
     #[error("RPC HTTP transport failed: {0}")]
     Transport(#[source] minreq::Error),
+    #[error("RPC request exceeded its configured deadline")]
+    DeadlineExceeded,
     #[error("RPC endpoint returned unexpected HTTP status {0}")]
     UnexpectedHttpStatus(u16),
     #[error("RPC response used unsupported Transfer-Encoding")]
@@ -117,4 +136,46 @@ pub enum RpcTransportError {
     IncompleteResponseBody { expected: usize, actual: usize },
     #[error("RPC response used {actual} bytes, exceeding the {maximum}-byte limit")]
     ResponseTooLarge { actual: usize, maximum: usize },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::thread;
+
+    use super::*;
+
+    #[test]
+    fn subsecond_deadline_is_not_rounded_up_for_the_socket_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).expect("read request");
+
+            thread::sleep(Duration::from_millis(10));
+            let body = b"{}";
+            if stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                )
+                .is_err()
+            {
+                return;
+            }
+            let _ = stream.write_all(body);
+        });
+
+        let result = post_json_bounded(
+            &format!("http://{address}/"),
+            "Basic YXRsYXM6c2VjcmV0",
+            Duration::from_millis(1),
+            br#"{}"#.to_vec(),
+            4096,
+        );
+        server.join().expect("fixture server");
+
+        assert!(matches!(result, Err(RpcTransportError::DeadlineExceeded)));
+    }
 }

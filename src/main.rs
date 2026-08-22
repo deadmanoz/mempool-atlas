@@ -10,7 +10,7 @@ use clap::Parser;
 use mempool_atlas::model::{validate_source_id, validate_source_label};
 use mempool_atlas::{
     AtlasRuntime, AtlasSource, ClassificationLimits, ClassificationPipeline,
-    MAX_CONFIGURED_SOURCES, RpcClient, SourceRegistry, SourceRuntime, router,
+    MAX_CONFIGURED_SOURCES, MembershipTimeouts, RpcClient, SourceRegistry, SourceRuntime, router,
 };
 use serde::Deserialize;
 use tracing::info;
@@ -31,8 +31,20 @@ struct Cli {
     sources_file: PathBuf,
     #[arg(long, env = "ATLAS_CREDENTIALS_DIRECTORY")]
     credentials_directory: PathBuf,
-    #[arg(long, env = "ATLAS_POLL_SECONDS", default_value = "300")]
+    #[arg(long, env = "ATLAS_POLL_SECONDS", default_value = "900")]
     poll_seconds: NonZeroU64,
+    #[arg(
+        long,
+        env = "ATLAS_MEMBERSHIP_RPC_TIMEOUT_SECONDS",
+        default_value = "120"
+    )]
+    membership_rpc_timeout_seconds: NonZeroU64,
+    #[arg(
+        long,
+        env = "ATLAS_MEMBERSHIP_COLLECTION_BUDGET_SECONDS",
+        default_value = "300"
+    )]
+    membership_collection_budget_seconds: NonZeroU64,
     #[arg(long, env = "ATLAS_MAX_MEMPOOL_ENTRIES", default_value = "200000")]
     max_mempool_entries: NonZeroU64,
     #[arg(
@@ -78,6 +90,11 @@ async fn main() -> anyhow::Result<()> {
     let source_configs = read_sources_file(&cli.sources_file)
         .with_context(|| format!("reading {}", cli.sources_file.display()))?;
     let poll_interval = Duration::from_secs(cli.poll_seconds.get());
+    let membership_timeouts = MembershipTimeouts::new(
+        Duration::from_secs(cli.membership_rpc_timeout_seconds.get()),
+        Duration::from_secs(cli.membership_collection_budget_seconds.get()),
+    )
+    .context("validating membership RPC time budgets")?;
     let total_cache_mib = cli.classification_total_cache_mib.get();
     if total_cache_mib > MAX_TOTAL_CLASSIFICATION_CACHE_MIB {
         bail!(
@@ -111,11 +128,12 @@ async fn main() -> anyhow::Result<()> {
             per_source_cache_bytes,
         )
         .context("validating classification limits")?;
-        let rpc = RpcClient::new(
+        let rpc = RpcClient::with_timeouts(
             &source_config.rpc_url,
             source_config.rpc_username.clone(),
             password.clone(),
             cli.max_mempool_entries.get(),
+            membership_timeouts,
         )
         .context("creating Bitcoin RPC client")?;
         let classification = ClassificationPipeline::new(
@@ -141,6 +159,8 @@ async fn main() -> anyhow::Result<()> {
         bind = %cli.bind,
         source_count = atlas.source_runtimes().len(),
         poll_seconds = cli.poll_seconds.get(),
+        membership_rpc_timeout_seconds = cli.membership_rpc_timeout_seconds.get(),
+        membership_collection_budget_seconds = cli.membership_collection_budget_seconds.get(),
         max_mempool_entries = cli.max_mempool_entries.get(),
         classification_slice_entries = cli.classification_slice_entries.get(),
         classification_rpc_lanes = cli.classification_rpc_lanes.get(),
@@ -282,7 +302,9 @@ mod tests {
         let cli = Cli::try_parse_from(arguments(&[])).expect("CLI");
 
         assert_eq!(cli.bind, "127.0.0.1:3101".parse().expect("address"));
-        assert_eq!(cli.poll_seconds.get(), 300);
+        assert_eq!(cli.poll_seconds.get(), 900);
+        assert_eq!(cli.membership_rpc_timeout_seconds.get(), 120);
+        assert_eq!(cli.membership_collection_budget_seconds.get(), 300);
         assert_eq!(cli.max_mempool_entries.get(), 200_000);
         assert_eq!(cli.classification_slice_entries.get(), 2_048);
         assert_eq!(cli.classification_rpc_lanes.get(), 4);

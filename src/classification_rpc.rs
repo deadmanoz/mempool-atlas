@@ -240,6 +240,7 @@ impl From<RpcTransportError> for ClassificationRpcError {
     fn from(error: RpcTransportError) -> Self {
         match error {
             RpcTransportError::Transport(source) => Self::Transport(source),
+            RpcTransportError::DeadlineExceeded => Self::DeadlineExceeded,
             RpcTransportError::UnexpectedHttpStatus(status) => Self::UnexpectedHttpStatus(status),
             RpcTransportError::UnsupportedTransferEncoding => Self::UnsupportedTransferEncoding,
             RpcTransportError::IncompleteResponseBody { expected, actual } => {
@@ -262,6 +263,8 @@ pub(crate) enum ClassificationRpcError {
     EncodeRequest(#[source] serde_json::Error),
     #[error("classification RPC HTTP transport failed: {0}")]
     Transport(#[source] minreq::Error),
+    #[error("classification RPC request exceeded its configured deadline")]
+    DeadlineExceeded,
     #[error("classification RPC returned unexpected HTTP status {0}")]
     UnexpectedHttpStatus(u16),
     #[error("classification RPC response used unsupported Transfer-Encoding")]

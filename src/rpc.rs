@@ -13,6 +13,7 @@ use serde::de::{DeserializeOwned, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use thiserror::Error;
+use tracing::info;
 
 use crate::model::{
     ChainTip, MAX_SAFE_JSON_INTEGER, MAX_SUPPORTED_MEMPOOL_ENTRIES, MembershipFacts, MempoolEntry,
@@ -21,19 +22,17 @@ use crate::model::{
 use crate::rpc_transport::{self, RpcTransportError};
 
 const JSON_RPC_VERSION: &str = "2.0";
-/// Explicit whole-request budget for one membership RPC, covering connect,
-/// write, and bounded read. Matches the 30-second budget the service has
-/// always allowed verbose mempool reads.
-const MEMBERSHIP_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default whole-request budget for one membership RPC, covering connect,
+/// write, and bounded read.
+pub const DEFAULT_MEMBERSHIP_RPC_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default total budget for all RPCs and stable-tip retries in one source turn.
+pub const DEFAULT_MEMBERSHIP_COLLECTION_BUDGET: Duration = Duration::from_secs(300);
+const MAX_MEMBERSHIP_RPC_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_MEMBERSHIP_COLLECTION_BUDGET: Duration = Duration::from_secs(600);
 /// Bounded attempts to observe one mempool against a stable chain tip. A block
 /// arriving mid-collection is ordinary, so one moved tip must not strand a
 /// source on its last good snapshot for the whole round.
 const TIP_STABILITY_ATTEMPTS: u32 = 3;
-/// Whole-turn retry budget for one source. The shared RPC work gate is held for
-/// the entire membership round, so retries stop once a source has spent this
-/// long. A source slower than this cannot outrun the roughly ten-minute block
-/// interval, and retrying it would only widen the stall for every other source.
-const TIP_STABILITY_RETRY_BUDGET: Duration = Duration::from_secs(120);
 /// `getblockchaininfo` and `getmempoolinfo` are small control reads.
 const CONTROL_RESPONSE_LIMIT_BYTES: usize = 256 * 1024;
 /// Worst-case verbose mempool entry budget. Under the default 25-ancestor and
@@ -62,10 +61,64 @@ fn raw_mempool_response_limit(maximum_entries: u64) -> usize {
         .saturating_add(RAW_MEMPOOL_ENVELOPE_BYTES)
 }
 
+/// Bounds one complete source-local membership collection. The collection
+/// budget includes the two chain-tip reads, `getmempoolinfo`, the verbose
+/// mempool response, and any retry required after a changed tip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MembershipTimeouts {
+    rpc_timeout: Duration,
+    collection_budget: Duration,
+}
+
+impl MembershipTimeouts {
+    pub fn new(rpc_timeout: Duration, collection_budget: Duration) -> Result<Self, RpcError> {
+        if rpc_timeout.is_zero() || rpc_timeout > MAX_MEMBERSHIP_RPC_TIMEOUT {
+            return Err(RpcError::InvalidMembershipRpcTimeout {
+                configured_seconds: rpc_timeout.as_secs(),
+                maximum_seconds: MAX_MEMBERSHIP_RPC_TIMEOUT.as_secs(),
+            });
+        }
+        if collection_budget.is_zero() || collection_budget > MAX_MEMBERSHIP_COLLECTION_BUDGET {
+            return Err(RpcError::InvalidMembershipCollectionBudget {
+                configured_seconds: collection_budget.as_secs(),
+                maximum_seconds: MAX_MEMBERSHIP_COLLECTION_BUDGET.as_secs(),
+            });
+        }
+        if collection_budget < rpc_timeout {
+            return Err(RpcError::MembershipCollectionBudgetTooShort {
+                rpc_timeout_seconds: rpc_timeout.as_secs(),
+                collection_budget_seconds: collection_budget.as_secs(),
+            });
+        }
+        Ok(Self {
+            rpc_timeout,
+            collection_budget,
+        })
+    }
+
+    pub const fn rpc_timeout(self) -> Duration {
+        self.rpc_timeout
+    }
+
+    pub const fn collection_budget(self) -> Duration {
+        self.collection_budget
+    }
+}
+
+impl Default for MembershipTimeouts {
+    fn default() -> Self {
+        Self {
+            rpc_timeout: DEFAULT_MEMBERSHIP_RPC_TIMEOUT,
+            collection_budget: DEFAULT_MEMBERSHIP_COLLECTION_BUDGET,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RpcClient {
     inner: Arc<MembershipRpcClient>,
     max_mempool_entries: u64,
+    timeouts: MembershipTimeouts,
 }
 
 impl RpcClient {
@@ -74,6 +127,22 @@ impl RpcClient {
         username: impl Into<String>,
         password: impl Into<String>,
         max_mempool_entries: u64,
+    ) -> Result<Self, RpcError> {
+        Self::with_timeouts(
+            url,
+            username,
+            password,
+            max_mempool_entries,
+            MembershipTimeouts::default(),
+        )
+    }
+
+    pub fn with_timeouts(
+        url: &str,
+        username: impl Into<String>,
+        password: impl Into<String>,
+        max_mempool_entries: u64,
+        timeouts: MembershipTimeouts,
     ) -> Result<Self, RpcError> {
         validate_configured_limit(max_mempool_entries)?;
         validate_rpc_url(url)?;
@@ -87,6 +156,7 @@ impl RpcClient {
                 next_id: AtomicU64::new(1),
             }),
             max_mempool_entries,
+            timeouts,
         })
     }
 
@@ -95,8 +165,8 @@ impl RpcClient {
     /// ending tip.
     ///
     /// A block arriving mid-collection is an ordinary event, not a node fault,
-    /// so a moved tip is retried within [`TIP_STABILITY_ATTEMPTS`] and
-    /// [`TIP_STABILITY_RETRY_BUDGET`]. The tip-match requirement itself is
+    /// so a moved tip is retried within [`TIP_STABILITY_ATTEMPTS`] and the
+    /// configured collection budget. The tip-match requirement itself is
     /// never relaxed: only a collection that observed one stable tip is ever
     /// returned. A source whose collection outlasts the block interval
     /// exhausts the budget and reports how many attempts it spent, rather than
@@ -108,10 +178,11 @@ impl RpcClient {
     ) -> Result<MempoolSnapshot, RpcError> {
         let client = Arc::clone(&self.inner);
         let maximum = self.max_mempool_entries;
+        let timeouts = self.timeouts;
         let source_id = source_id.to_owned();
         let source_label = source_label.to_owned();
         tokio::task::spawn_blocking(move || {
-            let turn_started_at = Instant::now();
+            let collection_deadline = Instant::now() + timeouts.collection_budget();
             let mut attempts = 1;
             loop {
                 let outcome = collect_snapshot_against_stable_tip(
@@ -120,11 +191,13 @@ impl RpcClient {
                     &source_label,
                     maximum,
                     attempts,
+                    timeouts.rpc_timeout(),
+                    collection_deadline,
                 );
                 let unstable = matches!(outcome, Err(RpcError::UnstableChainTip { .. }));
                 if !unstable
                     || attempts >= TIP_STABILITY_ATTEMPTS
-                    || turn_started_at.elapsed() >= TIP_STABILITY_RETRY_BUDGET
+                    || Instant::now() >= collection_deadline
                 {
                     return outcome;
                 }
@@ -146,31 +219,57 @@ fn collect_snapshot_against_stable_tip(
     source_label: &str,
     maximum: u64,
     attempts: u32,
+    rpc_timeout: Duration,
+    collection_deadline: Instant,
 ) -> Result<MempoolSnapshot, RpcError> {
     let collection_started_at_ms = system_now_ms()?;
     let starting_tip = decode_chain_tip(
         client
-            .call::<BlockchainInfoWire>("getblockchaininfo", &[], CONTROL_RESPONSE_LIMIT_BYTES)
+            .call::<BlockchainInfoWire>(
+                source_id,
+                "getblockchaininfo",
+                &[],
+                CONTROL_RESPONSE_LIMIT_BYTES,
+                rpc_timeout,
+                collection_deadline,
+            )
             .map_err(RpcError::GetBlockchainInfo)?,
     )?;
 
     let info = client
-        .call::<MempoolInfoWire>("getmempoolinfo", &[], CONTROL_RESPONSE_LIMIT_BYTES)
+        .call::<MempoolInfoWire>(
+            source_id,
+            "getmempoolinfo",
+            &[],
+            CONTROL_RESPONSE_LIMIT_BYTES,
+            rpc_timeout,
+            collection_deadline,
+        )
         .map_err(RpcError::GetMempoolInfo)?;
     validate_reported_mempool_size(info.size, maximum)?;
 
     let _decode_limit = DecodeEntryLimitGuard::set(maximum);
     let entries = client
         .call::<RawMempoolWire>(
+            source_id,
             "getrawmempool",
             &[serde_json::Value::Bool(true)],
             raw_mempool_response_limit(maximum),
+            rpc_timeout,
+            collection_deadline,
         )
         .map_err(RpcError::GetRawMempool)?
         .into_entries(maximum)?;
 
     let ending_chain = client
-        .call::<BlockchainInfoWire>("getblockchaininfo", &[], CONTROL_RESPONSE_LIMIT_BYTES)
+        .call::<BlockchainInfoWire>(
+            source_id,
+            "getblockchaininfo",
+            &[],
+            CONTROL_RESPONSE_LIMIT_BYTES,
+            rpc_timeout,
+            collection_deadline,
+        )
         .map_err(RpcError::GetBlockchainInfo)?;
     let collection_completed_at_ms = system_now_ms()?;
     let ending_tip = decode_chain_tip(ending_chain)?;
@@ -211,10 +310,18 @@ struct MembershipRpcClient {
 impl MembershipRpcClient {
     fn call<T: DeserializeOwned>(
         &self,
+        source_id: &str,
         method: &str,
         params: &[serde_json::Value],
         maximum_response_bytes: usize,
+        rpc_timeout: Duration,
+        collection_deadline: Instant,
     ) -> Result<T, MembershipRpcError> {
+        let remaining = collection_deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(MembershipRpcError::CollectionBudgetExceeded)?;
+        let timeout = rpc_timeout.min(remaining);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = serde_json::to_vec(&MembershipWireRequest {
             jsonrpc: JSON_RPC_VERSION,
@@ -223,13 +330,25 @@ impl MembershipRpcClient {
             id,
         })
         .map_err(MembershipRpcError::EncodeRequest)?;
-        let (status_code, body) = rpc_transport::post_json_bounded(
+        let request_started_at = Instant::now();
+        let result = rpc_transport::post_json_bounded(
             &self.url,
             &self.authorization,
-            MEMBERSHIP_RPC_TIMEOUT,
+            timeout,
             body,
             maximum_response_bytes,
-        )?;
+        );
+        let elapsed_ms = request_started_at.elapsed().as_millis();
+        let response_bytes = result.as_ref().map_or(0, |(_, body)| body.len());
+        info!(
+            source_id,
+            method,
+            elapsed_ms,
+            response_bytes,
+            succeeded = result.is_ok(),
+            "completed membership RPC"
+        );
+        let (status_code, body) = result?;
         let response =
             serde_json::from_slice::<MembershipWireResponse>(&body).map_err(|source| {
                 MembershipRpcError::DecodeResponse {
@@ -305,6 +424,8 @@ pub enum MembershipRpcError {
     Rpc { code: i32 },
     #[error("membership RPC response omitted its result")]
     MissingResult,
+    #[error("membership collection exceeded its configured source budget")]
+    CollectionBudgetExceeded,
     #[error("membership RPC result could not be decoded: {0}")]
     DecodeResult(#[source] serde_json::Error),
 }
@@ -333,6 +454,27 @@ pub enum RpcError {
         "membership RPC URL must not embed credentials; configure the username and password file instead"
     )]
     RpcUrlContainsUserinfo,
+    #[error(
+        "membership RPC timeout must be between 1 and {maximum_seconds} seconds, got {configured_seconds}"
+    )]
+    InvalidMembershipRpcTimeout {
+        configured_seconds: u64,
+        maximum_seconds: u64,
+    },
+    #[error(
+        "membership collection budget must be between 1 and {maximum_seconds} seconds, got {configured_seconds}"
+    )]
+    InvalidMembershipCollectionBudget {
+        configured_seconds: u64,
+        maximum_seconds: u64,
+    },
+    #[error(
+        "membership collection budget {collection_budget_seconds} seconds is shorter than the {rpc_timeout_seconds}-second RPC timeout"
+    )]
+    MembershipCollectionBudgetTooShort {
+        rpc_timeout_seconds: u64,
+        collection_budget_seconds: u64,
+    },
     #[error("getmempoolinfo RPC failed or returned an invalid response: {0}")]
     GetMempoolInfo(#[source] MembershipRpcError),
     #[error("getrawmempool RPC failed or returned an invalid response: {0}")]
@@ -404,6 +546,9 @@ impl RpcError {
             Self::InvalidSystemClock | Self::SystemTimeOverflow => "Atlas system clock is invalid",
             Self::InvalidRpcUrl
             | Self::RpcUrlContainsUserinfo
+            | Self::InvalidMembershipRpcTimeout { .. }
+            | Self::InvalidMembershipCollectionBudget { .. }
+            | Self::MembershipCollectionBudgetTooShort { .. }
             | Self::InvalidMempoolSize { .. }
             | Self::InvalidTxid(_)
             | Self::InvalidWtxid(_)
@@ -660,6 +805,31 @@ mod tests {
             .into_entries(MAX_SUPPORTED_MEMPOOL_ENTRIES)
     }
 
+    #[test]
+    fn membership_timeouts_are_bounded_and_coherent() {
+        assert_eq!(
+            MembershipTimeouts::default(),
+            MembershipTimeouts::new(Duration::from_secs(120), Duration::from_secs(300))
+                .expect("production defaults")
+        );
+        assert!(matches!(
+            MembershipTimeouts::new(Duration::ZERO, Duration::from_secs(1)),
+            Err(RpcError::InvalidMembershipRpcTimeout { .. })
+        ));
+        assert!(matches!(
+            MembershipTimeouts::new(Duration::from_secs(301), Duration::from_secs(301)),
+            Err(RpcError::InvalidMembershipRpcTimeout { .. })
+        ));
+        assert!(matches!(
+            MembershipTimeouts::new(Duration::from_secs(1), Duration::from_secs(601)),
+            Err(RpcError::InvalidMembershipCollectionBudget { .. })
+        ));
+        assert!(matches!(
+            MembershipTimeouts::new(Duration::from_secs(120), Duration::from_secs(119)),
+            Err(RpcError::MembershipCollectionBudgetTooShort { .. })
+        ));
+    }
+
     fn verbose_entry(wtxid: &str, vsize: u64, time: i64, base_btc: f64) -> Value {
         json!({
             "wtxid": wtxid,
@@ -741,6 +911,38 @@ mod tests {
         } else {
             responses.pop().expect("single response")
         })
+    }
+
+    async fn delayed_large_rpc_fixture(Json(request): Json<Value>) -> Json<Value> {
+        const ENTRY_COUNT: usize = 1024;
+
+        let method = request["method"].as_str().expect("RPC method");
+        let result = match method {
+            "getmempoolinfo" => json!({ "size": ENTRY_COUNT }),
+            "getrawmempool" => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let mut entries = serde_json::Map::with_capacity(ENTRY_COUNT);
+                for index in 0..ENTRY_COUNT {
+                    let txid = format!("{index:064x}");
+                    entries.insert(
+                        txid.clone(),
+                        verbose_entry(&txid, 141, 1_721_234_000, 0.00001200),
+                    );
+                }
+                Value::Object(entries)
+            }
+            "getblockchaininfo" => json!({
+                "blocks": 900_000,
+                "bestblockhash": TXID_B
+            }),
+            other => panic!("unexpected RPC method {other}"),
+        };
+        Json(json!({
+            "jsonrpc": "2.0",
+            "result": result,
+            "error": null,
+            "id": request["id"]
+        }))
     }
 
     /// Reports a fresh tip on every read, modelling a source whose collection
@@ -870,6 +1072,30 @@ mod tests {
                 .iter()
                 .all(|call| call.authorization.as_deref() == Some("Basic YXRsYXM6c2VjcmV0"))
         );
+    }
+
+    #[tokio::test]
+    async fn accepts_a_delayed_multi_entry_snapshot_with_configured_time_budgets() {
+        let application = Router::new().route("/", post(delayed_large_rpc_fixture));
+        let (address, server) = crate::spawn_test_server(application).await;
+        let timeouts = MembershipTimeouts::new(Duration::from_secs(2), Duration::from_secs(4))
+            .expect("test time budgets");
+        let client = RpcClient::with_timeouts(
+            &format!("http://{address}/"),
+            "atlas",
+            "secret",
+            MAX_SUPPORTED_MEMPOOL_ENTRIES,
+            timeouts,
+        )
+        .expect("RPC client");
+
+        let snapshot = client
+            .get_mempool_snapshot("core", "Bitcoin Core")
+            .await
+            .expect("snapshot within configured budget");
+        server.abort();
+
+        assert_eq!(snapshot.transaction_count, 1024);
     }
 
     #[tokio::test]

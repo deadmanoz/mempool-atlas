@@ -36,7 +36,10 @@ pub use model::{
     Bip110Summary, ChainTip, MempoolEntry, MempoolObservation, MempoolSnapshot, SourceAvailability,
     SourceSummary, SourcesResponse, TransactionDetailResponse,
 };
-pub use rpc::{RpcClient, RpcError};
+pub use rpc::{
+    DEFAULT_MEMBERSHIP_COLLECTION_BUDGET, DEFAULT_MEMBERSHIP_RPC_TIMEOUT, MembershipTimeouts,
+    RpcClient, RpcError,
+};
 pub use runtime::{
     AtlasRuntime, AtlasSource, MAX_CONFIGURED_SOURCES, SourceRegistry, SourceRuntime,
     TransactionLookup,

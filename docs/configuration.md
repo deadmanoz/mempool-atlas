@@ -90,7 +90,9 @@ cp .env.example .env
 | --- | --- | --- | --- |
 | `ATLAS_SOURCES_FILE` | yes | none | JSON source configuration |
 | `ATLAS_CREDENTIALS_DIRECTORY` | yes | none | Directory containing named password files |
-| `ATLAS_POLL_SECONDS` | no | `300` | Complete membership interval |
+| `ATLAS_POLL_SECONDS` | no | `900` | Minimum interval between complete membership rounds |
+| `ATLAS_MEMBERSHIP_RPC_TIMEOUT_SECONDS` | no | `120` | Deadline for each membership RPC, from connect through the bounded response read (1 to 300) |
+| `ATLAS_MEMBERSHIP_COLLECTION_BUDGET_SECONDS` | no | `300` | Total per-source budget for membership RPCs and stable-tip retries (at least the RPC deadline, at most 600) |
 | `ATLAS_MAX_MEMPOOL_ENTRIES` | no | `200000` | Membership entry limit |
 | `ATLAS_CLASSIFICATION_SLICE_ENTRIES` | no | `2048` | Candidate window size, from 1 to 8192 |
 | `ATLAS_CLASSIFICATION_RPC_LANES` | no | `4` | Concurrent classification lanes, from 1 to 8 |
@@ -100,6 +102,20 @@ cp .env.example .env
 
 The same settings are available as command-line options. Run
 `cargo run -- --help` for their names.
+
+### Membership refresh timing
+
+A complete membership observation reads the chain tip, mempool metadata, and a
+verbose `getrawmempool` response before reading the tip again. Large live
+mempools can produce responses tens of megabytes long, so Atlas defaults to a
+15-minute refresh interval, a 120-second deadline per RPC, and a five-minute
+budget per source. The collection budget includes any retry required when the
+tip changes, but never relaxes the matching-tip requirement.
+
+The browser refresh control reads the most recently published in-memory
+observation. It does not start an immediate Bitcoin RPC collection. Source
+metadata always reports the current availability, the last completed
+observation, and the configured poll interval.
 
 ### Optional website analytics
 

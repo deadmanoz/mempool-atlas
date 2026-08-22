@@ -161,6 +161,12 @@ Edit `config/sources.json` to match the RPC URL, username, label, and credential
 filename for your node. Remove the second example source unless you also create
 its credential file. Atlas listens on <http://127.0.0.1:3101> by default.
 
+Atlas performs complete source-local membership collections every 15 minutes by
+default. Each collection has a five-minute source budget and a 120-second
+deadline per membership RPC so large verbose mempool responses remain bounded.
+The browser refresh control shows the latest completed observation; it does not
+trigger a new node poll.
+
 The example configures two mainnet nodes, and that is deliberate: every source
 you configure must observe the same Bitcoin network. Comparing a mainnet
 mempool against a testnet or signet one is meaningless, because the two
