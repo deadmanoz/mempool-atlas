@@ -1,26 +1,35 @@
 import {
   fetchSources,
-  fetchSourceSnapshot,
+  fetchSourcePublication,
   fetchTransactionDetail,
   transactionDetailMatchesSnapshot,
 } from "./api";
 import { installAnalytics } from "./analytics";
+import { recordAtlasCandidateCommitted } from "./candidate-ready";
 import {
   classificationPresentation,
   unclassifiedLabel,
 } from "./classification-progress";
+import { KNOTS_BIP110_CLASSIFIER_ID } from "./classifier-terrain";
+import { classifierDetectionPresentations } from "./classifier-evidence";
 import {
   ComparisonLifecycle,
   RequestLifecycle,
+  isAbortError,
   type ComparisonRequestTicket,
 } from "./comparison-lifecycle";
 import { createComparisonDistributionsView } from "./comparison-distributions-view";
 import {
-  hitTestComparison,
-  renderComparisonCanvas,
-  type ComparisonGeometry,
-  type ComparisonLayout,
-} from "./comparison-layout";
+  ComparisonCanvasView,
+  renderLatestComparisonCanvas,
+} from "./comparison-canvas-view";
+import { comparisonCanvasRenderFailureHandler } from "./comparison-canvas-failure";
+import {
+  compactComparisonEvidence,
+  comparisonAssessmentText,
+} from "./comparison-detail-format";
+import { ComparisonDetailScheduler } from "./comparison-detail-scheduler";
+import { hitTestComparison } from "./comparison-layout";
 import {
   cursorMoveForKey,
   moveComparisonCursor,
@@ -32,20 +41,31 @@ import {
   type ResolvedComparisonViewTransition,
 } from "./comparison-view-transition";
 import {
-  buildComparisonPolicyView,
   comparisonPolicyMatrixTarget,
   comparisonPolicyMatrixRowPresentation,
   type ComparisonPolicyMatrixRow,
   type ComparisonPolicyMatrixSelection,
   type ComparisonPolicyMatrixStatus,
-  type ComparisonPolicyPopulation,
   type ComparisonPolicyView,
 } from "./comparison-policy-view";
 import {
-  compareCurrentSnapshots,
+  commitPreparedComparisonDistributions,
+  prepareComparisonCommitCandidate,
+} from "./comparison-publication-candidate";
+import { renderPrimaryComparisonPublication } from "./comparison-primary-publication";
+import { createComparisonSamplingView } from "./comparison-sampling-view";
+import { createComparisonConflictView } from "./comparison-conflict-view";
+import {
+  createSourceDifferenceDetail,
+  renderSourceDifferenceSummary,
+  resetSourceDifferenceSummary,
+  sourceDifferenceNavigatorDescription,
+  type SourceDifferenceSummaryElements,
+} from "./comparison-source-differences";
+import {
   comparisonRegionEntries,
+  lookupComparisonTransaction,
   policySideForRegion,
-  requireLoadedSnapshot,
   sourceEntry,
   type ComparedTransaction,
   type ComparisonPolicyFilter,
@@ -54,20 +74,27 @@ import {
   type CurrentComparison,
   type LoadedSourceSnapshot,
 } from "./comparison-model";
-import { formatMembershipAge } from "./membership-table";
+import { snapshotIsComplete } from "./packed-store";
+import { markAtlasReadiness, markAtlasReadinessAfterPaint } from "./readiness";
 import {
   countFormat,
-  decimalFormat,
+  compactTxid,
+  formatTime,
+  formatTxidCount,
   formatVsize,
   percentageFormat,
 } from "./format";
-import { transactionFactSummary } from "./transaction-facts";
+import { createSourceCardView, setAtlasLoadPhase } from "./source-summary-view";
+import { transactionFactPairs } from "./transaction-facts";
+import {
+  createMempoolSpaceTransactionLink,
+  createTransactionDetailValue,
+} from "./transaction-explorer";
 import {
   TERRAIN_RULES,
   signatureLabel,
   terrainRule,
   unknownRulesLabel,
-  violationSignature,
 } from "./terrain";
 import {
   parseComparisonViewState,
@@ -75,11 +102,11 @@ import {
   type ComparisonViewState,
 } from "./view-state";
 import "./styles.css";
+import "./distribution-styles.css";
 import "./comparison-styles.css";
 import type {
-  Bip110Assessment,
   ClassificationState,
-  MempoolTransaction,
+  LoadedSourcePublication,
   RuleAssessment,
   SourceSummary,
   TransactionDetailResponse,
@@ -105,6 +132,8 @@ const rightSelect = requiredElement<HTMLSelectElement>("right-source");
 const swapButton = requiredElement<HTMLButtonElement>("swap-sources");
 const leftSourceCard = requiredElement<HTMLElement>("left-source-card");
 const rightSourceCard = requiredElement<HTMLElement>("right-source-card");
+const leftSourceCardView = createSourceCardView(leftSourceCard, "Source A");
+const rightSourceCardView = createSourceCardView(rightSourceCard, "Source B");
 const transactionSearch = requiredElement<HTMLFormElement>(
   "comparison-transaction-search",
 );
@@ -114,19 +143,48 @@ const transactionSearchInput = requiredElement<HTMLInputElement>(
 const transactionSearchStatus = requiredElement<HTMLElement>(
   "comparison-transaction-search-status",
 );
-const samplingPanel = requiredElement<HTMLElement>("sampling-panel");
-const samplingSummary = requiredElement<HTMLElement>("sampling-summary");
-const chainSummary = requiredElement<HTMLElement>("chain-summary");
-const samplingTimeline = requiredElement<HTMLElement>("sampling-timeline");
-const samplingNote = requiredElement<HTMLElement>("sampling-note");
+const samplingView = createComparisonSamplingView({
+  panel: requiredElement<HTMLElement>("sampling-panel"),
+  summary: requiredElement<HTMLElement>("sampling-summary"),
+  chainSummary: requiredElement<HTMLElement>("chain-summary"),
+  note: requiredElement<HTMLElement>("sampling-note"),
+});
+const conflictView = createComparisonConflictView(
+  {
+    panel: requiredElement<HTMLElement>("conflict-analysis"),
+    action: requiredElement<HTMLButtonElement>("conflict-analysis-action"),
+    status: requiredElement<HTMLElement>("conflict-analysis-status"),
+    coverage: requiredElement<HTMLElement>("conflict-analysis-coverage"),
+    list: requiredElement<HTMLElement>("conflict-analysis-list"),
+  },
+  (side, txid) => {
+    transitionComparisonView({
+      ...currentViewState(),
+      side,
+      txid,
+    });
+  },
+);
 const policyMatrix = requiredElement<HTMLElement>("comparison-policy-matrix");
 const policyMatrixBody = requiredElement<HTMLTableSectionElement>(
   "comparison-policy-matrix-body",
 );
 const regionControls = requiredElement<HTMLElement>("comparison-regions");
+const sourceDifferenceSummary: SourceDifferenceSummaryElements = {
+  panel: requiredElement<HTMLElement>("comparison-source-differences"),
+  any: requiredElement<HTMLElement>("source-difference-any"),
+  witness: requiredElement<HTMLElement>("source-difference-witness"),
+  ancestor: requiredElement<HTMLElement>("source-difference-ancestor"),
+  replaceability: requiredElement<HTMLElement>(
+    "source-difference-replaceability",
+  ),
+};
 const comparisonStage = requiredElement<HTMLElement>("comparison-stage");
 const comparisonCanvas =
   requiredElement<HTMLCanvasElement>("comparison-canvas");
+const comparisonSelection = requiredElement<HTMLElement>(
+  "comparison-selection",
+);
 const comparisonEmpty = requiredElement<HTMLElement>("comparison-empty");
 const visualSummary = requiredElement<HTMLElement>("comparison-visual-summary");
 const unionCount = requiredElement<HTMLElement>("union-count");
@@ -163,15 +221,12 @@ const policyBuckets = requiredElement<HTMLElement>("policy-buckets");
 const policyBucketSummary = requiredElement<HTMLElement>(
   "policy-bucket-summary",
 );
-const sampleSummary = requiredElement<HTMLElement>("comparison-sample-summary");
-const sampleTransactions = requiredElement<HTMLTableSectionElement>(
-  "comparison-transactions",
-);
 const detailStatus = requiredElement<HTMLElement>("comparison-detail-status");
 const detailContainer = requiredElement<HTMLElement>("comparison-detail");
 const comparisonDistributions = createComparisonDistributionsView(
   requiredElement<HTMLElement>("comparison-distributions"),
 );
+const nodeLink = requiredElement<HTMLAnchorElement>("node-link");
 
 const lifecycle = new ComparisonLifecycle();
 const discoveryLifecycle = new RequestLifecycle();
@@ -186,9 +241,6 @@ let comparisonPolicyView: ComparisonPolicyView | null = null;
 let selectedRegion: ComparisonRegionKey = "common";
 let preferredPolicySide: ComparisonSide = "left";
 let policyFilter: ComparisonPolicyFilter = { kind: "all" };
-let comparisonLayout: ComparisonLayout | null = null;
-let comparisonGeometry: ComparisonGeometry | null = null;
-let pendingCanvasFrame: number | null = null;
 let detailSequence = 0;
 let detailController: AbortController | null = null;
 let selectedTransactionId: string | null = null;
@@ -197,44 +249,49 @@ let activeLoads = 0;
 
 const TXID_PATTERN = /^[0-9a-f]{64}$/i;
 
-const formatDuration = (milliseconds: number): string => {
-  if (milliseconds < 1_000) {
-    return `${countFormat.format(milliseconds)} ms`;
-  }
-  if (milliseconds < 60_000) {
-    return `${decimalFormat.format(milliseconds / 1_000)} s`;
-  }
-  return formatMembershipAge(milliseconds);
-};
-
-const formatFreshness = (observedAtMs: number): string => {
-  const age = Math.max(0, Date.now() - observedAtMs);
-  return age < 60_000 ? "just now" : `${formatMembershipAge(age)} ago`;
-};
-
-const formatTime = (milliseconds: number): string =>
-  new Date(milliseconds).toLocaleTimeString();
-
-const compactTxid = (txid: string): string =>
-  `${txid.slice(0, 10)}…${txid.slice(-8)}`;
-
-const formatTxidCount = (count: number): string =>
-  `${countFormat.format(count)} transaction ${count === 1 ? "ID" : "IDs"}`;
-
-const isAbortError = (error: unknown): boolean =>
-  typeof error === "object" &&
-  error !== null &&
-  "name" in error &&
-  error.name === "AbortError";
-
 const setStatus = (
-  state: "waiting" | "ready" | "stale" | "error",
+  state: "waiting" | "ready" | "different" | "stale" | "error",
   title: string,
   detail: string,
 ): void => {
+  pageStatus.hidden = false;
   pageStatus.dataset.state = state;
   statusTitle.textContent = title;
   statusDetail.textContent = detail;
+};
+
+const sourceLabel = (sourceId: string): string =>
+  configuredSources.find(({ source_id: id }) => id === sourceId)
+    ?.source_label ?? sourceId;
+
+const selectedPairTitle = (): string =>
+  `${sourceLabel(leftSourceId)} ↔ ${sourceLabel(rightSourceId)}`;
+
+const hasDifferentChainTips = (current: CurrentComparison): boolean =>
+  current.left.snapshot.chain_tip.hash !==
+  current.right.snapshot.chain_tip.hash;
+
+const showHealthyStatus = (current: CurrentComparison): void => {
+  const leftLabel = current.left.snapshot.source_label;
+  const rightLabel = current.right.snapshot.source_label;
+  const leftTip = current.left.snapshot.chain_tip;
+  const rightTip = current.right.snapshot.chain_tip;
+  if (hasDifferentChainTips(current)) {
+    const sameHeight = leftTip.height === rightTip.height;
+    setStatus(
+      "different",
+      sameHeight
+        ? `Different chain tips at height ${countFormat.format(leftTip.height)}`
+        : `Different chain tips at heights ${countFormat.format(leftTip.height)} and ${countFormat.format(rightTip.height)}`,
+      `${leftLabel} and ${rightLabel} reported different blocks. ${countFormat.format(current.totals.common_count)} shared · ${countFormat.format(current.totals.left_only_count)} only on ${leftLabel} · ${countFormat.format(current.totals.right_only_count)} only on ${rightLabel}; ${sameHeight ? "this is a chain divergence" : "this may reflect lag or chain divergence"}.`,
+    );
+    return;
+  }
+  setStatus(
+    "ready",
+    `${leftLabel} ↔ ${rightLabel}`,
+    `${countFormat.format(current.totals.common_count)} shared · ${countFormat.format(current.totals.left_only_count)} only on ${leftLabel} · ${countFormat.format(current.totals.right_only_count)} only on ${rightLabel} · same chain tip ${countFormat.format(leftTip.height)}.`,
+  );
 };
 
 const setTransactionSearchStatus = (
@@ -250,6 +307,7 @@ const setTransactionSearchStatus = (
 };
 
 const clearDetailPanel = (message: string): void => {
+  selectedTransactionDetailScheduler.cancel();
   detailController?.abort();
   detailController = null;
   detailSequence += 1;
@@ -311,6 +369,10 @@ const populateSourceSelectors = (): void => {
   populateSourceSelect(leftSelect, leftSourceId, rightSourceId);
   populateSourceSelect(rightSelect, rightSourceId, leftSourceId);
   swapButton.disabled = leftSourceId.length === 0 || rightSourceId.length === 0;
+  nodeLink.href =
+    leftSourceId.length === 0
+      ? "../?source="
+      : `../?${new URLSearchParams({ source: leftSourceId }).toString()}`;
 };
 
 const activePolicySide = (): ComparisonSide =>
@@ -357,27 +419,27 @@ const chooseInitialSources = (requested: ComparisonViewState | null): void => {
     return;
   }
 
-  leftSourceId = available[0]?.source_id ?? "";
+  const sourceMatches = (source: SourceSummary, client: "core" | "knots") =>
+    source.source_id.toLowerCase().includes(client) ||
+    source.source_label.toLowerCase().includes(client);
+  const core = available.find((source) => sourceMatches(source, "core"));
+  const knots = available.find((source) => sourceMatches(source, "knots"));
+
+  leftSourceId = core?.source_id ?? available[0]?.source_id ?? "";
   rightSourceId =
+    (knots?.source_id !== leftSourceId ? knots?.source_id : undefined) ??
     available.find(({ source_id: sourceId }) => sourceId !== leftSourceId)
-      ?.source_id ?? "";
+      ?.source_id ??
+    "";
 };
 
 const updateQuery = (): void => {
   const url = new URL(window.location.href);
-  url.search = serializeComparisonViewState(currentViewState());
+  url.search = serializeComparisonViewState(
+    currentViewState(),
+    window.location.search,
+  );
   window.history.replaceState(null, "", url);
-};
-
-const sourceFact = (label: string, value: string): HTMLElement => {
-  const wrapper = document.createElement("div");
-  const term = document.createElement("dt");
-  term.textContent = label;
-  const detail = document.createElement("dd");
-  detail.textContent = value;
-  detail.title = value;
-  wrapper.append(term, detail);
-  return wrapper;
 };
 
 const sourceClassificationPresentation = (
@@ -407,175 +469,14 @@ const sourceUnclassifiedLabel = (loaded: LoadedSourceSnapshot): string => {
   return unclassifiedLabel(progress);
 };
 
-const renderSourceCard = (
-  card: HTMLElement,
-  sideLabel: string,
-  loaded: LoadedSourceSnapshot,
-): void => {
-  const { source, snapshot } = loaded;
-  const classification = sourceClassificationPresentation(loaded);
-  card.dataset.state = source.availability;
-  const eyebrow = document.createElement("p");
-  eyebrow.textContent = sideLabel;
-  const heading = document.createElement("h3");
-  heading.textContent = source.source_label;
-  const identifier = document.createElement("code");
-  identifier.textContent = source.source_id;
-  const nodeLink = document.createElement("a");
-  nodeLink.className = "source-card-link";
-  nodeLink.href = `../?source=${encodeURIComponent(source.source_id)}`;
-  nodeLink.textContent = "Explore this node";
-  const facts = document.createElement("dl");
-  facts.append(
-    sourceFact(
-      "Observed",
-      `${formatFreshness(snapshot.observed_at_ms)} · ${formatTime(snapshot.observed_at_ms)}`,
-    ),
-    sourceFact(
-      "Collection",
-      `${formatTime(snapshot.collection_started_at_ms)}–${formatTime(snapshot.collection_completed_at_ms)} · ${formatDuration(snapshot.collection_duration_ms)}`,
-    ),
-    sourceFact(
-      "Chain tip",
-      `${countFormat.format(snapshot.chain_tip.height)} · ${snapshot.chain_tip.hash.slice(0, 10)}…`,
-    ),
-    sourceFact(
-      "Membership",
-      `${countFormat.format(snapshot.transaction_count)} tx · ${formatVsize(snapshot.total_vsize)}`,
-    ),
-    sourceFact(
-      "Policy",
-      `${classification.compact} · ${snapshot.bip110_summary.evaluator_id} ${snapshot.bip110_summary.evaluator_version} · revision ${countFormat.format(snapshot.classification_revision)}`,
-    ),
-  );
-  const classificationNote = document.createElement("p");
-  classificationNote.className = "source-card-classification";
-  classificationNote.dataset.state = classification.state;
-  classificationNote.textContent = classification.summary;
-  card.replaceChildren(
-    eyebrow,
-    heading,
-    identifier,
-    nodeLink,
-    facts,
-    classificationNote,
-  );
-  if (source.availability === "stale") {
-    const warning = document.createElement("p");
-    warning.className = "source-card-warning";
-    warning.textContent = `Last complete snapshot retained. Latest poll: ${source.last_error ?? "unavailable"}`;
-    card.append(warning);
-  }
-};
-
-const resetSourceCard = (
-  card: HTMLElement,
-  sideLabel: string,
-  sourceId: string,
-  message: string,
-): void => {
-  const source = configuredSources.find(
-    ({ source_id: configuredId }) => configuredId === sourceId,
-  );
-  card.dataset.state = "waiting";
-  const eyebrow = document.createElement("p");
-  eyebrow.textContent = sideLabel;
-  const heading = document.createElement("h3");
-  heading.textContent = source?.source_label ?? "No source selected";
-  const identifier = document.createElement("code");
-  identifier.textContent = sourceId;
-  const note = document.createElement("p");
-  note.className = "source-card-placeholder";
-  note.textContent = message;
-  card.replaceChildren(
-    eyebrow,
-    heading,
-    ...(sourceId.length === 0 ? [] : [identifier]),
-    note,
-  );
-};
-
-const timelineRow = (
-  label: string,
-  side: ComparisonSide,
-  source: LoadedSourceSnapshot,
-  minimum: number,
-  span: number,
-): HTMLElement => {
-  const row = document.createElement("div");
-  row.className = "sampling-row";
-  const name = document.createElement("span");
-  name.textContent = label;
-  const track = document.createElement("div");
-  track.className = "sampling-track";
-  const bar = document.createElement("i");
-  bar.dataset.side = side;
-  const start = source.snapshot.collection_started_at_ms;
-  const duration = Math.max(1, source.snapshot.collection_duration_ms);
-  bar.style.left = `${((start - minimum) / span) * 100}%`;
-  bar.style.width = `${Math.max(1.2, (duration / span) * 100)}%`;
-  bar.title = `${formatTime(start)}–${formatTime(source.snapshot.collection_completed_at_ms)}`;
-  track.append(bar);
-  const time = document.createElement("time");
-  time.dateTime = new Date(
-    source.snapshot.collection_completed_at_ms,
-  ).toISOString();
-  time.textContent = formatTime(source.snapshot.collection_completed_at_ms);
-  row.append(name, track, time);
-  return row;
-};
-
-const renderSampling = (current: CurrentComparison): void => {
-  samplingPanel.hidden = false;
-  const { left, right } = current;
-  const earlierLabel =
-    current.earlier_side === null
-      ? "completed together"
-      : `${current[current.earlier_side].snapshot.source_label} completed earlier`;
-  samplingSummary.textContent = `${formatDuration(current.observed_skew_ms)} observation skew · ${earlierLabel}`;
-  const sameTip =
-    left.snapshot.chain_tip.hash === right.snapshot.chain_tip.hash;
-  chainSummary.dataset.state = sameTip ? "same" : "different";
-  chainSummary.textContent = sameTip
-    ? `Same chain tip · ${countFormat.format(left.snapshot.chain_tip.height)}`
-    : `Different chain tips · ${countFormat.format(left.snapshot.chain_tip.height)} / ${countFormat.format(right.snapshot.chain_tip.height)}`;
-
-  const minimum = Math.min(
-    left.snapshot.collection_started_at_ms,
-    right.snapshot.collection_started_at_ms,
-  );
-  const maximum = Math.max(
-    left.snapshot.collection_completed_at_ms,
-    right.snapshot.collection_completed_at_ms,
-  );
-  const span = Math.max(1, maximum - minimum);
-  samplingTimeline.replaceChildren(
-    timelineRow("A", "left", left, minimum, span),
-    timelineRow("B", "right", right, minimum, span),
-  );
-
-  const overlap =
-    Math.min(
-      left.snapshot.collection_completed_at_ms,
-      right.snapshot.collection_completed_at_ms,
-    ) -
-    Math.max(
-      left.snapshot.collection_started_at_ms,
-      right.snapshot.collection_started_at_ms,
-    );
-  if (overlap >= 0) {
-    samplingNote.textContent = `The collection windows overlapped by ${formatDuration(overlap)}. Membership still comes from independent node observations.`;
-  } else {
-    samplingNote.textContent = `The collection windows were separated by ${formatDuration(Math.abs(overlap))}. Membership changes during that interval can contribute to regions observed in only one snapshot.`;
-  }
-};
-
 const regionLabel = (
   current: CurrentComparison,
   key: ComparisonRegionKey,
 ): string => {
   if (key === "common") {
-    return "Present in both sampled snapshots";
+    return hasDifferentChainTips(current)
+      ? "Observed on both reported chain tips"
+      : "Present in both sampled snapshots";
   }
   const source = key === "left_only" ? current.left : current.right;
   return `Observed only in ${source.snapshot.source_label} snapshot`;
@@ -586,7 +487,9 @@ const regionDescriptionText = (
   key: ComparisonRegionKey,
 ): string => {
   if (key === "common") {
-    return "Transaction IDs observed in both independently sampled mempools. Each source keeps its own witness variant and policy assessment.";
+    return hasDifferentChainTips(current)
+      ? "Transaction IDs observed in both independently sampled mempools while the sources reported different chain tips. Cross-tip presence is an observation, not a prediction that a transaction will confirm on either chain."
+      : "Transaction IDs observed in both independently sampled mempools. Each source keeps its own witness variant; Atlas applies the same BIP-110 evaluator to both source-local fact sets.";
   }
   const owner = key === "left_only" ? current.left : current.right;
   const other = key === "left_only" ? current.right : current.left;
@@ -656,11 +559,11 @@ const resetRegionControls = (): void => {
       `${labels[key]}: 0 transaction IDs, ${details[key]}`,
     );
   }
+  resetSourceDifferenceSummary(sourceDifferenceSummary);
 };
 
 const invalidateComparisonGeometry = (): void => {
-  comparisonGeometry = null;
-  comparisonLayout = null;
+  comparisonCanvasView.invalidate();
 };
 
 const activeNavigatorEntry = (): ComparedTransaction | null => {
@@ -695,12 +598,7 @@ const renderTransactionNavigator = (): void => {
   navigatorSummary.textContent = `${regionLabel(current, selectedRegion)} · transaction ${countFormat.format(keyboardTransactionIndex + 1)} of ${countFormat.format(entries.length)}`;
   navigatorTxid.textContent = entry.txid;
   navigatorTxid.title = entry.txid;
-  navigatorVariant.textContent =
-    entry.same_wtxid === false
-      ? "Different witness variants"
-      : entry.same_wtxid === true
-        ? "Same witness variant"
-        : "Observed in one snapshot";
+  navigatorVariant.textContent = sourceDifferenceNavigatorDescription(entry);
   activeTransactionOption.setAttribute(
     "aria-posinset",
     String(keyboardTransactionIndex + 1),
@@ -716,73 +614,21 @@ const renderTransactionNavigator = (): void => {
   );
 };
 
-const scheduleCanvasRender = (): void => {
-  if (pendingCanvasFrame !== null) {
-    return;
-  }
-  pendingCanvasFrame = window.requestAnimationFrame(() => {
-    pendingCanvasFrame = null;
-    if (comparison === null || comparisonStage.hidden) {
-      invalidateComparisonGeometry();
-      return;
-    }
-    const result = renderComparisonCanvas(
-      comparisonCanvas,
-      comparison,
-      selectedRegion,
-      selectedTransactionId,
-      comparisonGeometry,
-    );
-    comparisonGeometry = result.geometry;
-    comparisonLayout = result.geometry.layout;
-  });
-};
+const comparisonCanvasView = new ComparisonCanvasView(
+  comparisonCanvas,
+  comparisonSelection,
+);
 
-const ruleChip = (
-  label: string,
-  className: string,
-  color?: string,
-): HTMLElement => {
-  const chip = document.createElement("span");
-  chip.className = `rule-chip ${className}`;
-  chip.textContent = label;
-  if (color !== undefined) {
-    chip.style.setProperty("--rule-color", color);
-  }
-  return chip;
-};
-
-const assessmentChips = (
-  transaction: MempoolTransaction | null,
-  loaded: LoadedSourceSnapshot,
-): HTMLElement => {
-  const chips = document.createElement("span");
-  chips.className = "rule-chips comparison-rule-chips";
-  if (transaction === null) {
-    chips.append(ruleChip("Not present", "absent"));
-    return chips;
-  }
-  const assessment = transaction.bip110;
-  if (assessment === null) {
-    chips.append(ruleChip(sourceUnclassifiedLabel(loaded), "unclassified"));
-    return chips;
-  }
-  if (assessment.status === "compatible") {
-    chips.append(ruleChip("Compatible", "compatible"));
-    return chips;
-  }
-  if (assessment.status === "indeterminate") {
-    chips.append(ruleChip("Indeterminate", "unknown"));
-  }
-  for (const ruleId of assessment.violated_rules) {
-    const rule = terrainRule(ruleId);
-    chips.append(ruleChip(`R${rule.number}`, "violated", rule.color));
-  }
-  for (const ruleId of assessment.unknown_rules) {
-    chips.append(ruleChip(`R${terrainRule(ruleId).number}?`, "unknown"));
-  }
-  return chips;
-};
+const scheduleCanvasRender = () =>
+  comparison === null || comparisonStage.hidden
+    ? (invalidateComparisonGeometry(), Promise.resolve("rendered" as const))
+    : comparisonCanvasView.render(
+        comparison,
+        selectedRegion,
+        selectedTransactionId,
+        activePolicySide(),
+        policyFilter,
+      );
 
 const preparePendingView = (requested: ComparisonViewState): void => {
   selectedRegion = requested.region ?? "common";
@@ -791,13 +637,12 @@ const preparePendingView = (requested: ComparisonViewState): void => {
     requested.side ?? "left",
   );
   selectedTransactionId = requested.txid;
-  policyFilter =
-    selectedTransactionId === null ? requested.filter : { kind: "all" };
+  policyFilter = requested.filter;
   keyboardTransactionIndex = 0;
   transactionSearchInput.value = selectedTransactionId ?? "";
   if (selectedTransactionId === null) {
     setTransactionSearchStatus("idle", "Search the current membership union.");
-    clearDetailPanel("Choose a sample");
+    clearDetailPanel("Select a transaction");
   } else {
     setTransactionSearchStatus(
       "waiting",
@@ -820,7 +665,7 @@ const applyResolvedLoadedView = (
   transactionSearchInput.value = resolved.txid ?? "";
   if (resolved.txid === null) {
     setTransactionSearchStatus("idle", "Search the current membership union.");
-    clearDetailPanel("Choose a sample");
+    clearDetailPanel("Select a transaction");
   } else if (resolved.selectedEntry === null) {
     setTransactionSearchStatus(
       "absent",
@@ -828,7 +673,12 @@ const applyResolvedLoadedView = (
     );
     clearDetailPanel("Not present in the current snapshots");
   } else if (resolved.region === "common") {
-    setTransactionSearchStatus("found", "Present in both current snapshots.");
+    setTransactionSearchStatus(
+      "found",
+      hasDifferentChainTips(current)
+        ? "Observed in both snapshots across different reported chain tips."
+        : "Present in both current snapshots.",
+    );
     clearDetailPanel("Loading source detail…");
   } else {
     const source =
@@ -1134,65 +984,6 @@ const renderPolicyBuckets = (
   policyBuckets.replaceChildren(...buttons);
 };
 
-const renderSampleTable = (
-  current: CurrentComparison,
-  population: ComparisonPolicyPopulation,
-): void => {
-  const entries = population.sample;
-  sampleSummary.textContent =
-    population.count === 0
-      ? "No matches"
-      : `Largest ${countFormat.format(entries.length)} of ${countFormat.format(population.count)}`;
-  const rows = entries.map((entry) => {
-    const row = document.createElement("tr");
-    row.dataset.txid = entry.txid;
-    row.classList.toggle("selected", entry.txid === selectedTransactionId);
-    const transactionCell = document.createElement("td");
-    const select = document.createElement("button");
-    select.type = "button";
-    select.className = "tx-select";
-    select.textContent = compactTxid(entry.txid);
-    select.title = entry.txid;
-    select.addEventListener("click", () => {
-      transitionComparisonView({
-        ...currentViewState(),
-        txid: entry.txid,
-      });
-    });
-    transactionCell.append(select);
-    const leftCell = document.createElement("td");
-    leftCell.append(assessmentChips(entry.left, current.left));
-    const rightCell = document.createElement("td");
-    rightCell.append(assessmentChips(entry.right, current.right));
-    const variantCell = document.createElement("td");
-    if (entry.same_wtxid === false) {
-      const badge = document.createElement("span");
-      badge.className = "variant-badge differing";
-      badge.textContent = "Different wtxids";
-      variantCell.append(badge);
-    } else if (entry.same_wtxid === true) {
-      variantCell.textContent = "Same wtxid";
-    } else {
-      const other = entry.left === null ? current.left : current.right;
-      variantCell.textContent = `Not present in ${other.snapshot.source_label}`;
-    }
-    row.append(transactionCell, leftCell, rightCell, variantCell);
-    return row;
-  });
-  sampleTransactions.replaceChildren(...rows);
-};
-
-const syncSampleTransactionSelection = (): void => {
-  for (const row of sampleTransactions.querySelectorAll<HTMLTableRowElement>(
-    "tr[data-txid]",
-  )) {
-    row.classList.toggle(
-      "selected",
-      row.dataset.txid === selectedTransactionId,
-    );
-  }
-};
-
 const renderInspector = (): void => {
   const current = comparison;
   const view = comparisonPolicyView;
@@ -1215,8 +1006,6 @@ const renderInspector = (): void => {
     comparisonRuleList.replaceChildren();
     policyBuckets.replaceChildren();
     policyBucketSummary.textContent = "No snapshot";
-    sampleTransactions.replaceChildren();
-    sampleSummary.textContent = "No matches";
     return;
   }
   const side = activePolicySide();
@@ -1244,33 +1033,6 @@ const renderInspector = (): void => {
   clearPolicyFilter.disabled = policyFilter.kind === "all";
   renderRuleFilters(view);
   renderPolicyBuckets(current, view);
-  renderSampleTable(current, population);
-};
-
-const detailAssessmentText = (assessment: Bip110Assessment): string => {
-  if (assessment.status === "compatible") {
-    return "Compatible with the deployed Knots mempool policy";
-  }
-  if (assessment.status === "indeterminate") {
-    return "Indeterminate because one or more rule checks remain unresolved";
-  }
-  const signature = violationSignature(assessment);
-  if (signature === null) {
-    return "Policy assessment unavailable";
-  }
-  return signature.completeness === "exact"
-    ? `Would violate exactly ${signatureLabel(signature)}`
-    : `${signatureLabel(signature)}; unresolved ${unknownRulesLabel(signature)}`;
-};
-
-const compactEvidence = (values: unknown[]): string => {
-  if (values.length === 0) {
-    return "";
-  }
-  const encoded = JSON.stringify(values[0]) ?? "unavailable exemplar";
-  return values.length === 1
-    ? encoded
-    : `${encoded} · exemplar of ${values.length}`;
 };
 
 const detailRuleElement = (rule: RuleAssessment): HTMLLIElement => {
@@ -1285,12 +1047,12 @@ const detailRuleElement = (rule: RuleAssessment): HTMLLIElement => {
   item.append(heading);
   if (rule.evidence_count > 0) {
     const evidence = document.createElement("p");
-    evidence.textContent = `Evidence ${countFormat.format(rule.evidence_count)} · ${compactEvidence(rule.evidence)}`;
+    evidence.textContent = `Evidence ${countFormat.format(rule.evidence_count)} · ${compactComparisonEvidence(rule.evidence)}`;
     item.append(evidence);
   }
   if (rule.missing_count > 0) {
     const missing = document.createElement("p");
-    missing.textContent = `Unresolved ${countFormat.format(rule.missing_count)} · ${compactEvidence(rule.missing)}`;
+    missing.textContent = `Unresolved ${countFormat.format(rule.missing_count)} · ${compactComparisonEvidence(rule.missing)}`;
     item.append(missing);
   }
   return item;
@@ -1326,13 +1088,14 @@ const renderDetailOutcome = (
   heading.append(name, membership);
   panel.append(heading);
   if (transaction !== null) {
-    const variant = document.createElement("code");
-    variant.textContent = `wtxid ${transaction.wtxid}`;
-    variant.title = transaction.wtxid;
-    panel.append(variant);
-    const facts = document.createElement("p");
-    facts.className = "comparison-detail-facts";
-    facts.textContent = transactionFactSummary(transaction);
+    const facts = document.createElement("div");
+    facts.className = "detail-transaction comparison-detail-facts";
+    facts.append(
+      createTransactionDetailValue("wtxid", transaction.wtxid),
+      ...transactionFactPairs(transaction).map(([label, value]) =>
+        createTransactionDetailValue(label, value),
+      ),
+    );
     panel.append(facts);
   }
   if (outcome.state === "absent") {
@@ -1353,11 +1116,27 @@ const renderDetailOutcome = (
   } else {
     const summary = document.createElement("p");
     summary.className = "comparison-detail-assessment";
-    summary.textContent = detailAssessmentText(outcome.detail.assessment);
+    summary.textContent = comparisonAssessmentText(outcome.detail.assessment);
     const rules = document.createElement("ol");
     rules.className = "detail-rules";
     rules.append(...outcome.detail.rules.map(detailRuleElement));
     panel.append(summary, rules);
+    const detectionValues = outcome.detail.classifications.flatMap((result) => {
+      const descriptor = source.snapshot.classifier_catalog.find(
+        ({ id }) => id === result.classifier_id,
+      );
+      return classifierDetectionPresentations(result, descriptor ?? null).map(
+        ({ label, summary }) => createTransactionDetailValue(label, summary),
+      );
+    });
+    if (detectionValues.length > 0) {
+      const heading = document.createElement("h4");
+      heading.textContent = "Data detections";
+      const detections = document.createElement("div");
+      detections.className = "detail-transaction comparison-detection-facts";
+      detections.append(...detectionValues);
+      panel.append(heading, detections);
+    }
   }
   return panel;
 };
@@ -1411,6 +1190,16 @@ const loadSelectedTransactionDetail = async (
   if (current === null || selectedTransactionId !== entry.txid) {
     return;
   }
+  if (
+    !snapshotIsComplete(current.left.snapshot) ||
+    !snapshotIsComplete(current.right.snapshot)
+  ) {
+    clearDetailPanel("Membership details are still loading.");
+    detailContainer.replaceChildren(
+      createMempoolSpaceTransactionLink(entry.txid),
+    );
+    return;
+  }
   detailController?.abort();
   const controller = new AbortController();
   detailController = controller;
@@ -1442,94 +1231,173 @@ const loadSelectedTransactionDetail = async (
   detailStatus.textContent = compactTxid(entry.txid);
   const identity = document.createElement("div");
   identity.className = "comparison-detail-identity";
-  const transactionId = document.createElement("code");
-  transactionId.textContent = entry.txid;
-  transactionId.title = entry.txid;
-  identity.append(transactionId);
-  if (entry.same_wtxid === false) {
-    const warning = document.createElement("p");
-    warning.className = "variant-warning";
-    warning.textContent =
-      "The same txid carries different witness variants. Policy assessments remain source-local.";
-    identity.append(warning);
-  }
+  identity.append(createMempoolSpaceTransactionLink(entry.txid));
+  const sourceDifferenceDetail = createSourceDifferenceDetail(current, entry);
+  if (sourceDifferenceDetail !== null) identity.append(sourceDifferenceDetail);
   detailContainer.replaceChildren(
     identity,
     ...outcomes.map((outcome) => renderDetailOutcome(current, entry, outcome)),
   );
 };
 
-const renderComparison = (
+const selectedTransactionDetailScheduler = new ComparisonDetailScheduler(
+  (entry: ComparedTransaction) => {
+    void loadSelectedTransactionDetail(entry);
+  },
+  300,
+);
+
+const renderComparison = async (
   current: CurrentComparison,
   view: ComparisonPolicyView,
-): void => {
-  invalidateComparisonGeometry();
-  renderSourceCard(leftSourceCard, "Source A", current.left);
-  renderSourceCard(rightSourceCard, "Source B", current.right);
-  renderSampling(current);
-  comparisonDistributions.render(current);
+  complete = true,
+): Promise<void> => {
+  leftSourceCardView.renderSnapshot(current.left.source, current.left.snapshot);
+  rightSourceCardView.renderSnapshot(
+    current.right.source,
+    current.right.snapshot,
+  );
+  samplingView.render(current);
+  conflictView.render(current, complete);
+  if (comparison !== current) return;
   renderPolicyMatrix(current, view);
   renderRegionControls(current);
+  renderSourceDifferenceSummary(sourceDifferenceSummary, current, complete);
   unionCount.textContent = `${countFormat.format(current.totals.union_count)} txids`;
   comparisonStage.hidden = current.totals.union_count === 0;
   comparisonEmpty.hidden = current.totals.union_count !== 0;
   comparisonEmpty.textContent = "Both sampled mempools are empty.";
-  const differingVariants = current.common.filter(
-    ({ same_wtxid: sameVariant }) => sameVariant === false,
-  ).length;
+  const differingVariants = complete
+    ? current.totals.common_witness_variant_count
+    : 0;
+  const sourceDifferencesCount = complete
+    ? current.totals.common_source_difference_count
+    : 0;
   comparisonCanvas.setAttribute(
     "aria-label",
-    `Current membership comparison with ${formatTxidCount(current.totals.common_count)} present in both snapshots, ${formatTxidCount(current.totals.left_only_count)} observed only in ${current.left.snapshot.source_label} snapshot, and ${formatTxidCount(current.totals.right_only_count)} observed only in ${current.right.snapshot.source_label} snapshot. Use the transaction navigator or arrow keys to reach every transaction.`,
+    `Current membership comparison with ${formatTxidCount(current.totals.common_count)} present in both snapshots, ${formatTxidCount(current.totals.left_only_count)} observed only in ${current.left.snapshot.source_label} snapshot, and ${formatTxidCount(current.totals.right_only_count)} observed only in ${current.right.snapshot.source_label} snapshot. ${complete ? `${formatTxidCount(sourceDifferencesCount)} shared transaction IDs have different source-local facts. Use the transaction navigator or arrow keys to reach every transaction.` : "Witness variants and membership details are still loading."}`,
   );
   const unionSentence =
     current.totals.union_count === 1
       ? "The one transaction ID appears once."
       : `Each of the ${formatTxidCount(current.totals.union_count)} appears once.`;
-  const variantVerb = differingVariants === 1 ? "carries" : "carry";
-  visualSummary.textContent = `${unionSentence} The snapshots were observed ${formatDuration(current.observed_skew_ms)} apart. ${formatTxidCount(differingVariants)} present in both ${variantVerb} different witness variants.`;
+  visualSummary.textContent = complete
+    ? `${unionSentence} Among the shared transaction IDs, ${formatTxidCount(sourceDifferencesCount)} ${sourceDifferencesCount === 1 ? "has" : "have"} different source-local facts: ${formatTxidCount(differingVariants)} witness ${differingVariants === 1 ? "variant" : "variants"}, ${formatTxidCount(current.totals.common_ancestor_package_difference_count)} ancestor ${current.totals.common_ancestor_package_difference_count === 1 ? "package" : "packages"}, and ${formatTxidCount(current.totals.common_replaceability_difference_count)} replaceability ${current.totals.common_replaceability_difference_count === 1 ? "result" : "results"}. Counts overlap.`
+    : `${formatTxidCount(current.totals.union_count)} transaction IDs are ready for membership-region and policy exploration. Witness variants, fee distributions, and transaction details are still loading.`;
   renderTransactionNavigator();
   renderInspector();
-  scheduleCanvasRender();
+  await renderLatestComparisonCanvas(
+    () => comparison === current,
+    () => selectedRegion,
+    scheduleCanvasRender,
+  );
+  if (comparison !== current) return;
 
-  const stale =
-    current.left.source.availability === "stale" ||
-    current.right.source.availability === "stale";
-  const sameTip =
-    current.left.snapshot.chain_tip.hash ===
-    current.right.snapshot.chain_tip.hash;
-  setStatus(
-    stale ? "stale" : "ready",
-    stale ? "Comparing a retained snapshot" : "Comparison ready",
-    `${formatDuration(current.observed_skew_ms)} observation skew. ${sameTip ? "Both snapshots report the same chain tip." : "The snapshots report different chain tips."}`,
+  if (complete) {
+    const stale =
+      current.left.source.availability === "stale" ||
+      current.right.source.availability === "stale";
+    if (hasDifferentChainTips(current)) {
+      showHealthyStatus(current);
+      if (stale) {
+        statusDetail.textContent = `${statusDetail.textContent ?? ""} One or both sources retained their last complete snapshot after a poll failure.`;
+      }
+    } else if (stale) {
+      setStatus(
+        "stale",
+        "Comparing a retained snapshot",
+        "One or both sources retained their last complete snapshot after a poll failure.",
+      );
+    } else {
+      showHealthyStatus(current);
+    }
+  } else {
+    const stale =
+      current.left.source.availability === "stale" ||
+      current.right.source.availability === "stale";
+    setStatus(
+      stale ? "stale" : "waiting",
+      stale ? "Comparing a retained snapshot" : "Loading transaction facts",
+      "Membership regions and BIP-110 policy are interactive while remaining transaction facts load.",
+    );
+  }
+  setAtlasLoadPhase(pageStatus, "interactive");
+  await markAtlasReadinessAfterPaint(
+    pageStatus,
+    "comparison",
+    complete ? "complete-feature-ready" : "primary-interactive",
+    () => comparison === current,
   );
 };
 
-const transitionComparisonView = (requested: ComparisonViewState): void => {
+const transitionComparisonView = (
+  requested: ComparisonViewState,
+  detailTiming: "immediate" | "settled" = "immediate",
+): void => {
   const current = comparison;
   if (current === null) {
+    selectedTransactionDetailScheduler.cancel();
     preparePendingView(requested);
     updateQuery();
     return;
   }
 
   const previous = currentViewState();
-  executeComparisonViewTransition(current, previous, requested, {
-    applyResolvedView: (resolved) => {
-      applyResolvedLoadedView(current, resolved);
+  const resolved = executeComparisonViewTransition(
+    current,
+    previous,
+    requested,
+    {
+      applyResolvedView: (resolved) => {
+        applyResolvedLoadedView(current, resolved);
+      },
+      renderPopulation: () => {
+        renderRegionControls(current);
+        syncPolicyMatrixSelection();
+        renderInspector();
+      },
+      renderTransactionNavigator,
+      updateQuery,
+      scheduleCanvasRender,
+      handleCanvasRenderFailure: comparisonCanvasRenderFailureHandler(
+        () => comparison === current,
+        setStatus,
+      ),
+      loadTransactionDetail: (entry) => {
+        if (detailTiming === "settled") {
+          selectedTransactionDetailScheduler.schedule(entry);
+        } else {
+          selectedTransactionDetailScheduler.loadNow(entry);
+        }
+      },
     },
-    renderPopulation: () => {
-      renderRegionControls(current);
-      syncPolicyMatrixSelection();
-      renderInspector();
-    },
-    syncTransactionSelection: syncSampleTransactionSelection,
-    renderTransactionNavigator,
-    updateQuery,
-    scheduleCanvasRender,
-    loadTransactionDetail: (entry) => {
-      void loadSelectedTransactionDetail(entry);
-    },
-  });
+  );
+  if (
+    detailTiming === "immediate" &&
+    resolved.updateKind === "none" &&
+    resolved.selectedEntry !== null
+  ) {
+    selectedTransactionDetailScheduler.loadNow(resolved.selectedEntry);
+  }
+};
+
+const renderSelectedSourceMetadata = (message: string): void => {
+  const leftSource = configuredSources.find(
+    ({ source_id: sourceId }) => sourceId === leftSourceId,
+  );
+  const rightSource = configuredSources.find(
+    ({ source_id: sourceId }) => sourceId === rightSourceId,
+  );
+  if (leftSource === undefined) {
+    leftSourceCardView.renderPlaceholder(message);
+  } else {
+    leftSourceCardView.renderMetadata(leftSource, message);
+  }
+  if (rightSource === undefined) {
+    rightSourceCardView.renderPlaceholder(message);
+  } else {
+    rightSourceCardView.renderMetadata(rightSource, message);
+  }
 };
 
 const resetComparisonView = (message: string): void => {
@@ -1543,13 +1411,12 @@ const resetComparisonView = (message: string): void => {
   comparisonStage.hidden = true;
   comparisonEmpty.hidden = false;
   comparisonEmpty.textContent = message;
-  samplingPanel.hidden = true;
-  samplingTimeline.replaceChildren();
+  samplingView.reset();
+  conflictView.reset();
   comparisonDistributions.reset();
   policyMatrix.hidden = true;
   policyMatrixBody.replaceChildren();
-  resetSourceCard(leftSourceCard, "Source A", leftSourceId, message);
-  resetSourceCard(rightSourceCard, "Source B", rightSourceId, message);
+  renderSelectedSourceMetadata(message);
   resetRegionControls();
   unionCount.textContent = "0 txids";
   comparisonCanvas.setAttribute(
@@ -1558,13 +1425,55 @@ const resetComparisonView = (message: string): void => {
   );
   visualSummary.textContent =
     "Each transaction ID appears once: present in both snapshots, observed only in source A snapshot, or observed only in source B snapshot.";
-  clearTransactionSelection("Choose a sample");
+  clearTransactionSelection("Select a transaction");
   renderTransactionNavigator();
   renderInspector();
 };
 
 const currentSelectionMatches = (ticket: ComparisonRequestTicket): boolean =>
   lifecycle.isCurrent(ticket, leftSelect.value, rightSelect.value);
+
+const commitComparisonPublications = async (
+  left: LoadedSourcePublication,
+  right: LoadedSourcePublication,
+  complete: boolean,
+  signal: AbortSignal,
+  isCurrent: () => boolean,
+  replacement: boolean,
+): Promise<ResolvedComparisonViewTransition> => {
+  setAtlasLoadPhase(pageStatus, "deriving-view");
+  const prepared = await prepareComparisonCommitCandidate(
+    left,
+    right,
+    complete,
+    replacement,
+    signal,
+    isCurrent,
+    comparisonDistributions,
+    comparisonCanvasView,
+  );
+  const { comparison: next, policyView } = prepared.publication;
+  commitPreparedComparisonDistributions(
+    complete,
+    prepared.distributions,
+    next,
+    comparisonDistributions,
+  );
+  replaceSourceSummary(left.source);
+  replaceSourceSummary(right.source);
+  comparison = next;
+  comparisonPolicyView = policyView;
+  const previous = currentViewState();
+  const applied = resolveComparisonViewTransition(next, previous, previous);
+  applyResolvedLoadedView(next, applied);
+  populateSourceSelectors();
+  comparisonCanvasView.commitCandidate(prepared.canvas);
+  const rendered = renderComparison(next, policyView, complete);
+  if (replacement && complete) recordAtlasCandidateCommitted(prepared.detail);
+  await rendered;
+  if (comparison === next) updateQuery();
+  return applied;
+};
 
 const loadComparison = async (
   selectionChanged: boolean,
@@ -1581,45 +1490,86 @@ const loadComparison = async (
   refreshButton.disabled = true;
   refreshButton.textContent = "Loading…";
   const ticket = lifecycle.begin(leftSourceId, rightSourceId);
+  const retainActiveComparison = !selectionChanged && comparison !== null;
   if (selectionChanged) {
     resetComparisonView("Loading the selected source snapshots.");
     preparePendingView(requestedState);
     updateQuery();
+  } else {
+    leftSourceCardView.setBusy(true);
+    rightSourceCardView.setBusy(true);
   }
+  setAtlasLoadPhase(pageStatus, "metadata-ready");
   setStatus(
     "waiting",
-    "Loading current snapshots",
-    "Reading each source independently from Atlas memory.",
+    selectedPairTitle(),
+    retainActiveComparison
+      ? "Refreshing both snapshots from Atlas memory. The current comparison remains interactive until both replacements are ready."
+      : "Loading both current snapshots independently from Atlas memory.",
   );
+  setAtlasLoadPhase(pageStatus, "loading-snapshot");
+  let leftPrimary: LoadedSourcePublication | null = null;
+  let rightPrimary: LoadedSourcePublication | null = null;
+  let primaryCommitted = false;
+  const maybeRenderPrimary = async (): Promise<void> => {
+    if (
+      primaryCommitted ||
+      leftPrimary === null ||
+      rightPrimary === null ||
+      !currentSelectionMatches(ticket)
+    ) {
+      return;
+    }
+    const left = leftPrimary;
+    const right = rightPrimary;
+    primaryCommitted = true;
+    if (!retainActiveComparison) {
+      await renderPrimaryComparisonPublication(() =>
+        commitComparisonPublications(
+          left,
+          right,
+          false,
+          ticket.signal,
+          () => currentSelectionMatches(ticket),
+          false,
+        ),
+      );
+    }
+  };
   try {
     const [leftResponse, rightResponse] = await Promise.all([
-      fetchSourceSnapshot(leftSourceId, ticket.signal),
-      fetchSourceSnapshot(rightSourceId, ticket.signal),
+      fetchSourcePublication(
+        leftSourceId,
+        ticket.signal,
+        KNOTS_BIP110_CLASSIFIER_ID,
+        (publication) => {
+          leftPrimary = publication;
+          return maybeRenderPrimary();
+        },
+      ),
+      fetchSourcePublication(
+        rightSourceId,
+        ticket.signal,
+        KNOTS_BIP110_CLASSIFIER_ID,
+        (publication) => {
+          rightPrimary = publication;
+          return maybeRenderPrimary();
+        },
+      ),
     ]);
     if (!currentSelectionMatches(ticket)) {
       return;
     }
-    replaceSourceSummary(leftResponse.source);
-    replaceSourceSummary(rightResponse.source);
-    const nextComparison = compareCurrentSnapshots(
-      requireLoadedSnapshot(leftResponse),
-      requireLoadedSnapshot(rightResponse),
+    const applied = await commitComparisonPublications(
+      leftResponse,
+      rightResponse,
+      true,
+      ticket.signal,
+      () => currentSelectionMatches(ticket),
+      retainActiveComparison,
     );
-    const nextPolicyView = buildComparisonPolicyView(nextComparison);
-    comparison = nextComparison;
-    comparisonPolicyView = nextPolicyView;
-    const previous = currentViewState();
-    const applied = resolveComparisonViewTransition(
-      nextComparison,
-      previous,
-      previous,
-    );
-    applyResolvedLoadedView(nextComparison, applied);
-    populateSourceSelectors();
-    renderComparison(nextComparison, nextPolicyView);
-    updateQuery();
     if (applied.selectedEntry !== null) {
-      void loadSelectedTransactionDetail(applied.selectedEntry);
+      selectedTransactionDetailScheduler.loadNow(applied.selectedEntry);
     }
   } catch (error) {
     if (
@@ -1629,13 +1579,27 @@ const loadComparison = async (
     ) {
       return;
     }
+    lifecycle.invalidate();
     const message =
       error instanceof Error ? error.message : "Unable to load comparison";
     if (comparison === null) {
       const pendingState = currentViewState();
       resetComparisonView(message);
+      leftSourceCardView.setBusy(false);
+      rightSourceCardView.setBusy(false);
       preparePendingView(pendingState);
       updateQuery();
+      setAtlasLoadPhase(pageStatus, "metadata-ready");
+    } else {
+      leftSourceCardView.renderSnapshot(
+        comparison.left.source,
+        comparison.left.snapshot,
+      );
+      rightSourceCardView.renderSnapshot(
+        comparison.right.source,
+        comparison.right.snapshot,
+      );
+      setAtlasLoadPhase(pageStatus, "interactive");
     }
     setStatus(
       "error",
@@ -1658,6 +1622,14 @@ const discoverSources = async (): Promise<void> => {
   refreshButton.disabled = true;
   refreshButton.textContent = "Loading…";
   lifecycle.invalidate();
+  setAtlasLoadPhase(pageStatus, "discovering-sources");
+  if (comparison === null) {
+    leftSourceCardView.renderPlaceholder("Discovering configured sources.");
+    rightSourceCardView.renderPlaceholder("Discovering configured sources.");
+  } else {
+    leftSourceCardView.setBusy(true);
+    rightSourceCardView.setBusy(true);
+  }
   const ticket = discoveryLifecycle.begin();
   try {
     const response = await fetchSources(ticket.signal);
@@ -1676,6 +1648,9 @@ const discoverSources = async (): Promise<void> => {
       (previousLeftSourceId !== leftSourceId ||
         previousRightSourceId !== rightSourceId);
     populateSourceSelectors();
+    renderSelectedSourceMetadata("Loading the complete snapshots…");
+    markAtlasReadiness(pageStatus, "comparison", "metadata-usable");
+    setAtlasLoadPhase(pageStatus, "metadata-ready");
     if (leftSourceId.length === 0 || rightSourceId.length === 0) {
       initialViewState = null;
       lifecycle.invalidate();
@@ -1688,6 +1663,8 @@ const discoverSources = async (): Promise<void> => {
         "Waiting for two snapshots",
         "At least two configured sources must have a complete current snapshot.",
       );
+      leftSourceCardView.setBusy(false);
+      rightSourceCardView.setBusy(false);
       return;
     }
     const selectionChanged =
@@ -1713,6 +1690,13 @@ const discoverSources = async (): Promise<void> => {
     if (comparison === null) {
       comparisonEmpty.hidden = false;
       comparisonEmpty.textContent = message;
+      leftSourceCardView.setBusy(false);
+      rightSourceCardView.setBusy(false);
+      setAtlasLoadPhase(pageStatus, "discovering-sources");
+    } else {
+      leftSourceCardView.setBusy(false);
+      rightSourceCardView.setBusy(false);
+      setAtlasLoadPhase(pageStatus, "interactive");
     }
     setStatus("error", "Atlas website unavailable", message);
   } finally {
@@ -1826,12 +1810,13 @@ clearPolicyFilter.addEventListener("click", () => {
 
 comparisonCanvas.addEventListener("click", (event) => {
   const current = comparison;
-  if (current === null || comparisonLayout === null) {
+  const layout = comparisonCanvasView.layout;
+  if (current === null || layout === null) {
     return;
   }
   const bounds = comparisonCanvas.getBoundingClientRect();
   const hit = hitTestComparison(
-    comparisonLayout,
+    layout,
     event.clientX - bounds.left,
     event.clientY - bounds.top,
   );
@@ -1840,14 +1825,12 @@ comparisonCanvas.addEventListener("click", (event) => {
     return;
   }
   if (hit?.kind === "transaction") {
-    const entry = comparisonRegionEntries(current, hit.glyph.regionKey).find(
-      ({ txid }) => txid === hit.glyph.txid,
-    );
-    if (entry !== undefined) {
+    const located = lookupComparisonTransaction(current, hit.glyph.txid);
+    if (located !== null && located.region === hit.glyph.regionKey) {
       transitionComparisonView({
         ...currentViewState(),
         region: hit.glyph.regionKey,
-        txid: entry.txid,
+        txid: located.entry.txid,
       });
     }
   }
@@ -1868,9 +1851,16 @@ const handleTransactionNavigation = (event: KeyboardEvent): void => {
       move,
     );
     if (nextIndex !== null) {
-      keyboardTransactionIndex = nextIndex;
-      renderTransactionNavigator();
-      scheduleCanvasRender();
+      const entry = entries[nextIndex];
+      if (entry !== undefined) {
+        transitionComparisonView(
+          {
+            ...currentViewState(),
+            txid: entry.txid,
+          },
+          "settled",
+        );
+      }
     }
     return;
   }
@@ -1900,7 +1890,13 @@ transactionListbox.addEventListener("dblclick", () => {
 
 new ResizeObserver(() => {
   invalidateComparisonGeometry();
-  scheduleCanvasRender();
+  const renderedComparison = comparison;
+  void scheduleCanvasRender().catch(
+    comparisonCanvasRenderFailureHandler(
+      () => comparison === renderedComparison,
+      setStatus,
+    ),
+  );
 }).observe(comparisonCanvas);
 
 const startupViewState = initialViewState;

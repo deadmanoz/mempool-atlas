@@ -10,12 +10,16 @@ export interface DistributionViewTestHarness {
     setTransform: Mock;
     clearRect: Mock;
     fillRect: Mock;
+    beginPath: Mock;
+    rect: Mock;
+    fill: Mock;
     fillStyle: string;
+    globalAlpha: number;
   };
   readonly resizeObservers: ControlledResizeObserver[];
   readonly cancelledAnimationFrames: number[];
   pendingAnimationFrames(): number;
-  flushAnimationFrames(): void;
+  flushAnimationFrames(): Promise<void>;
   cleanup(): void;
 }
 
@@ -29,7 +33,11 @@ export const installDistributionViewTestHarness =
       setTransform: vi.fn(),
       clearRect: vi.fn(),
       fillRect: vi.fn(),
+      beginPath: vi.fn(),
+      rect: vi.fn(),
+      fill: vi.fn(),
       fillStyle: "",
+      globalAlpha: 1,
     };
 
     vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
@@ -71,6 +79,27 @@ export const installDistributionViewTestHarness =
     }
 
     vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    class TestIntersectionObserver {
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+
+      observe(target: Element): void {
+        this.callback(
+          [{ isIntersecting: true, target } as IntersectionObserverEntry],
+          this as unknown as IntersectionObserver,
+        );
+      }
+
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+    }
+    vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
+    vi.stubGlobal("scheduler", { yield: () => Promise.resolve() });
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
       () => canvasContext as unknown as CanvasRenderingContext2D,
     );
@@ -96,12 +125,14 @@ export const installDistributionViewTestHarness =
       resizeObservers,
       cancelledAnimationFrames,
       pendingAnimationFrames: () => animationFrames.size,
-      flushAnimationFrames: () => {
+      flushAnimationFrames: async () => {
         const pending = [...animationFrames.values()];
         animationFrames.clear();
         for (const callback of pending) {
           callback(performance.now());
         }
+        await Promise.resolve();
+        await Promise.resolve();
       },
       cleanup: () => {
         document.body.replaceChildren();

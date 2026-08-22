@@ -7,6 +7,10 @@ export const ancestorFeeRate = (transaction: MempoolTransaction): number =>
     ? transaction.ancestor_fee_sats / transaction.ancestor_vsize
     : 0;
 
+/** Base transaction fee divided by source-reported virtual size. */
+export const baseFeeRate = (transaction: MempoolTransaction): number =>
+  transaction.vsize > 0 ? transaction.fee_sats / transaction.vsize : 0;
+
 /**
  * Label and value pairs for one transaction's membership and structure facts,
  * shared by the node inspector and the comparison detail panels.
@@ -15,6 +19,11 @@ export const transactionFactPairs = (
   transaction: MempoolTransaction,
 ): [string, string][] => {
   const pairs: [string, string][] = [
+    ["Virtual size", formatVsize(transaction.vsize)],
+    [
+      "Base fee",
+      `${formatSats(transaction.fee_sats)} · ${decimalFormat.format(baseFeeRate(transaction))} sat/vB`,
+    ],
     ["Weight", `${countFormat.format(transaction.weight)} wu`],
     [
       "Ancestors",
@@ -50,6 +59,12 @@ export const transactionFactPairs = (
       `${countFormat.format(structure.op_return_bytes)} bytes`,
     ]);
   }
+  if (structure.recognized_carried_bytes > structure.op_return_bytes) {
+    pairs.push([
+      "Recognized carriage, lower bound",
+      `At least ${countFormat.format(structure.recognized_carried_bytes)} bytes`,
+    ]);
+  }
   return pairs;
 };
 
@@ -58,6 +73,7 @@ export const transactionFactSummary = (
   transaction: MempoolTransaction,
 ): string => {
   const parts = [
+    `${formatVsize(transaction.vsize)} · ${formatSats(transaction.fee_sats)} @ ${decimalFormat.format(baseFeeRate(transaction))} sat/vB`,
     `${countFormat.format(transaction.weight)} wu`,
     `ancestors ${countFormat.format(transaction.ancestor_count)} tx · ${formatVsize(transaction.ancestor_vsize)} @ ${decimalFormat.format(ancestorFeeRate(transaction))} sat/vB`,
     `descendants ${countFormat.format(transaction.descendant_count)}`,
@@ -74,6 +90,11 @@ export const transactionFactSummary = (
     if (structure.op_return_bytes > 0) {
       parts.push(
         `OP_RETURN ${countFormat.format(structure.op_return_bytes)} B`,
+      );
+    }
+    if (structure.recognized_carried_bytes > structure.op_return_bytes) {
+      parts.push(
+        `at least ${countFormat.format(structure.recognized_carried_bytes)} recognized bytes`,
       );
     }
   }

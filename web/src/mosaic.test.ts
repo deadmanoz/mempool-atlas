@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { AGE_BANDS, buildAgeMosaic } from "./mosaic";
+import {
+  AGE_BANDS,
+  buildAgeMosaic,
+  buildAgeMosaicCooperatively,
+} from "./mosaic";
 import { mempoolTransaction } from "./test-fixtures";
 import type { MempoolTransaction } from "./types";
 
@@ -77,5 +81,31 @@ describe("buildAgeMosaic", () => {
       "count",
     );
     expect(mosaic.columns[0]?.cells[0]?.bandKey).toBe("over_24h");
+  });
+
+  it("labels the inclusive 24-hour boundary precisely", () => {
+    const mosaic = buildAgeMosaic(
+      [group("boundary", [transaction(1, 100, 86_400_000)])],
+      OBSERVED,
+      "count",
+    );
+    expect(mosaic.columns[0]?.cells[0]).toMatchObject({
+      bandKey: "over_24h",
+      bandLabel: "≥ 24 h",
+    });
+    expect(AGE_BANDS.at(-1)?.label).toBe("≥ 24 h");
+  });
+
+  it("matches the cooperative mosaic builder exactly", async () => {
+    const groups = [
+      group("a", [transaction(1, 100, 60_000), transaction(2, 200, 7_200_000)]),
+      group("b", [transaction(3, 300, 500_000_000)]),
+    ];
+    await expect(
+      buildAgeMosaicCooperatively(groups, OBSERVED, "vsize", {
+        batchSize: 1,
+        yieldBetweenBatches: () => Promise.resolve(),
+      }),
+    ).resolves.toEqual(buildAgeMosaic(groups, OBSERVED, "vsize"));
   });
 });

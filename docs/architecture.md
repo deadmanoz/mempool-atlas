@@ -13,13 +13,13 @@ The editable source is [`assets/architecture.drawio`](assets/architecture.drawio
 
 Atlas runs as one process with five responsibilities:
 
-| Component | Responsibility |
-| --- | --- |
-| Membership collector | Fetch and validate one complete mempool observation per source |
-| Shared fact resolver | Resolve bounded raw transaction and prevout facts once per current generation |
-| Classifier lenses | Evaluate exact properties, heuristic shapes, data fingerprints, and BIP-110 compatibility independently |
-| Current-state publisher | Atomically expose source snapshots, lifecycle, and transaction detail |
-| Web and API server | Serve source-local data and the two browser products |
+| Component               | Responsibility                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| Membership collector    | Fetch and validate one complete mempool observation per source                                          |
+| Shared fact resolver    | Resolve bounded raw transaction and prevout facts once per current generation                           |
+| Classifier lenses       | Evaluate exact properties, heuristic shapes, data fingerprints, and BIP-110 compatibility independently |
+| Current-state publisher | Atomically expose source snapshots, lifecycle, and transaction detail                                   |
+| Web and API server      | Serve source-local data and the two browser products                                                    |
 
 Each Bitcoin node remains an independent authority for its own mempool. Atlas
 does not install software beside the node, combine source membership on the
@@ -48,6 +48,17 @@ reads. A failed poll leaves the previous successful snapshot visible and marks
 it stale. Failure of one source does not prevent later sources in the same
 round from being attempted.
 
+A block arriving mid-collection is ordinary rather than a node fault, so step 7
+retries the whole sequence within a bounded attempt count and a whole-turn time
+budget. The tip-match requirement itself is never relaxed: only a collection
+that observed one stable tip across both reads is ever published. The budget
+matters because the shared RPC work gate is held for the entire membership
+round. Without it, a source whose collection outlasts the roughly ten-minute
+block interval could never satisfy the tip check and would fail every round
+indefinitely while starving the other sources. Exhausting the budget reports
+the attempt count, which distinguishes a systematically slow source from a
+single unlucky block.
+
 Membership requests go through the shared bounded HTTP policy in
 `src/rpc_transport.rs`: redirects are never followed, so the Basic credential
 can only reach the configured origin; every request carries an explicit
@@ -75,13 +86,18 @@ policy that membership uses:
 3. Resolve confirmed prevout scripts with `gettxout(txid, vout, false)`.
 4. Evaluate a candidate only after every required script is present or has a
    genuine terminal result.
-5. Run each independent classifier against the same bounded fact set.
+5. Move terminal candidates through sequential `spawn_blocking` chunks bounded
+   by transaction count and actual serialized bytes, then run each independent
+   classifier against the same bounded fact set.
 6. Publish completed results in revisioned batches.
 
 A verified candidate remains pending across fact-wave boundaries, so bounded
 work does not repeatedly fetch the same transaction. Positive confirmed
 scripts may be reused under bounded eviction. Nulls, failures, and departed
-transactions are not cached as facts.
+transactions are not cached as facts. `src/classification/evaluation.rs` owns
+the CPU scheduling boundary: it keeps classifier scans away from Tokio's async
+workers, preserves deterministic witness-identifier order, and rejects every
+chunk result after its membership generation has been superseded.
 
 Collection state is kept separate from classifier evidence. Unscheduled work,
 capacity deferral, transport errors, malformed responses, and absent JSON-RPC
@@ -92,11 +108,11 @@ to be a current mempool parent.
 
 The classifier reports one of three public lifecycle states:
 
-| State | Meaning |
-| --- | --- |
-| `classifying` | Eligible classification work remains for the current membership |
-| `complete` | No eligible work remains, although some results may be unavailable |
-| `paused` | A systemic or internal failure stopped this generation |
+| State         | Meaning                                                            |
+| ------------- | ------------------------------------------------------------------ |
+| `classifying` | Eligible classification work remains for the current membership    |
+| `complete`    | No eligible work remains, although some results may be unavailable |
+| `paused`      | A systemic or internal failure stopped this generation             |
 
 Membership health and classification lifecycle are independent. Replacement
 membership supersedes stale classifier work, and results from an older
@@ -104,15 +120,16 @@ generation cannot update current state.
 
 ## Independent classifier lenses
 
-`src/classifiers.rs` implements four versioned lenses over the
+`src/classifiers.rs` implements five versioned lenses over the
 resolved fact set:
 
-| Lens | Method | Question answered |
-| --- | --- | --- |
-| `transaction_properties` | Exact, multi-label | Which serialized and script-family properties are present? |
-| `transaction_shape` | Heuristic, multi-label | Which explicitly defined transaction-shape patterns match? |
-| `data_protocols` | Fingerprint, multi-label | Which supported data-carrier byte patterns are present? |
-| `knots_bip110` | Policy rule set | How does this witness variant evaluate against deployed BIP-110 policy? |
+| Lens                     | Method                   | Question answered                                                       |
+| ------------------------ | ------------------------ | ----------------------------------------------------------------------- |
+| `transaction_properties` | Exact, multi-label       | Which serialized and script-family properties are present?              |
+| `transaction_shape`      | Heuristic, multi-label   | Which explicitly defined transaction-shape patterns match?              |
+| `data_protocols`         | Fingerprint, multi-label | Which supported data-carrier byte patterns are present?                 |
+| `data_carriage_shape`    | Heuristic, multi-label   | Which high-confidence witness or output-field carrier shapes are present? |
+| `knots_bip110`           | Policy rule set          | How does this witness variant evaluate against deployed BIP-110 policy? |
 
 The catalog, rules, thresholds, missing-fact behavior, and limitations are
 defined in [`classification.md`](classification.md). Each lens versions its
@@ -156,44 +173,128 @@ the RPC gate has been released. Membership RPC can therefore proceed while a
 classification revision is prepared. Generation and revision guards reject
 superseded work at the atomic commit point.
 
-One publication atomically replaces:
+One publication is prepared as a complete v2 bundle before the commit point.
+The publisher encodes and validates the manifest, population, membership,
+structure, catalog-ordered classifier stages, and matching detail map without
+holding the reader lock. One atomic promotion then replaces:
 
-- the source-scoped snapshot;
+- the source summary and source-scoped domain snapshot;
 - its classification lifecycle and revision;
 - its classifier catalog, coverage summaries, and compact transaction results;
 - matching transaction-detail records; and
-- one shared encoded JSON response and its HTTP validator.
+- the content-addressed stage map and manifest validator.
 
-Readers therefore see a coherent revision. Transaction detail is accepted by
-the browser only when source, observation, transaction identity, witness
-identity, and assessment agree with the visible snapshot.
+Readers therefore see one coherent publication. Failed preparation cannot
+advance the domain snapshot or detail. A poll failure after a successful
+publication produces a new manifest containing the stale source metadata while
+retaining the exact prior stage buffers and content identifiers. Failure before
+the first publication returns an exact non-cacheable `v2_unavailable` problem
+response. Transaction detail is accepted by the browser only when source,
+observation, transaction identity, witness identity, and assessment agree with
+the visible publication.
 
 Source discovery also publishes `atlas_version` from Rust's compiled
 `CARGO_PKG_VERSION`. Both browser products render this server-authoritative
 value in the shared header, so the visible version describes the running Atlas
 process rather than an independently versioned static package.
 
-Each published source representation receives a weak `ETag`. The validator
-changes when membership, classification, lifecycle, or failure state replaces
-the encoded response. Conditional reads of an unchanged representation return
-`304` without sending the full JSON body. Responses before the first successful
-snapshot remain non-cacheable. Clients that advertise gzip support receive a
-compressed representation, which keeps large snapshots practical over slower
-development and ingress links.
+Each manifest and stage receives a weak `ETag`. A manifest validator changes
+when membership, classification, lifecycle, poll-start, or failure metadata
+changes, and `Cache-Control: public, no-cache, must-revalidate` forces every
+reuse through validation. A stage validator embeds its SHA-256 content
+identifier and changes only with the exact body. Its content ID is also part of
+the URL, which is never reused for different bytes, so successful stage
+responses use `Cache-Control: public, max-age=31536000, immutable,
+must-revalidate`. The one-year freshness lifetime removes redundant browser and
+edge requests while `must-revalidate` resumes validator checks after expiry.
+
+Atlas resolves a requested stage against the current publication before
+evaluating `If-None-Match`. Explicit conditional reads of current
+representations therefore still return `304` without a body, while a
+well-formed content identifier absent from the current publication returns
+non-cacheable `409`. An immutable cached stage represents only the exact bytes
+named by its content ID, not evidence that a later manifest still declares it;
+clients discover usable stage IDs only from the revalidated current manifest.
+An identifier that belongs to a different current stage, or a request for a
+stage kind or classifier that is not present, returns non-cacheable `404`.
+Malformed identifiers or stage kinds return non-cacheable `400`, all before
+conditional validation. Source discovery, transaction detail, failures, and
+responses before the first publication remain non-cacheable. Clients that
+advertise gzip support receive compressed JSON.
+
+Classification also retains exact input outpoints as an internal optional fact
+under a dedicated 64 MiB per-source generation budget. These facts use the same
+`txid` plus `wtxid` carry-forward gate as their classification and never enter
+the manifest, ordinary stages, or transaction-detail JSON. Exhausting the
+optional budget leaves later rows uncovered without reducing classifier
+coverage, failing publication, or making a source stale.
+
+Two lazy binary conflict-fact routes are bound to the current population and
+structure content identifiers. The first hashes exact outpoints with a
+domain-separated SHA-256 construction, publishes only an eight-byte candidate
+fingerprint plus source row, and caches the bounded sorted body after one
+blocking preparation. The second returns full 36-byte outpoints for one covered
+transaction. A fingerprint match is never a result by itself. The browser must
+verify exact equality, and a superseded dependency returns `409` rather than
+mixing publications. Successful bodies are immutable and conditionally
+cacheable. This optional path is absent from the ordinary stage graph.
 
 The process retains no application data on disk. Restarting discards current
 state and readiness returns only after a new valid observation is available.
 
 ## Browser products
 
-The node viewer renders one source snapshot. Its default Classifications view
-lets the user select one declared lens, inspect marginal label populations, and
-open matching transaction samples. Multi-label populations can overlap. The
-browser does not combine labels from different classifiers.
+Both browser products first render the selected entries from the lightweight
+`/api/v2/sources` response. Source label, availability, retained observation,
+chain tip, membership totals, classification progress, and poll failure are
+therefore visible before stage loading begins. The shared source
+view keeps discovery, metadata, snapshot loading, derivation, and interactive
+phases separate from ready, stale, waiting, and error availability.
 
-The same selection drives the Buckets view. Classifier lenses partition
-transactions by complete, partial, or unavailable coverage and a lens-specific
-presentation adapter. Transaction properties uses broad script-profile groups;
+A dedicated worker first fetches and validates the current manifest,
+population, and selected classifier lane for the primary view. It then reads
+the manifest again before completing membership, structure, and the remaining
+catalog lanes behind that primary quorum. On a stable publication, the second
+pass reuses the population and selected-classifier stages already held by the
+worker. Stage digests,
+dependency identifiers, row counts, and publication identity are checked before
+the worker commits one internally coherent packed store. Superseded-stage `409`
+responses trigger a bounded whole-publication retry; the browser never combines
+stages from different manifests. Packed columns, bitsets, and first-seen result
+dictionaries remain worker-owned, with presentation adapters exposing rows only
+on demand rather than retaining the former full-row object graph.
+
+The root browser entry redirects requests without node URL state to Compare.
+Compare prefers the available Bitcoin Core and Bitcoin Knots sources for its
+initial pair, while explicit `?source=...` state loads the single-node product.
+
+The shared header presents Node and Compare as an equal-width primary view
+switch on both products, with the active view explicit at every breakpoint.
+The node viewer renders one source snapshot. Its default Classifications view
+lets the user select one declared lens and combine its marginal labels with ANY
+or ALL. Multi-label populations can overlap, but the resulting complete and
+partial populations contain each matching transaction once. A dedicated query
+view renders the full population as selectable Canvas blocks from compact
+marginal row indexes. Proven labels in partial results remain queryable, while
+unavailable results never match. Changing only the selected transaction
+repaints its highlight without rescanning the snapshot. The browser does not
+combine labels from different classifiers.
+
+The Classifications inspector shows only the selected transaction's membership
+facts and active-lens result. It does not repeat label controls, every classifier
+as a cross-lens detail-card stack, or a sample-transaction table. The Buckets
+inspector retains its independent marginal label and rule controls before the
+population outcome they determine. `classification-overview-view.ts` owns the
+lens selector, query controls, label cards, and semantics guidance;
+`classification-query-view.ts` owns the query summary, Canvas listbox, hit
+testing, keyboard traversal, resize lifecycle, and transaction highlight.
+`main.ts` coordinates both with the remaining node-page views.
+
+The selected classifier also drives the Buckets view, but Classifications query
+labels and match mode remain independent of Buckets label and region emphasis.
+Classifier lenses partition transactions by complete, partial, or unavailable
+coverage and a lens-specific presentation adapter. Transaction properties uses
+broad script-profile groups;
 its exact labels remain marginal and transaction-level. Smaller generic lenses
 retain exact observed label-set buckets. Every transaction belongs to exactly
 one terrain region.
@@ -204,8 +305,9 @@ classification-first order: composition (one bar per catalog lens), fee
 structure (a spectrum stacked by the selected classifier's buckets), ancestor
 fee rate (delta-adjusted ancestor fees over ancestor virtual size), shape (a
 joint fee-rate-by-size density heatmap with marginals), age (a bucket-by-age
-mosaic), data carriage (OP_RETURN carried bytes by data-protocols bucket),
-complexity (an input-count by output-count density), entanglement (banded
+mosaic), data carriage (conservatively recognized carried bytes by
+data-carriage-shape bucket), complexity (an input-count by output-count density),
+entanglement (banded
 unconfirmed ancestor and descendant counts with the source-reported
 replaceability share), and total output value (the sum of every output,
 including change, by the selected classifier's buckets). Panels that need structure facts state
@@ -221,8 +323,37 @@ banner above the explore controls names the retained observation's age and poll
 failure when a source is stale and reuses the paused-classification summary when
 assessments are missing.
 
+Every aggregate region participates in one section-local inspection surface.
+Composition and mosaic regions expose their exact count, virtual size, and
+share, while each spectrum or density chart remains one keyboard tab stop with
+arrow-key bin traversal. Pointer movement hit-tests the existing SVG or Canvas
+raster; clicking a plotted region pins its inspector until it is cleared or the
+view owner changes. Inspection is presentation-only: it does not rebuild an
+aggregate model, rescan transactions, alter filters, or add per-bin DOM nodes.
+On desktop, a persisted presentation control lets the user keep the responsive
+grid or explicitly arrange the nine panels in one, two, or three columns. The
+single-column layout gives every chart the full content width. Narrow viewports
+always retain one readable column regardless of the stored desktop preference.
+The node distribution view delegates this presentation-only preference to
+`snapshot-distribution-layout-control.ts`.
+Axes derive positions from their raw logarithmic domains and preserve exact bin
+bounds in the inspector. Joint densities visibly name both domains, and every
+spectrum pairs its named logarithmic domain with a linear vertical scale for
+the selected count or virtual-size metric. Data-carriage reference ticks mark
+historical OP_RETURN sizes and exact carrier-fingerprint sizes through the
+512 KiB axis maximum. The recognized-carriage fact is a lower bound over
+positive fingerprints, not an estimate of all hidden payload.
+
+The staged structure body packs only the recognized non-OP_RETURN delta. The
+browser adds it to the existing OP_RETURN column when materializing a
+transaction. This keeps the public fact explicit while making the usual zero
+delta nearly free under gzip.
+
 The node and comparison distribution sections each own their complete DOM,
 cache, resize, rendering, and reset lifecycle behind a small view interface.
+When a new model commits, each view synchronously retires the previous density
+canvas and its inspection metadata before scheduling the replacement paint, so
+old cells cannot remain visible or interactive beside new panel content.
 The page entry points retain source loading, URL state, and coordination between
 views rather than accumulating panel-specific implementation.
 
@@ -231,33 +362,108 @@ Compatible, indeterminate, and unavailable assessments remain distinct.
 Complete violations are grouped by their exact set of violated rules, while
 partial violations retain separate proven-plus-unresolved sets. Rule controls
 are marginal filters and the full seven-rule evidence remains available only in
-this presentation. Fee rate by age remains a secondary view.
+this presentation. The cooperative classifier pass also builds compact row
+indexes for all seven marginal rule populations. The terrain keeps one logical
+glyph per transaction for hit testing, but retains its geometry, source row,
+virtual size, and region membership in typed columns rather than nested glyph
+objects. A glyph object is materialized only at an interaction boundary. Cold
+BIP-110 grouping, layout, typed-column packing, and initial raster construction
+run in cancellable bounded slices, while two bounded per-layout canvas rasters
+let later rule changes compose dim and highlighted regions without replaying
+every glyph. Changing the layout size, metric, or selection kind replaces that
+raster pair. Selecting a transaction does not replace the active label, rule,
+or bucket emphasis. It repaints the existing composition with one local glow,
+while explicit region and filter controls remain the only interactions that
+restyle the wider terrain. Marginal-label inspectors read count, virtual size,
+and share directly from the compact row index, so selecting a dominant label
+does not sort or materialize its transaction population. Fee rate by age
+remains a secondary view.
 
 The comparison page fetches two independent snapshots and merge-joins their
 sorted `txid` arrays in the browser. It derives present-in-both and two
-observed-only regions without creating a server-side comparison object. One
-policy projection pass builds source-local aggregate rows, including separate
-left and right policy views for transactions common to both snapshots. Exact
-and partial violation signatures remain separate, marginal rule counts may
-overlap, and filter samples retain at most twelve deterministic entries.
-Repeated filter selections reuse the aggregate and bounded sample. Mirrored
-source-local distribution panels render each side's complete snapshot on
-shared fixed axes
-using the same browser-derived builders as the node viewer across all nine
-questions; the two populations are summarized independently and never merged.
-A population scope selector restricts every mirrored panel to the whole
-snapshot, the transactions present in both snapshots, or the transactions
-observed in only one source, using the same merge-join regions as the
-membership canvas; a side with no members in the selected population says so
+observed-only regions without creating a server-side comparison object. While
+visiting the common rows, the packed comparison also records one byte of
+overlapping source-difference flags per txid. Those flags cover a different
+`wtxid`, different source-reported ancestor virtual size or delta-adjusted fee,
+and different effective replaceability. The pass reads packed columns directly
+and does not materialize the common population. The browser shows exact
+aggregate counts, outlines affected common cells, and explains the two
+source-local values in selected transaction detail.
+
+A difference between the reported tips promotes the comparison status and
+timing panel to an amber warning. At equal height it names the chain divergence
+directly; at different heights it preserves lag as an alternative explanation.
+The shared region then describes cross-tip observation without predicting
+confirmation. Source-difference flags likewise describe observations and do
+not infer why either node holds a transaction. Once both classification
+lifecycles are terminal, the same panel offers an explicit conflicting-spend
+analysis. Same-tip comparisons make zero conflict-fact requests. Different-tip
+analysis cooperatively merge-joins the two fingerprint indexes, excludes the
+same transaction ID, bounds candidate expansion, and fetches exact outpoints
+only for candidate pairs. It reports covered rows on both sources and keeps the
+live comparison usable if loading, verification, or supersession fails. A
+verified shared outpoint remains an observation, not a claim about replacement,
+double-spend intent, chain-specific coin separation, rejection, or safety.
+Transaction detail exposes source-local base fee, virtual size, and base fee
+rate so differing witness variants quantify their actual size and fee-rate
+effect. Atlas applies the same BIP-110 evaluator to both source-local fact sets;
+the UI never presents those results as verdicts reported by either node. One
+policy projection pass builds per-node aggregate rows, including separate left
+and right policy views for transactions common to both snapshots. Exact and
+partial violation signatures remain separate, marginal rule counts may
+overlap, and repeated filter selections reuse aggregate-only totals. The
+prominent policy-focus toolbar owns those filters and makes their relationship
+to the focused counts and highlighted overlap-map population explicit. An
+explicit policy-focus change repaints the selected region, while selecting a
+transaction reuses that focused base and adds only a local highlight. The
+policy focus remains separate from the node-by-node distribution scope
+selector. Mirrored distribution panels render each node's complete snapshot on
+shared fixed axes using the same browser-derived builders as the node viewer
+across all nine questions; the two populations are summarized independently
+and never merged.
+Panel-local controls select one classifier lens, the Count or vsize metric, and
+the population used by every mirrored chart. Selecting an exact composition
+segment changes that local lens and bucket, regrouping both sources without
+changing the primary membership region or policy focus. The population scope
+restricts every mirrored panel to the whole snapshot, the transactions present
+in both snapshots, or the transactions observed in only one source, using the
+same merge-join regions as the membership canvas. Each semantic combination of
+source pair, lens, metric, and population has its own aggregate cache variant.
+Each complete comparison candidate prepares the common scope and adopts only
+its aggregate arrays into the candidate-owned cache; the smaller source-only
+scopes remain lazy. A side with no members in the selected population says so
 rather than showing an empty chart as data.
 
+The membership regions and primary comparison workspace precede the secondary
+distribution and policy panels in document order. Stable source-card,
+snapshot-timing, transaction-lookup, workspace, and panel geometry prevents
+later derivation from displacing the interactive comparison as those sections
+populate. Snapshot timing remains in the source-pair panel. A separate
+transaction panel groups txid lookup with the three merge-join membership
+regions, so search and population selection share one explicit interaction
+boundary beneath the context that defines the two observations.
+
+The node page follows the same control hierarchy: its source selector, current
+source facts, and txid lookup occupy one source panel below the product header.
+Snapshot metadata is therefore part of the active node workspace rather than
+the global header, while the underlying discovery and publication lifecycle
+remains unchanged.
+
 Both products keep source, classifier or policy selection, and optional
-transaction state in the URL. Snapshot and detail requests use generation
-guards so obsolete responses cannot replace a newer source or pair selection.
+transaction state in the URL. The node URL also keeps the selected
+Classifications label set and match mode. Repeated `label` parameters are
+normalized against the selected catalog descriptor, and `match=all` is emitted
+only when applicable. Snapshot and detail requests use generation guards so
+obsolete responses cannot replace a newer source or pair selection.
 On the comparison page, changing only the selected transaction reuses the
-current population view. Repeating the same interactive selection is a true
-no-op, while a refreshed snapshot pair still reapplies state and reloads detail
-against the new comparison identity.
+current population view. Keyboard movement commits each cursor position as the
+current transaction, keeping the navigator, URL, detail, and canvas highlight
+coherent while repainting only the active cell. Repeating the same interactive
+selection is a true no-op, while a refreshed snapshot pair still reapplies
+state and reloads detail against the new comparison identity. Node-state and
+comparison-canvas coherence checks permit at most four candidate preparation
+attempts; if live input or geometry keeps changing, the current committed
+publication remains active instead of allowing an unbounded derivation loop.
 
 ## Network and credential boundary
 

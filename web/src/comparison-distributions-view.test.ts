@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createComparisonDistributionsView,
@@ -30,6 +30,20 @@ const transaction = (
     ancestor_vsize: 100 + value,
     ancestor_fee_sats: 200 + value,
     descendant_vsize: 100 + value,
+    bip110: {
+      status: "compatible",
+      primary_rule: null,
+      violated_rules: [],
+      unknown_rules: [],
+    },
+    structure: {
+      input_count: value,
+      output_count: value + 1,
+      op_return_bytes: 0,
+      recognized_carried_bytes: 0,
+      output_sats: value * 10_000,
+      witness_bytes: value * 10,
+    },
   });
 
 const comparison = compareCurrentSnapshots(
@@ -110,7 +124,7 @@ const comparisonDistributionMarkup = (): string => {
     .flatMap(([title, container]) =>
       (["left", "right"] as const).map(
         (side) =>
-          `<h3 id="dist-${title}-${side}-title"></h3><div id="${container}-${side}"></div>`,
+          `<h3 id="dist-${title}-${side}-title"></h3><p id="dist-${title}-${side}-note"></p><div id="${container}-${side}"></div>`,
       ),
     )
     .join("");
@@ -118,12 +132,16 @@ const comparisonDistributionMarkup = (): string => {
     .flatMap((panel) =>
       (["left", "right"] as const).map(
         (side) =>
-          `<h3 id="dist-${panel}-${side}-title"></h3><div id="${panel}-${side}"><canvas id="${panel}-${side}-canvas"></canvas></div>`,
+          `<h3 id="dist-${panel}-${side}-title"></h3><p id="dist-${panel}-${side}-note"></p><div id="${panel}-${side}-y-axis"></div><div id="${panel}-${side}"><canvas id="${panel}-${side}-canvas"></canvas></div>`,
       ),
     )
     .join("");
   return `
     <section id="comparison-distributions" hidden>
+      <div class="comparison-distributions-heading"><div><h2>Snapshot distributions</h2><p id="comparison-distribution-summary"></p></div></div>
+      <select id="dist-classifier"></select>
+      <button id="dist-metric-count" aria-pressed="false"></button>
+      <button id="dist-metric-vsize" aria-pressed="true"></button>
       <button id="dist-scope-all" aria-pressed="true"></button>
       <button id="dist-scope-common" aria-pressed="false"></button>
       <button id="dist-scope-left" aria-pressed="false"></button>
@@ -149,7 +167,7 @@ describe("createComparisonDistributionsView", () => {
     harness.cleanup();
   });
 
-  it("owns descendant lookup, axes, rendering, and density scheduling", () => {
+  it("owns descendant lookup, axes, rendering, and density scheduling", async () => {
     const root = document.querySelector<HTMLElement>(
       "section#comparison-distributions",
     );
@@ -162,8 +180,10 @@ describe("createComparisonDistributionsView", () => {
     expect(root!.querySelectorAll("#complexity-left .panel-axis")).toHaveLength(
       1,
     );
-
-    view.render(comparison);
+    expect(
+      root!.querySelector("#complexity-left .panel-axis-title")?.textContent,
+    ).toBe("Inputs");
+    await view.render(comparison);
 
     expect(root!.hidden).toBe(false);
     expect(root!.querySelector("#dist-comp-left-title")?.textContent).toContain(
@@ -173,21 +193,91 @@ describe("createComparisonDistributionsView", () => {
       "outside sentinel",
     );
     expect(root!.querySelector("#spectrum-left svg")).not.toBeNull();
+    expect(
+      root!.querySelector("#value-left .panel-axis-title")?.textContent,
+    ).toBe("Total output value");
+    expect(
+      root!.querySelector("#value-left .spectrum-y-axis-title")?.textContent,
+    ).toBe("Virtual size");
+    expect(
+      root!.querySelectorAll(
+        "#composition-left .composition-segment[tabindex]",
+      ),
+    ).toHaveLength(0);
+    const passiveTrack = root!.querySelector<HTMLElement>(
+      "#entanglement-left .composition-track[tabindex='0']",
+    );
+    expect(passiveTrack).not.toBeNull();
+    expect(
+      root!.querySelectorAll("#mosaic-left .mosaic-column[tabindex]"),
+    ).toHaveLength(0);
+    expect(
+      root!
+        .querySelector("#mosaic-left .mosaic-board")
+        ?.getAttribute("tabindex"),
+    ).toBe("0");
     expect(harness.pendingAnimationFrames()).toBe(1);
     harness.resizeObservers[0]?.trigger();
     expect(harness.pendingAnimationFrames()).toBe(1);
-    harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    expect(
+      root!.querySelector("#complexity-left-y-axis .joint-y-axis-title")
+        ?.textContent,
+    ).toBe("Outputs");
     expect(harness.canvasContext.setTransform).toHaveBeenCalled();
+    expect(
+      root!.querySelector("#joint-left-canvas")?.getAttribute("aria-pressed"),
+    ).toBe("false");
   });
 
-  it("rerenders source-local empty state when a one-sided scope is selected", () => {
+  it("keeps lens and metric controls local to the distribution view", async () => {
     const root = document.querySelector<HTMLElement>(
       "section#comparison-distributions",
     )!;
     const view = createComparisonDistributionsView(root);
-    view.render(comparison);
+    await view.render(comparison);
+
+    const lens = root.querySelector<HTMLSelectElement>("#dist-classifier")!;
+    expect(lens.value).toBe("knots_bip110");
+    expect(lens.disabled).toBe(true);
+    expect(
+      root.querySelector("#dist-metric-vsize")?.getAttribute("aria-pressed"),
+    ).toBe("true");
+
+    root.querySelector<HTMLButtonElement>("#dist-metric-count")?.click();
+
+    await vi.waitFor(() => {
+      expect(
+        root.querySelector("#dist-metric-count")?.getAttribute("aria-pressed"),
+      ).toBe("true");
+      expect(
+        root.querySelector("#value-left .spectrum-y-axis-title")?.textContent,
+      ).toBe("Transaction count");
+    });
+    expect(
+      root.querySelector("#dist-spectrum-left-note")?.textContent,
+    ).toContain("transaction count");
+    expect(
+      root.querySelector("#comparison-distribution-summary")?.textContent,
+    ).toContain("weighted by transaction count");
+  });
+
+  it("rerenders source-local empty state when a one-sided scope is selected", async () => {
+    const root = document.querySelector<HTMLElement>(
+      "section#comparison-distributions",
+    )!;
+    const view = createComparisonDistributionsView(root);
+    await view.render(comparison);
 
     root.querySelector<HTMLButtonElement>("#dist-scope-left")?.click();
+
+    await vi.waitFor(() => {
+      expect(
+        root.querySelector("#spectrum-right .empty-state")?.textContent,
+      ).toBe("This population has no members on this source.");
+    });
 
     expect(
       root.querySelector("#dist-scope-left")?.getAttribute("aria-pressed"),
@@ -204,18 +294,88 @@ describe("createComparisonDistributionsView", () => {
     ).toBe("This population has no members on this source.");
   });
 
-  it("replaces a nonempty owner with empty aggregates and resets its lifecycle", () => {
+  it("prepares a replacement off-view and synchronously commits only its exact identity and scope", async () => {
     const root = document.querySelector<HTMLElement>(
       "section#comparison-distributions",
     )!;
     const view = createComparisonDistributionsView(root);
-    view.render(comparison);
+    await view.render(comparison);
+    for (let frame = 0; frame < 6; frame += 1) {
+      await harness.flushAnimationFrames();
+    }
+    const activeSpectrum = root.querySelector("#spectrum-left svg");
+    const activeDensity =
+      root.querySelector<HTMLCanvasElement>("#joint-left-canvas")!;
+    expect(activeDensity.getAttribute("role")).toBe("button");
+    const candidate = compareCurrentSnapshots(
+      loadedSource("candidate-a", [transaction(50)]),
+      loadedSource("candidate-b", [transaction(50)]),
+    );
+
+    const prepared = await view.prepare(candidate);
+
+    expect(prepared.prefetchedModels.common).toBeDefined();
+    expect(prepared.prefetchedModels.common?.left.totals.population.count).toBe(
+      1,
+    );
+    expect(
+      prepared.prefetchedModels.common?.right.totals.population.count,
+    ).toBe(1);
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector("#spectrum-left svg")).toBe(activeSpectrum);
+    expect(activeDensity.getAttribute("role")).toBe("button");
+    expect(root.querySelector("#dist-comp-left-title")?.textContent).toContain(
+      "CORE node",
+    );
+    expect(view.canCommit(prepared, candidate)).toBe(true);
+    expect(view.canCommit(prepared, { ...candidate })).toBe(false);
+    expect(view.commit(prepared, { ...candidate })).toBe(false);
+
+    root.querySelector<HTMLButtonElement>("#dist-scope-left")?.click();
+    expect(view.canCommit(prepared, candidate)).toBe(false);
+    expect(view.commit(prepared, candidate)).toBe(false);
+    await vi.waitFor(() => {
+      expect(root.getAttribute("aria-busy")).toBe("false");
+    });
+    root.querySelector<HTMLButtonElement>("#dist-scope-all")?.click();
+    await vi.waitFor(() => {
+      expect(root.getAttribute("aria-busy")).toBe("false");
+    });
+
+    expect(view.commit(prepared, candidate)).toBe(true);
+    expect(activeDensity.getAttribute("role")).toBeNull();
+    expect(activeDensity.getAttribute("aria-hidden")).toBe("true");
+    expect(activeDensity.dataset.distributionInspectionKey).toBeUndefined();
+    expect(root.querySelector("#dist-comp-left-title")?.textContent).toContain(
+      "CANDIDATE-A node",
+    );
+    expect(root.querySelector("#spectrum-left svg")).not.toBe(activeSpectrum);
+    await harness.flushAnimationFrames();
+    await harness.flushAnimationFrames();
+    expect(activeDensity.getAttribute("role")).toBe("button");
+    expect(activeDensity.hasAttribute("aria-hidden")).toBe(false);
+
+    root.querySelector<HTMLButtonElement>("#dist-scope-common")?.click();
+    await vi.waitFor(() => {
+      expect(root.getAttribute("aria-busy")).toBe("false");
+      expect(
+        root.querySelector("#dist-comp-left-title")?.textContent,
+      ).toContain("present in both");
+    });
+  });
+
+  it("replaces a nonempty owner with empty aggregates and resets its lifecycle", async () => {
+    const root = document.querySelector<HTMLElement>(
+      "section#comparison-distributions",
+    )!;
+    const view = createComparisonDistributionsView(root);
+    await view.render(comparison);
     const emptyComparison = compareCurrentSnapshots(
       loadedSource("core", []),
       loadedSource("knots", []),
     );
 
-    view.render(emptyComparison);
+    await view.render(emptyComparison);
 
     expect(root.querySelector("#spectrum-left svg")).toBeNull();
     expect(root.querySelector("#spectrum-left .empty-state")).not.toBeNull();
@@ -229,6 +389,70 @@ describe("createComparisonDistributionsView", () => {
       root.querySelector("#dist-scope-all")?.getAttribute("aria-pressed"),
     ).toBe("true");
     expect(harness.pendingAnimationFrames()).toBe(0);
-    expect(harness.cancelledAnimationFrames).toHaveLength(1);
+    expect(harness.cancelledAnimationFrames).toHaveLength(2);
+  });
+
+  it("keeps only the latest scope when cooperative derivations overlap", async () => {
+    const root = document.querySelector<HTMLElement>(
+      "section#comparison-distributions",
+    )!;
+    const view = createComparisonDistributionsView(root);
+    const transactions = Array.from({ length: 900 }, (_, index) =>
+      transaction(index + 10_000),
+    );
+    const largeComparison = compareCurrentSnapshots(
+      loadedSource("core", transactions),
+      loadedSource("knots", transactions),
+    );
+
+    const obsolete = view.render(largeComparison);
+    root.querySelector<HTMLButtonElement>("#dist-scope-left")?.click();
+    await obsolete;
+
+    await vi.waitFor(() => {
+      expect(
+        root.querySelector("#dist-spectrum-right-title")?.textContent,
+      ).toContain("only in Source A");
+      expect(
+        root.querySelector("#spectrum-right .empty-state")?.textContent,
+      ).toBe("This population has no members on this source.");
+    });
+    expect(root.querySelector("#spectrum-right svg")).toBeNull();
+  });
+
+  it("aborts obsolete owners and reset work without stale DOM or density frames", async () => {
+    const root = document.querySelector<HTMLElement>(
+      "section#comparison-distributions",
+    )!;
+    const view = createComparisonDistributionsView(root);
+    const transactions = Array.from({ length: 900 }, (_, index) =>
+      transaction(index + 20_000),
+    );
+    const largeComparison = compareCurrentSnapshots(
+      loadedSource("core", transactions),
+      loadedSource("knots", transactions),
+    );
+    const emptyComparison = compareCurrentSnapshots(
+      loadedSource("core", []),
+      loadedSource("knots", []),
+    );
+
+    const obsoleteOwner = view.render(largeComparison);
+    const currentOwner = view.render(emptyComparison);
+    await Promise.all([obsoleteOwner, currentOwner]);
+
+    expect(root.querySelector("#spectrum-left svg")).toBeNull();
+    expect(root.querySelector("#spectrum-left .empty-state")).not.toBeNull();
+    expect(harness.pendingAnimationFrames()).toBe(1);
+
+    await harness.flushAnimationFrames();
+    const obsoleteReset = view.render(largeComparison);
+    view.reset();
+    await obsoleteReset;
+
+    expect(root.hidden).toBe(true);
+    expect(root.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector("#spectrum-left")?.childElementCount).toBe(0);
+    expect(harness.pendingAnimationFrames()).toBe(0);
   });
 });

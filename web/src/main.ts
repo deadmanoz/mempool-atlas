@@ -1,16 +1,17 @@
 import {
   AtlasRequestError,
   fetchSources,
-  fetchSourceSnapshot,
+  fetchSourcePublication,
   fetchTransactionDetail,
   transactionDetailMatchesSnapshot,
 } from "./api";
 import { installAnalytics } from "./analytics";
 import {
   DEFAULT_FILTERS,
-  filterTransactions,
+  filterTransactionsCooperatively,
   type MempoolFilters,
 } from "./filters";
+import * as firstPublication from "./first-publication-failure";
 import {
   classificationPresentation,
   transactionDetailFailurePresentation,
@@ -19,17 +20,23 @@ import {
 import { RequestLifecycle } from "./comparison-lifecycle";
 import {
   DEFAULT_CLASSIFIER_ID,
-  classificationPopulation,
   classificationResult,
   classifierDescriptor,
   classifierSummary,
-  firstPopulatedLabel,
 } from "./classification-view";
+import { createClassificationOverviewView } from "./classification-overview-view";
+import { createClassificationQueryView } from "./classification-query-view";
 import {
   bucketTerrainRegionCanShowLabel,
   hitTestBucketTerrain,
-  renderBucketTerrain,
+  paintBucketTerrainCanvasSelection,
+  renderBucketTerrainCooperatively,
+  type BucketTerrainLayout,
 } from "./bucket-terrain";
+import {
+  bip110RulePopulation,
+  bip110RulePopulationSummary,
+} from "./bip110-rule-index";
 import {
   KNOTS_BIP110_CLASSIFIER_ID,
   classifierBucketColor,
@@ -38,30 +45,38 @@ import {
   classifierBucketForTransaction,
   classifierBucketIsSummary,
   classifierBucketLabel,
+  classifierLabelPopulationSummary,
+  classifierLabelRowMembership,
   classifierBucketPopulation,
+  classifierTerrainPaint,
   classifierTerrainGroups,
-  classifierTerrainTotals,
   classifierUsesSummaryBuckets,
+  type ClassifierLabelMatchMode,
   type ClassifierBucketKey,
   type ClassifierTerrainLayout,
 } from "./classifier-terrain";
-import { formatMembershipAge } from "./membership-table";
-import { renderSwimView } from "./swim-view";
-import {
-  countFormat,
-  decimalFormat,
-  formatVsize,
-  percentageFormat,
-} from "./format";
-import { honestyBanner } from "./honesty";
+import { classifierEvidencePairs } from "./classifier-evidence";
+import { renderSwimViewCooperatively } from "./swim-view";
+import { setMembershipControlsComplete } from "./membership-controls";
+import { countFormat, formatVsize, percentageFormat } from "./format";
 import { createSnapshotDistributionsView } from "./snapshot-distributions-view";
+import {
+  chooseInitialNodeRule,
+  prepareNodePublicationCommit,
+} from "./node-publication-candidate";
+import { renderPrimaryNodePublication } from "./node-primary-publication";
+import { recordAtlasCandidateCommitted } from "./candidate-ready";
+import {
+  createNodeSourceSummaryView,
+  setAtlasLoadPhase,
+} from "./source-summary-view";
 import { transactionFactPairs } from "./transaction-facts";
+import { createTransactionDetailValue as detailValue } from "./transaction-explorer";
+import { createTerrainSummaryView } from "./terrain-summary-view";
+import { TerrainSelectionView } from "./terrain-selection-view";
 import {
   TERRAIN_RULES,
-  classificationTotals,
   hitTestTerrain,
-  rulePopulation,
-  renderTerrain,
   signatureLabel,
   signaturePopulation,
   statusPopulation,
@@ -81,17 +96,19 @@ import {
   serializeNodeViewState,
   type NodeViewState,
 } from "./view-state";
-import "./styles.css";
+import { findSnapshotTransaction, snapshotIsComplete } from "./packed-store";
+import { markAtlasReadiness, markAtlasReadinessAfterPaint } from "./readiness";
+import { startPolicyTerrainRender } from "./policy-terrain-render";
+import "./distribution-styles.css";
 import type {
   Bip110Assessment,
-  ClassificationResult,
   ClassificationProgress,
   ClassifierDescriptor,
   MempoolSnapshot,
   MempoolTransaction,
   RuleId,
   RuleAssessment,
-  SourceSnapshotResponse,
+  LoadedSourcePublication,
   SourceSummary,
   TransactionDetailResponse,
 } from "./types";
@@ -107,6 +124,7 @@ const requiredElement = <T extends HTMLElement>(id: string): T => {
 };
 
 const pageStatus = requiredElement<HTMLElement>("page-status");
+const sourceSummaryView = createNodeSourceSummaryView();
 const atlasVersion = requiredElement<HTMLElement>("atlas-version");
 const statusTitle = requiredElement<HTMLElement>("status-title");
 const statusDetail = requiredElement<HTMLElement>("status-detail");
@@ -121,12 +139,6 @@ const transactionSearchInput = requiredElement<HTMLInputElement>(
 const transactionSearchStatus = requiredElement<HTMLElement>(
   "transaction-search-status",
 );
-const sourceLabel = requiredElement<HTMLElement>("source-label");
-const sourceId = requiredElement<HTMLElement>("source-id");
-const observedValue = requiredElement<HTMLElement>("observed-value");
-const tipValue = requiredElement<HTMLElement>("tip-value");
-const transactionCount = requiredElement<HTMLElement>("transaction-count");
-const totalVsize = requiredElement<HTMLElement>("total-vsize");
 const overviewTab = requiredElement<HTMLButtonElement>("overview-tab");
 const terrainTab = requiredElement<HTMLButtonElement>("terrain-tab");
 const feeAgeTab = requiredElement<HTMLButtonElement>("fee-age-tab");
@@ -142,11 +154,56 @@ const classificationMethod = requiredElement<HTMLElement>(
 const classificationEmpty = requiredElement<HTMLElement>(
   "classification-empty",
 );
+const classificationQueryControls = requiredElement<HTMLElement>(
+  "classification-query-controls",
+);
 const classificationLabels = requiredElement<HTMLElement>(
   "classification-labels",
 );
 const classificationSummary = requiredElement<HTMLElement>(
   "classification-summary",
+);
+const classificationSelectionSummary = requiredElement<HTMLElement>(
+  "classification-selection-summary",
+);
+const classificationMatchAny = requiredElement<HTMLButtonElement>(
+  "classification-match-any",
+);
+const classificationMatchAll = requiredElement<HTMLButtonElement>(
+  "classification-match-all",
+);
+const classificationClear = requiredElement<HTMLButtonElement>(
+  "classification-clear",
+);
+const classificationQueryRoot = requiredElement<HTMLElement>(
+  "classification-query",
+);
+const classificationQueryStage = requiredElement<HTMLElement>(
+  "classification-query-stage",
+);
+const classificationQueryCanvas = requiredElement<HTMLCanvasElement>(
+  "classification-query-canvas",
+);
+const classificationQuerySelection = requiredElement<HTMLElement>(
+  "classification-query-selection",
+);
+const classificationQueryRegions = requiredElement<HTMLElement>(
+  "classification-query-regions",
+);
+const classificationQuerySummary = requiredElement<HTMLElement>(
+  "classification-query-summary",
+);
+const classificationQueryEmpty = requiredElement<HTMLElement>(
+  "classification-query-empty",
+);
+const classificationQueryHint = requiredElement<HTMLElement>(
+  "classification-query-hint",
+);
+const classificationQueryActiveOption = requiredElement<HTMLElement>(
+  "classification-query-active-option",
+);
+const classificationQueryNavigationStatus = requiredElement<HTMLElement>(
+  "classification-query-navigation-status",
 );
 const coverageComplete = requiredElement<HTMLElement>("coverage-complete");
 const coverageIncomplete = requiredElement<HTMLElement>("coverage-incomplete");
@@ -165,34 +222,16 @@ const classificationState = requiredElement<HTMLElement>(
 const classificationProgress = requiredElement<HTMLElement>(
   "classification-progress",
 );
-const terrainEyebrow = requiredElement<HTMLElement>("terrain-eyebrow");
-const terrainTitle = requiredElement<HTMLElement>("terrain-title");
-const terrainTotalA = requiredElement<HTMLElement>("terrain-total-a");
-const terrainTotalALabel = requiredElement<HTMLElement>(
-  "terrain-total-a-label",
-);
-const terrainTotalACount = requiredElement<HTMLElement>(
-  "terrain-total-a-count",
-);
-const terrainTotalB = requiredElement<HTMLElement>("terrain-total-b");
-const terrainTotalBLabel = requiredElement<HTMLElement>(
-  "terrain-total-b-label",
-);
-const terrainTotalBCount = requiredElement<HTMLElement>(
-  "terrain-total-b-count",
-);
-const terrainTotalC = requiredElement<HTMLElement>("terrain-total-c");
-const terrainTotalCLabel = requiredElement<HTMLElement>(
-  "terrain-total-c-label",
-);
-const terrainTotalCCount = requiredElement<HTMLElement>(
-  "terrain-total-c-count",
-);
+const terrainSummaryView = createTerrainSummaryView();
 const terrainStage = requiredElement<HTMLElement>("terrain-stage");
 const terrainCanvas = requiredElement<HTMLCanvasElement>("terrain-canvas");
+const terrainSelection = requiredElement<HTMLElement>("terrain-selection");
+const terrainSelectionView = new TerrainSelectionView(
+  terrainCanvas,
+  terrainSelection,
+);
 const terrainRegions = requiredElement<HTMLElement>("terrain-regions");
 const terrainEmpty = requiredElement<HTMLElement>("terrain-empty");
-const terrainSummary = requiredElement<HTMLElement>("terrain-summary");
 const modeCount = requiredElement<HTMLButtonElement>("mode-count");
 const modeVsize = requiredElement<HTMLButtonElement>("mode-vsize");
 const inspectorEyebrow = requiredElement<HTMLElement>("inspector-eyebrow");
@@ -207,20 +246,11 @@ const ruleVsize = requiredElement<HTMLElement>("rule-vsize");
 const ruleShare = requiredElement<HTMLElement>("rule-share");
 const ruleList = requiredElement<HTMLElement>("rule-list");
 const ruleOverlapNote = requiredElement<HTMLElement>("rule-overlap-note");
-const sampleSummary = requiredElement<HTMLElement>("sample-summary");
-const transactionDisclosure = requiredElement<HTMLDetailsElement>(
-  "transaction-disclosure",
-);
-const sampleClassificationHeading = requiredElement<HTMLElement>(
-  "sample-classification-heading",
-);
-const ruleTransactions =
-  requiredElement<HTMLTableSectionElement>("rule-transactions");
+const inspectorFilters = requiredElement<HTMLElement>("inspector-filters");
+const inspectorOutcome = requiredElement<HTMLElement>("inspector-outcome");
 const detailStatus = requiredElement<HTMLElement>("detail-status");
 const detailTransaction = requiredElement<HTMLElement>("detail-transaction");
-const detailClassifiers = requiredElement<HTMLElement>("detail-classifiers");
 const detailRules = requiredElement<HTMLOListElement>("detail-rules");
-const filtersForm = requiredElement<HTMLFormElement>("filters");
 const minimumFeeRate = requiredElement<HTMLInputElement>("minimum-fee-rate");
 const maximumAge = requiredElement<HTMLSelectElement>("maximum-age");
 const minimumVsize = requiredElement<HTMLInputElement>("minimum-vsize");
@@ -230,8 +260,6 @@ const feeAgeStage = requiredElement<HTMLElement>("fee-age-stage");
 const feeAgeCanvas = requiredElement<HTMLCanvasElement>("mempool-canvas");
 const feeAgeEmpty = requiredElement<HTMLElement>("fee-age-empty");
 const visualSummary = requiredElement<HTMLElement>("visual-summary");
-const honestyBannerElement = requiredElement<HTMLElement>("honesty-banner");
-const honestyMessage = requiredElement<HTMLElement>("honesty-message");
 
 type Lens = "overview" | "terrain" | "fee-age";
 type InspectorSelection = TerrainSelection;
@@ -242,11 +270,18 @@ const snapshotLifecycle = new RequestLifecycle();
 let configuredSources: SourceSummary[] = [];
 let selectedSourceId: string | null = null;
 let currentSnapshot: MempoolSnapshot | null = null;
+let currentSnapshotIdentity: string | null = null;
 let currentClassification: ClassificationProgress | null = null;
-let transactionById = new Map<string, MempoolTransaction>();
 let filteredTransactions: MempoolTransaction[] = [];
 let selectedLens: Lens = "overview";
-let selectedClassifierId = DEFAULT_CLASSIFIER_ID;
+let selectedClassifierId =
+  initialViewState.classifier ??
+  (initialViewState.selection === null
+    ? DEFAULT_CLASSIFIER_ID
+    : KNOTS_BIP110_CLASSIFIER_ID);
+let selectedClassifierLabels = [...initialViewState.classifierLabels];
+let classificationMatchMode: ClassifierLabelMatchMode =
+  initialViewState.classifierMatch;
 let selectedClassifierLabel: string | null = null;
 let selectedClassifierBucketKey: ClassifierBucketKey | null = null;
 let selectedInspector: InspectorSelection = {
@@ -254,33 +289,23 @@ let selectedInspector: InspectorSelection = {
   rule: "element_size",
 };
 let terrainMode: TerrainMode = "count";
+let terrainRenderController: AbortController | null = null;
 let policyTerrainLayout: TerrainLayout | null = null;
 let classifierTerrainLayout: ClassifierTerrainLayout | null = null;
 let pendingTerrainFrame: number | null = null;
 let pendingFeeAgeFrame: number | null = null;
+let feeAgeRenderController: AbortController | null = null;
+let filterController: AbortController | null = null;
+let filterInteractionTimeout: number | null = null;
 let detailSequence = 0;
+let detailController: AbortController | null = null;
 let selectedTransactionId: string | null = null;
 let nodeViewState: NodeViewState = initialViewState;
 
-const formatPollInterval = (seconds: number): string => {
-  if (seconds % 3_600 === 0) {
-    const hours = seconds / 3_600;
-    return `${countFormat.format(hours)} hour${hours === 1 ? "" : "s"}`;
-  }
-  if (seconds % 60 === 0) {
-    const minutes = seconds / 60;
-    return `${countFormat.format(minutes)} minute${minutes === 1 ? "" : "s"}`;
-  }
-  return `${countFormat.format(seconds)} second${seconds === 1 ? "" : "s"}`;
-};
-
-const formatSnapshotFreshness = (observedAtMs: number): string => {
-  const ageMs = Math.max(0, Date.now() - observedAtMs);
-  if (ageMs < 60_000) {
-    return "just now";
-  }
-  return `${formatMembershipAge(ageMs)} ago`;
-};
+const currentTransaction = (txid: string): MempoolTransaction | undefined =>
+  currentSnapshot === null
+    ? undefined
+    : findSnapshotTransaction(currentSnapshot, txid);
 
 const renderClassificationLifecycle = (
   progress: ClassificationProgress | null,
@@ -336,8 +361,57 @@ const selectedClassifierIsBip110 = (): boolean =>
   selectedClassifierId === KNOTS_BIP110_CLASSIFIER_ID;
 
 const resetTerrainLayouts = (): void => {
+  terrainRenderController?.abort();
+  terrainRenderController = null;
   policyTerrainLayout = null;
   classifierTerrainLayout = null;
+  terrainSelectionView.reset();
+};
+
+const paintCurrentTerrainSelection = (): boolean => {
+  if (selectedLens === "overview") {
+    return classificationQueryView.paintSelection(selectedTransactionId);
+  }
+  if (selectedClassifierIsBip110()) {
+    return (
+      policyTerrainLayout !== null &&
+      terrainSelectionView.paint(policyTerrainLayout, selectedTransactionId)
+    );
+  }
+  return (
+    classifierTerrainLayout !== null &&
+    terrainSelectionView.paint(classifierTerrainLayout, selectedTransactionId)
+  );
+};
+
+const paintCurrentTerrainSelectionDirect = (): boolean => {
+  if (selectedLens === "overview") {
+    return classificationQueryView.paintSelection(selectedTransactionId);
+  }
+  const layout = selectedClassifierIsBip110()
+    ? policyTerrainLayout
+    : classifierTerrainLayout;
+  return (
+    layout !== null &&
+    paintBucketTerrainCanvasSelection(
+      terrainCanvas,
+      layout,
+      selectedTransactionId,
+    )
+  );
+};
+
+const captureTerrainLayout = <
+  SectionKey extends string,
+  RegionKey extends string,
+  Signature,
+>(
+  layout: BucketTerrainLayout<SectionKey, RegionKey, Signature>,
+): void => {
+  terrainSelectionView.capture(layout);
+  if (selectedTransactionId !== null && !paintCurrentTerrainSelection()) {
+    paintCurrentTerrainSelectionDirect();
+  }
 };
 
 const renderCoverage = (): void => {
@@ -362,107 +436,74 @@ const renderCoverage = (): void => {
   coverageUnclassifiedLabel.textContent = "result unavailable";
 };
 
-const classifierMethodologyText = (
-  descriptor: ClassifierDescriptor,
-): string => {
-  if (descriptor.methodology === "exact") {
-    return "Exact observations";
-  }
-  if (descriptor.methodology === "heuristic") {
-    return "Heuristic signals, not proof of intent";
-  }
-  if (descriptor.methodology === "fingerprint") {
-    return "Byte and script fingerprints, not protocol-state validation";
-  }
-  return "Source-local policy compatibility";
-};
+const classificationOverviewView = createClassificationOverviewView(
+  {
+    lensSelect: classificationLensSelect,
+    method: classificationMethod,
+    empty: classificationEmpty,
+    labels: classificationLabels,
+    summary: classificationSummary,
+    selectedSummary: classificationSelectionSummary,
+    matchAny: classificationMatchAny,
+    matchAll: classificationMatchAll,
+    clear: classificationClear,
+  },
+  (label) => toggleClassificationQueryLabel(label),
+  (mode) => setClassificationMatchMode(mode),
+  () => clearClassificationQuery(),
+);
+
+const classificationQueryView = createClassificationQueryView(
+  {
+    root: classificationQueryRoot,
+    stage: classificationQueryStage,
+    canvas: classificationQueryCanvas,
+    selectionMarker: classificationQuerySelection,
+    regions: classificationQueryRegions,
+    summary: classificationQuerySummary,
+    empty: classificationQueryEmpty,
+    hint: classificationQueryHint,
+    activeOption: classificationQueryActiveOption,
+    navigationStatus: classificationQueryNavigationStatus,
+  },
+  (transaction) => {
+    void loadTransactionDetail(transaction, { preserveVisualSelection: true });
+  },
+);
 
 const renderClassificationOverview = (): void => {
-  const snapshot = currentSnapshot;
-  if (snapshot === null) {
-    classificationLensSelect.replaceChildren();
-    classificationLabels.replaceChildren();
-    classificationEmpty.hidden = false;
-    classificationMethod.replaceChildren();
-    const waiting = document.createElement("strong");
-    waiting.textContent = "Waiting for classifier catalog";
-    const detail = document.createElement("span");
-    detail.textContent =
-      "Atlas publishes the available lenses with each snapshot.";
-    classificationMethod.append(waiting, detail);
-    classificationSummary.textContent =
-      "Independent classifiers remain separate rather than forming one combined taxonomy.";
-    return;
-  }
-
-  const options = snapshot.classifier_catalog.map((descriptor) => {
-    const option = document.createElement("option");
-    option.value = descriptor.id;
-    option.textContent = descriptor.title;
-    return option;
+  const classificationReady = currentSnapshot !== null;
+  classificationQueryControls.hidden = !classificationReady;
+  classificationQueryRoot.hidden = !classificationReady;
+  const selection = classificationOverviewView.render(currentSnapshot, {
+    classifierId: selectedClassifierId,
+    labels: selectedClassifierLabels,
+    matchMode: classificationMatchMode,
   });
-  classificationLensSelect.replaceChildren(...options);
-  if (
-    !snapshot.classifier_catalog.some(({ id }) => id === selectedClassifierId)
-  ) {
-    selectedClassifierId =
-      snapshot.classifier_catalog[0]?.id ?? DEFAULT_CLASSIFIER_ID;
-  }
-  classificationLensSelect.value = selectedClassifierId;
-
+  selectedClassifierId = selection.classifierId;
+  selectedClassifierLabels = [...selection.labels];
+  classificationMatchMode = selection.matchMode;
+  nodeViewState = {
+    ...nodeViewState,
+    classifier: selectedClassifierId,
+    classifierLabels: selectedClassifierLabels,
+    classifierMatch: classificationMatchMode,
+  };
   const descriptor = currentClassifierDescriptor();
-  const summary = classifierSummary(snapshot, selectedClassifierId);
-  if (descriptor === null || summary === null) {
-    classificationLabels.replaceChildren();
-    classificationEmpty.hidden = false;
-    classificationEmpty.textContent = "This classifier is unavailable.";
+  if (currentSnapshot === null || descriptor === null) {
+    classificationQueryView.reset(
+      "Choose one or more labels after the classifier catalog loads.",
+    );
     return;
   }
-  const selectedIsDeclared = descriptor.labels.some(
-    ({ key }) => key === selectedClassifierLabel,
-  );
-  if (!selectedIsDeclared) {
-    selectedClassifierLabel = firstPopulatedLabel(descriptor, summary);
-  }
-
-  classificationEmpty.hidden = snapshot.transaction_count !== 0;
-  classificationEmpty.textContent = "This snapshot contains an empty mempool.";
-  const methodTitle = document.createElement("strong");
-  methodTitle.textContent = `${classifierMethodologyText(descriptor)} · version ${descriptor.version}`;
-  const methodDetail = document.createElement("span");
-  methodDetail.textContent =
-    descriptor.semantics === "multi_label"
-      ? "Labels can overlap within this lens."
-      : "This lens reports a specialized rule-set outcome.";
-  classificationMethod.replaceChildren(methodTitle, methodDetail);
-
-  const labelButtons = descriptor.labels.map((label) => {
-    const count = summary.label_counts[label.key] ?? 0;
-    const share =
-      snapshot.transaction_count === 0 ? 0 : count / snapshot.transaction_count;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "classification-label";
-    button.dataset.label = label.key;
-    button.setAttribute(
-      "aria-pressed",
-      String(label.key === selectedClassifierLabel),
-    );
-    button.style.setProperty("--label-share", `${share * 100}%`);
-    const heading = document.createElement("span");
-    heading.textContent = label.label;
-    const total = document.createElement("strong");
-    total.textContent = countFormat.format(count);
-    const description = document.createElement("small");
-    description.textContent = label.description;
-    button.append(heading, total, description);
-    button.addEventListener("click", () => {
-      selectClassifierLabel(label.key, false);
-    });
-    return button;
+  classificationQueryView.render({
+    snapshot: currentSnapshot,
+    descriptor,
+    labelKeys: selectedClassifierLabels,
+    matchMode: classificationMatchMode,
+    metric: terrainMode,
+    selectedTxid: selectedTransactionId,
   });
-  classificationLabels.replaceChildren(...labelButtons);
-  classificationSummary.textContent = `${countFormat.format(summary.complete_count)} complete, ${countFormat.format(summary.partial_count)} partial, and ${countFormat.format(summary.unclassified_count)} unavailable results. Marginal label totals may overlap.`;
 };
 
 const inspectorRules = (): RuleId[] => TERRAIN_RULES.map(({ id }) => id);
@@ -511,7 +552,7 @@ const updateCompareLink = (): void => {
 };
 
 const replaceViewUrl = (): void => {
-  const query = serializeNodeViewState(nodeViewState);
+  const query = serializeNodeViewState(nodeViewState, window.location.search);
   const next = `${window.location.pathname}${query.length === 0 ? "" : `?${query}`}${window.location.hash}`;
   window.history.replaceState(null, "", next);
   updateCompareLink();
@@ -532,6 +573,8 @@ const clearDetail = (
   message: string,
   clearAddressedTransaction = true,
 ): void => {
+  detailController?.abort();
+  detailController = null;
   detailSequence += 1;
   selectedTransactionId = null;
   if (clearAddressedTransaction) {
@@ -540,21 +583,9 @@ const clearDetail = (
     setTransactionSearchStatus("Search this snapshot by txid.");
   }
   detailStatus.textContent = message;
-  transactionDisclosure.open = false;
   detailTransaction.replaceChildren();
-  detailClassifiers.replaceChildren();
   detailRules.replaceChildren();
-};
-
-const detailValue = (label: string, value: string): HTMLElement => {
-  const wrapper = document.createElement("div");
-  const term = document.createElement("span");
-  term.textContent = label;
-  const code = document.createElement("code");
-  code.textContent = value;
-  code.title = value;
-  wrapper.append(term, code);
-  return wrapper;
+  paintCurrentTerrainSelection();
 };
 
 const compactJson = (value: unknown[]): string => {
@@ -617,127 +648,13 @@ const firstRejectionText = (
   return status === "indeterminate" ? "Not established" : "Unresolved";
 };
 
-const createRuleChip = (
-  rule: RuleId,
-  state: "violated" | "unknown",
-): HTMLElement => {
-  const chip = document.createElement("span");
-  chip.className = `rule-chip ${state}`;
-  chip.style.setProperty("--rule-color", terrainRule(rule).color);
-  chip.textContent = `R${terrainRule(rule).number}${state === "unknown" ? "?" : ""}`;
-  chip.title = `${terrainRule(rule).label}${state === "unknown" ? " unresolved" : " violated"}`;
-  return chip;
-};
-
-const transactionRuleChips = (transaction: MempoolTransaction): HTMLElement => {
-  const wrapper = document.createElement("span");
-  wrapper.className = "rule-chips";
-  const assessment = transaction.bip110;
-  if (assessment === null) {
-    const empty = document.createElement("span");
-    empty.className = "rule-chip unclassified";
-    empty.textContent = currentUnclassifiedLabel();
-    wrapper.append(empty);
-    return wrapper;
-  }
-  for (const { id } of TERRAIN_RULES) {
-    if (assessment.violated_rules.includes(id)) {
-      wrapper.append(createRuleChip(id, "violated"));
-    }
-    if (assessment.unknown_rules.includes(id)) {
-      wrapper.append(createRuleChip(id, "unknown"));
-    }
-  }
-  if (wrapper.childElementCount === 0) {
-    const empty = document.createElement("span");
-    empty.className = "rule-chip compatible";
-    empty.textContent = "Pass";
-    wrapper.append(empty);
-  }
-  return wrapper;
-};
-
-const transactionClassifierChips = (
-  transaction: MempoolTransaction,
-): HTMLElement => {
-  const wrapper = document.createElement("span");
-  wrapper.className = "classifier-chips";
-  const descriptor = currentClassifierDescriptor();
-  const result = classificationResult(transaction, selectedClassifierId);
-  if (descriptor === null || result === null) {
-    const unavailable = document.createElement("span");
-    unavailable.className = "classifier-chip unavailable";
-    unavailable.textContent = "Unavailable";
-    wrapper.append(unavailable);
-    return wrapper;
-  }
-  for (const label of result.labels) {
-    const chip = document.createElement("span");
-    chip.className = "classifier-chip";
-    chip.textContent =
-      descriptor.labels.find(({ key }) => key === label)?.label ?? label;
-    wrapper.append(chip);
-  }
-  if (result.labels.length === 0) {
-    const empty = document.createElement("span");
-    empty.className = "classifier-chip";
-    empty.textContent = "No labels";
-    wrapper.append(empty);
-  }
-  return wrapper;
-};
-
-const renderClassifierDetails = (
-  results: readonly ClassificationResult[],
-): void => {
-  const catalog = currentSnapshot?.classifier_catalog ?? [];
-  const cards = results.map((result) => {
-    const descriptor = catalog.find(({ id }) => id === result.classifier_id);
-    const card = document.createElement("article");
-    card.className = "detail-classifier";
-    card.dataset.state = result.state;
-    const heading = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = descriptor?.title ?? result.classifier_id;
-    const state = document.createElement("span");
-    state.textContent = result.state;
-    heading.append(title, state);
-    const labels = document.createElement("p");
-    labels.textContent = result.labels
-      .map(
-        (key) =>
-          descriptor?.labels.find((label) => label.key === key)?.label ?? key,
-      )
-      .join(" · ");
-    card.append(heading, labels);
-    if (result.missing_facts.length > 0) {
-      const missing = document.createElement("small");
-      missing.textContent = `Missing facts: ${result.missing_facts.join(", ")}`;
-      card.append(missing);
-    }
-    if (result.evidence !== null) {
-      const evidence = document.createElement("details");
-      const summary = document.createElement("summary");
-      summary.textContent = "Evidence";
-      const encoded = document.createElement("code");
-      const value = JSON.stringify(result.evidence);
-      encoded.textContent =
-        value.length > 800 ? `${value.slice(0, 797)}…` : value;
-      evidence.append(summary, encoded);
-      card.append(evidence);
-    }
-    return card;
-  });
-  detailClassifiers.replaceChildren(...cards);
-};
-
 const transactionFactRows = (transaction: MempoolTransaction): HTMLElement[] =>
   transactionFactPairs(transaction).map(([label, value]) =>
     detailValue(label, value),
   );
 
 const appendTransactionFacts = (txid: string): void => {
-  const entry = transactionById.get(txid);
+  const entry = currentTransaction(txid);
   if (entry !== undefined) {
     detailTransaction.append(...transactionFactRows(entry));
   }
@@ -757,17 +674,23 @@ const renderTransactionDetail = (detail: TransactionDetailResponse): void => {
     detailStatus.textContent =
       result === undefined
         ? "Result unavailable"
-        : result.state === "complete"
-          ? "Complete result"
-          : "Partial result";
+        : result.state === "partial"
+          ? "Partial result"
+          : "";
+    const classifierFacts =
+      result === undefined
+        ? []
+        : classifierEvidencePairs(result, descriptor ?? null).map(
+            ([label, value]) => detailValue(label, value),
+          );
     detailTransaction.replaceChildren(
       detailValue("txid", detail.txid),
       detailValue("wtxid", detail.wtxid),
       detailValue("Classifier", descriptor?.title ?? selectedClassifierId),
       detailValue("Labels", labels.join(" · ") || "No labels"),
+      ...classifierFacts,
     );
     appendTransactionFacts(detail.txid);
-    renderClassifierDetails(detail.classifications);
     detailRules.replaceChildren();
     return;
   }
@@ -793,11 +716,12 @@ const renderTransactionDetail = (detail: TransactionDetailResponse): void => {
     ),
   );
   appendTransactionFacts(detail.txid);
-  renderClassifierDetails(detail.classifications);
   detailRules.replaceChildren(...detail.rules.map(renderRuleDetail));
 };
 
 const showAbsentTransaction = (txid: string): void => {
+  detailController?.abort();
+  detailController = null;
   detailSequence += 1;
   nodeViewState = { ...nodeViewState, txid };
   selectedTransactionId = null;
@@ -807,80 +731,108 @@ const showAbsentTransaction = (txid: string): void => {
     "absent",
   );
   detailStatus.textContent = "Not present in this snapshot";
-  transactionDisclosure.open = true;
   detailTransaction.replaceChildren(detailValue("txid", txid));
-  detailClassifiers.replaceChildren();
   const message = document.createElement("p");
   message.className = "detail-error";
   message.textContent =
     "Atlas did not observe this transaction in the selected node's current mempool snapshot.";
   detailTransaction.append(message);
   detailRules.replaceChildren();
-  renderSampleTable();
   scheduleTerrainRender();
   replaceViewUrl();
 };
 
+interface TransactionDetailSelectionOptions {
+  preserveVisualSelection?: boolean;
+}
+
 const loadTransactionDetail = async (
   transaction: MempoolTransaction,
+  options: TransactionDetailSelectionOptions = {},
 ): Promise<void> => {
   const snapshot = currentSnapshot;
   const classification = currentClassification;
   if (snapshot === null || classification === null) {
     return;
   }
+  detailController?.abort();
+  detailController = null;
+  if (!snapshotIsComplete(snapshot)) {
+    selectedTransactionId = transaction.txid;
+    nodeViewState = { ...nodeViewState, txid: transaction.txid };
+    transactionSearchInput.value = transaction.txid;
+    setTransactionSearchStatus("Present in this snapshot.", "found");
+    detailStatus.textContent = "Loading membership stage…";
+    detailTransaction.replaceChildren(detailValue("txid", transaction.txid));
+    detailRules.replaceChildren();
+    scheduleTerrainRender();
+    replaceViewUrl();
+    return;
+  }
   const sequence = ++detailSequence;
-  transactionDisclosure.open = true;
+  const controller = new AbortController();
+  detailController = controller;
+  const preserveVisualSelection =
+    options.preserveVisualSelection === true || selectedLens === "overview";
   const descriptor = currentClassifierDescriptor();
   const transactionSelection: InspectorSelection | null =
-    selectedClassifierIsBip110()
+    !preserveVisualSelection && selectedClassifierIsBip110()
       ? {
           kind: "region",
           regionKey: terrainRegionKey(transaction),
         }
       : null;
   const transactionBucket =
-    descriptor === null || transactionSelection !== null
+    preserveVisualSelection ||
+    descriptor === null ||
+    transactionSelection !== null
       ? null
       : classifierBucketForTransaction(transaction, descriptor).key;
   const selectionChanged =
-    transactionSelection === null
+    !preserveVisualSelection &&
+    (transactionSelection === null
       ? selectedClassifierBucketKey !== transactionBucket
-      : !selectionsMatch(selectedInspector, transactionSelection);
-  if (transactionSelection !== null) {
-    selectedInspector = transactionSelection;
-    selectedClassifierBucketKey = null;
-  } else {
-    selectedClassifierBucketKey = transactionBucket;
+      : !selectionsMatch(selectedInspector, transactionSelection));
+  if (!preserveVisualSelection) {
+    if (transactionSelection !== null) {
+      selectedInspector = transactionSelection;
+      selectedClassifierBucketKey = null;
+    } else {
+      selectedClassifierBucketKey = transactionBucket;
+    }
   }
   selectedTransactionId = transaction.txid;
   nodeViewState = {
     source: selectedSourceId,
     classifier: selectedClassifierId,
-    selection: transactionSelection,
+    classifierLabels: selectedClassifierLabels,
+    classifierMatch: classificationMatchMode,
+    selection: selectedClassifierIsBip110() ? selectedInspector : null,
     txid: transaction.txid,
   };
   transactionSearchInput.value = transaction.txid;
   setTransactionSearchStatus("Present in this snapshot.", "found");
-  detailStatus.textContent = "Loading classifier evidence…";
+  detailStatus.textContent = "Loading transaction detail…";
   detailTransaction.replaceChildren(
     detailValue("txid", transaction.txid),
     detailValue("wtxid", transaction.wtxid),
     ...transactionFactRows(transaction),
   );
-  detailClassifiers.replaceChildren();
   detailRules.replaceChildren();
-  if (selectionChanged) {
-    renderInspector();
-  } else {
-    renderSampleTable();
+  if (selectionChanged) renderInspector();
+  if (!preserveVisualSelection || !paintCurrentTerrainSelection()) {
+    if (selectedLens === "overview") {
+      renderClassificationOverview();
+    } else {
+      scheduleTerrainRender();
+    }
   }
-  scheduleTerrainRender();
   replaceViewUrl();
   try {
     const detail = await fetchTransactionDetail(
       snapshot.source_id,
       transaction.txid,
+      controller.signal,
     );
     if (
       sequence !== detailSequence ||
@@ -895,10 +847,17 @@ const loadTransactionDetail = async (
     }
     renderTransactionDetail(detail);
   } catch (error) {
+    if (controller.signal.aborted) {
+      return;
+    }
     if (sequence !== detailSequence) {
       return;
     }
-    if (error instanceof AtlasRequestError && error.status === 503) {
+    if (
+      error instanceof AtlasRequestError &&
+      error.status === 503 &&
+      error.problemType === null
+    ) {
       const selectedResultAvailable =
         classificationResult(transaction, selectedClassifierId) !== null;
       if (!selectedClassifierIsBip110()) {
@@ -912,7 +871,6 @@ const loadTransactionDetail = async (
         message.textContent = selectedResultAvailable
           ? "Atlas no longer has classifier evidence matching this displayed snapshot. Refresh before relying on transaction detail."
           : `${classifierUnavailableDetailText()} Atlas has no classifier evidence to show.`;
-        detailClassifiers.replaceChildren();
         detailRules.replaceChildren();
         detailTransaction.append(message);
         return;
@@ -929,7 +887,6 @@ const loadTransactionDetail = async (
         ? "detail-error"
         : "detail-unclassified";
       message.textContent = presentation.detail;
-      detailClassifiers.replaceChildren();
       detailRules.replaceChildren();
       detailTransaction.append(message);
       return;
@@ -941,9 +898,12 @@ const loadTransactionDetail = async (
       error instanceof Error
         ? error.message
         : "Unable to load classifier evidence";
-    detailClassifiers.replaceChildren();
     detailRules.replaceChildren();
     detailTransaction.append(message);
+  } finally {
+    if (detailController === controller) {
+      detailController = null;
+    }
   }
 };
 
@@ -952,7 +912,7 @@ const populationForSelection = (
   selection: InspectorSelection,
 ) => {
   if (selection.kind === "rule") {
-    return rulePopulation(snapshot.transactions, selection.rule);
+    return bip110RulePopulation(snapshot.transactions, selection.rule);
   }
   return isViolationSignatureKey(selection.regionKey)
     ? signaturePopulation(snapshot.transactions, selection.regionKey)
@@ -967,19 +927,6 @@ const signatureForSelection = (
     ? (signaturePopulation(snapshot.transactions, selection.regionKey)
         ?.signature ?? null)
     : null;
-
-const overviewPopulation = (): ReturnType<
-  typeof classificationPopulation
-> | null => {
-  if (currentSnapshot === null || selectedClassifierLabel === null) {
-    return null;
-  }
-  return classificationPopulation(
-    currentSnapshot.transactions,
-    selectedClassifierId,
-    selectedClassifierLabel,
-  );
-};
 
 const classifierBucketSelectionPopulation = (): ReturnType<
   typeof classifierBucketPopulation
@@ -999,83 +946,7 @@ const classifierBucketSelectionPopulation = (): ReturnType<
   );
 };
 
-const currentInspectorPopulation = () => {
-  if (currentSnapshot === null) {
-    return null;
-  }
-  if (selectedLens !== "terrain") {
-    return overviewPopulation();
-  }
-  if (selectedClassifierIsBip110()) {
-    return populationForSelection(currentSnapshot, selectedInspector);
-  }
-  return classifierBucketSelectionPopulation() ?? overviewPopulation();
-};
-
-const renderSampleTable = (): void => {
-  if (currentSnapshot === null) {
-    ruleTransactions.replaceChildren();
-    sampleSummary.textContent = "No snapshot";
-    return;
-  }
-  const population = currentInspectorPopulation();
-  const largest = population?.transactions.slice(0, 8) ?? [];
-  const selected =
-    population === null || selectedTransactionId === null
-      ? undefined
-      : population.transactions.find(
-          ({ txid }) => txid === selectedTransactionId,
-        );
-  const pinsSelected =
-    selected !== undefined &&
-    !largest.some(({ txid }) => txid === selected.txid);
-  const sample = pinsSelected ? [selected, ...largest.slice(0, 7)] : largest;
-  sampleSummary.textContent =
-    population === null || population.count === 0
-      ? "No matches"
-      : pinsSelected
-        ? `Selected + ${countFormat.format(sample.length - 1)} largest of ${countFormat.format(population.count)}`
-        : `Largest ${countFormat.format(sample.length)} of ${countFormat.format(population.count)}`;
-
-  const rows = sample.map((transaction) => {
-    const row = document.createElement("tr");
-    if (transaction.txid === selectedTransactionId) {
-      row.className = "selected";
-    }
-    const transactionCell = document.createElement("td");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "tx-select";
-    button.textContent = `${transaction.txid.slice(0, 10)}…${transaction.txid.slice(-6)}`;
-    button.title = transaction.txid;
-    button.setAttribute(
-      "aria-label",
-      `Inspect transaction ${transaction.txid}`,
-    );
-    button.addEventListener("click", () => {
-      void loadTransactionDetail(transaction);
-    });
-    transactionCell.append(button);
-
-    const rulesCell = document.createElement("td");
-    rulesCell.append(
-      selectedLens !== "terrain" || !selectedClassifierIsBip110()
-        ? transactionClassifierChips(transaction)
-        : transactionRuleChips(transaction),
-    );
-    const sizeCell = document.createElement("td");
-    sizeCell.textContent = countFormat.format(transaction.vsize);
-    const feeCell = document.createElement("td");
-    feeCell.textContent = decimalFormat.format(
-      transaction.fee_sats / transaction.vsize,
-    );
-    row.append(transactionCell, rulesCell, sizeCell, feeCell);
-    return row;
-  });
-  ruleTransactions.replaceChildren(...rows);
-};
-
-const selectClassifierLabel = (labelKey: string, loadSample: boolean): void => {
+const selectTerrainClassifierLabel = (labelKey: string): void => {
   const changed =
     selectedClassifierLabel !== labelKey ||
     selectedClassifierBucketKey !== null;
@@ -1087,18 +958,75 @@ const selectClassifierLabel = (labelKey: string, loadSample: boolean): void => {
     selection: null,
   };
   if (changed) {
-    clearDetail("Choose a sample");
+    clearDetail("Select a transaction");
   }
   renderClassificationOverview();
   renderInspector();
   scheduleTerrainRender();
   replaceViewUrl();
-  if (loadSample) {
-    const first = overviewPopulation()?.transactions[0];
-    if (first !== undefined) {
-      void loadTransactionDetail(first);
-    }
+};
+
+const commitClassificationQuery = (
+  labels: readonly string[],
+  matchMode: ClassifierLabelMatchMode,
+): void => {
+  const changed =
+    labels.length !== selectedClassifierLabels.length ||
+    labels.some((label, index) => label !== selectedClassifierLabels[index]) ||
+    matchMode !== classificationMatchMode;
+  if (!changed) return;
+  selectedClassifierLabels = [...labels];
+  classificationMatchMode = matchMode;
+  nodeViewState = {
+    ...nodeViewState,
+    classifier: selectedClassifierId,
+    classifierLabels: selectedClassifierLabels,
+    classifierMatch: classificationMatchMode,
+    txid: null,
+  };
+  clearDetail(
+    selectedClassifierLabels.length === 0
+      ? "Choose labels, then select a transaction"
+      : "Select a matching transaction",
+  );
+  renderClassificationOverview();
+  renderInspector();
+  replaceViewUrl();
+};
+
+const toggleClassificationQueryLabel = (labelKey: string): void => {
+  const descriptor = currentClassifierDescriptor();
+  if (
+    descriptor === null ||
+    !descriptor.labels.some(({ key }) => key === labelKey)
+  ) {
+    return;
   }
+  const selected = new Set(selectedClassifierLabels);
+  if (selected.has(labelKey)) {
+    selected.delete(labelKey);
+  } else {
+    selected.add(labelKey);
+  }
+  const labels = descriptor.labels.flatMap(({ key }) =>
+    selected.has(key) ? [key] : [],
+  );
+  commitClassificationQuery(labels, classificationMatchMode);
+};
+
+const setClassificationMatchMode = (mode: ClassifierLabelMatchMode): void => {
+  const descriptor = currentClassifierDescriptor();
+  if (
+    descriptor?.semantics !== "multi_label" ||
+    selectedClassifierLabels.length < 2
+  ) {
+    return;
+  }
+  commitClassificationQuery(selectedClassifierLabels, mode);
+};
+
+const clearClassificationQuery = (): void => {
+  commitClassificationQuery([], "any");
 };
 
 const renderRuleNavigation = (): void => {
@@ -1110,19 +1038,17 @@ const renderRuleNavigation = (): void => {
     ruleList.replaceChildren();
     return;
   }
+  const snapshot = currentSnapshot;
   if (!selectedClassifierIsBip110()) {
     const descriptor = currentClassifierDescriptor();
     if (descriptor === null) {
       ruleList.replaceChildren();
       return;
     }
+    const summary = classifierSummary(snapshot, descriptor.id);
     ruleList.setAttribute("aria-label", `${descriptor.title} label filters`);
     const buttons = descriptor.labels.map((label, index) => {
-      const population = classificationPopulation(
-        currentSnapshot?.transactions ?? [],
-        descriptor.id,
-        label.key,
-      );
+      const populationCount = summary?.label_counts[label.key] ?? 0;
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.label = label.key;
@@ -1140,17 +1066,17 @@ const renderRuleNavigation = (): void => {
       button.tabIndex = selectedClassifierLabel === label.key ? 0 : -1;
       button.setAttribute(
         "aria-label",
-        `${label.label}: ${countFormat.format(population.count)} transactions carry this label. Label totals may overlap.`,
+        `${label.label}: ${countFormat.format(populationCount)} transactions carry this label. Label totals may overlap.`,
       );
       const ordinal = document.createElement("span");
       ordinal.textContent = `L${index + 1}`;
       const name = document.createElement("strong");
       name.textContent = label.label;
       const count = document.createElement("small");
-      count.textContent = countFormat.format(population.count);
+      count.textContent = countFormat.format(populationCount);
       button.append(ordinal, name, count);
       button.addEventListener("click", () => {
-        selectClassifierLabel(label.key, false);
+        selectTerrainClassifierLabel(label.key);
       });
       return button;
     });
@@ -1158,17 +1084,14 @@ const renderRuleNavigation = (): void => {
     return;
   }
   ruleList.setAttribute("aria-label", "BIP-110 rule filters");
-  const selectedSignature = signatureForSelection(
-    currentSnapshot,
-    selectedInspector,
-  );
+  const selectedSignature = signatureForSelection(snapshot, selectedInspector);
   const navigationTabRule =
     selectedInspector.kind === "rule"
       ? selectedInspector.rule
       : (selectedSignature?.foundationRule ?? TERRAIN_RULES[0]?.id);
   const buttons = TERRAIN_RULES.map((rule) => {
-    const population = rulePopulation(
-      currentSnapshot?.transactions ?? [],
+    const population = bip110RulePopulationSummary(
+      snapshot.transactions,
       rule.id,
     );
     const button = document.createElement("button");
@@ -1190,7 +1113,7 @@ const renderRuleNavigation = (): void => {
     );
     button.innerHTML = `<span>R${rule.number}</span><strong>${rule.shortLabel}</strong><small>${countFormat.format(population.count)}</small>`;
     button.addEventListener("click", () => {
-      selectInspector({ kind: "rule", rule: rule.id }, false);
+      selectInspector({ kind: "rule", rule: rule.id });
     });
     return button;
   });
@@ -1198,6 +1121,13 @@ const renderRuleNavigation = (): void => {
 };
 
 const renderInspector = (): void => {
+  const classifierInspectorVisible = selectedLens === "terrain";
+  inspectorFilters.hidden = !classifierInspectorVisible;
+  inspectorOutcome.hidden = !classifierInspectorVisible;
+  if (!classifierInspectorVisible) {
+    ruleList.replaceChildren();
+    return;
+  }
   if (selectedLens !== "terrain" || !selectedClassifierIsBip110()) {
     const descriptor = currentClassifierDescriptor();
     const label = descriptor?.labels.find(
@@ -1205,7 +1135,17 @@ const renderInspector = (): void => {
     );
     const bucket =
       selectedLens === "terrain" ? classifierBucketSelectionPopulation() : null;
-    const population = bucket ?? overviewPopulation();
+    const population =
+      bucket ??
+      (currentSnapshot === null ||
+      descriptor === null ||
+      selectedClassifierLabel === null
+        ? null
+        : classifierLabelPopulationSummary(
+            currentSnapshot.transactions,
+            descriptor,
+            selectedClassifierLabel,
+          ));
     if (bucket !== null && descriptor !== null) {
       const summaryBucket = classifierBucketIsSummary(bucket);
       inspectorEyebrow.textContent = `${descriptor.title} ${summaryBucket ? "group" : "bucket"}`;
@@ -1249,10 +1189,8 @@ const renderInspector = (): void => {
         : descriptor?.methodology === "fingerprint"
           ? "Fingerprints identify supported byte or script patterns. They do not validate external protocol state."
           : descriptor?.methodology === "policy"
-            ? "Policy compatibility is source-local and does not prove acceptance, relay, rejection, or consensus validity."
+            ? "Policy compatibility describes this node's observation and does not prove acceptance, relay, rejection, or consensus validity."
             : "Exact labels describe available transaction and spent-output facts without inferring intent.";
-    sampleClassificationHeading.textContent =
-      descriptor?.title ?? "Classification";
     if (population === null) {
       ruleCount.textContent = "0";
       ruleVsize.textContent = "0 vB";
@@ -1263,7 +1201,6 @@ const renderInspector = (): void => {
       ruleShare.textContent = percentageFormat.format(population.totalShare);
     }
     renderRuleNavigation();
-    renderSampleTable();
     return;
   }
 
@@ -1272,7 +1209,6 @@ const renderInspector = (): void => {
     "This describes compatibility with rules applied by Bitcoin Knots as mempool policy. It does not show that this source rejected a transaction, or that a transaction is consensus-invalid.";
   ruleOverlapNote.textContent =
     "Rule totals overlap. A transaction is counted under every rule it violates.";
-  sampleClassificationHeading.textContent = "Rules";
   const population =
     currentSnapshot === null
       ? null
@@ -1327,7 +1263,6 @@ const renderInspector = (): void => {
     ruleShare.textContent = percentageFormat.format(population.totalShare);
   }
   renderRuleNavigation();
-  renderSampleTable();
 };
 
 const sectionLabel = (
@@ -1390,7 +1325,7 @@ const renderTerrainRegions = (layout: TerrainLayout): void => {
       label.tabIndex = statusKey === tabStopKey ? 0 : -1;
       label.addEventListener("click", () => {
         if (statusKey !== null) {
-          selectInspector({ kind: "region", regionKey: statusKey }, false);
+          selectInspector({ kind: "region", regionKey: statusKey });
         }
       });
     } else {
@@ -1494,7 +1429,7 @@ const renderTerrainRegions = (layout: TerrainLayout): void => {
     );
     label.tabIndex = signature.key === tabStopKey ? 0 : -1;
     label.addEventListener("click", () => {
-      selectInspector({ kind: "region", regionKey: signature.key }, false);
+      selectInspector({ kind: "region", regionKey: signature.key });
     });
     return [label];
   });
@@ -1608,7 +1543,7 @@ const renderClassifierTerrainRegions = (
     );
     label.tabIndex = signature.key === tabStopKey ? 0 : -1;
     label.addEventListener("click", () => {
-      selectClassifierBucket(signature.key, false);
+      selectClassifierBucket(signature.key);
     });
     return label;
   });
@@ -1634,85 +1569,81 @@ const renderTerrainFrame = (): void => {
   ) {
     return;
   }
+  const snapshot = currentSnapshot;
+  const controller = new AbortController();
+  terrainRenderController?.abort();
+  terrainRenderController = controller;
   if (selectedClassifierIsBip110()) {
-    policyTerrainLayout = renderTerrain(
-      terrainCanvas,
-      currentSnapshot.transactions,
-      terrainMode,
-      selectedInspector,
-      policyTerrainLayout,
-      selectedTransactionId,
-    );
-    renderTerrainRegions(policyTerrainLayout);
-    terrainCanvas.setAttribute(
-      "aria-label",
-      `BIP-110 rule-combination buckets for ${countFormat.format(currentSnapshot.transaction_count)} transactions. Complete violations appear once in their exact rule-set bucket; incomplete violations are separate. Bucket area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`,
-    );
+    startPolicyTerrainRender({
+      canvas: terrainCanvas,
+      transactions: snapshot.transactions,
+      mode: terrainMode,
+      selection: selectedInspector,
+      previousLayout: policyTerrainLayout,
+      signal: controller.signal,
+      isCurrent: () =>
+        terrainRenderController === controller &&
+        currentSnapshot === snapshot &&
+        selectedClassifierIsBip110(),
+      commit: (layout, ariaLabel) => {
+        terrainRenderController = null;
+        policyTerrainLayout = layout;
+        captureTerrainLayout(layout);
+        renderTerrainRegions(layout);
+        terrainCanvas.setAttribute("aria-label", ariaLabel);
+      },
+    });
     return;
   }
   const descriptor = currentClassifierDescriptor();
   if (descriptor === null) {
     return;
   }
-  const hasFilter =
-    selectedClassifierBucketKey !== null || selectedClassifierLabel !== null;
-  const glyphMatchesSelectedLabel = (txid: string): boolean => {
-    if (
-      selectedClassifierBucketKey !== null ||
-      selectedClassifierLabel === null
-    ) {
-      return false;
-    }
-    const transaction = transactionById.get(txid);
-    return (
-      transaction !== undefined &&
-      (classificationResult(transaction, selectedClassifierId)?.labels.includes(
-        selectedClassifierLabel,
-      ) ??
-        false)
-    );
-  };
-  classifierTerrainLayout = renderBucketTerrain(
+  const selectedLabelMembership =
+    selectedClassifierBucketKey === null && selectedClassifierLabel !== null
+      ? classifierLabelRowMembership(
+          currentSnapshot.transactions,
+          descriptor,
+          selectedClassifierLabel,
+        )
+      : null;
+  const presentation = classifierTerrainPaint(descriptor, {
+    selectedBucketKey: selectedClassifierBucketKey,
+    selectedLabel: selectedClassifierLabel,
+    selectedLabelMembership,
+  });
+  const previousLayout = classifierTerrainLayout;
+  void renderBucketTerrainCooperatively(
     terrainCanvas,
-    classifierTerrainGroups(currentSnapshot.transactions, descriptor),
+    classifierTerrainGroups(snapshot.transactions, descriptor),
     terrainMode,
-    {
-      color: (region) => classifierBucketColor(descriptor, region.signature),
-      selected: (region) =>
-        selectedClassifierBucketKey !== null
-          ? region.key === selectedClassifierBucketKey
-          : selectedClassifierLabel !== null &&
-            !classifierBucketIsSummary(region.signature) &&
-            classifierBucketContainsLabel(
-              region.signature,
-              selectedClassifierLabel,
-            ),
-      partial: (region) => region.signature.state === "partial",
-      glyphOpacity: (region, selected, glyph) =>
-        region.signature.state === "unavailable"
-          ? hasFilter
-            ? 0.2
-            : 0.82
-          : selected
-            ? 1
-            : selectedClassifierBucketKey !== null
-              ? 0.46
-              : selectedClassifierLabel !== null
-                ? glyphMatchesSelectedLabel(glyph.txid)
-                  ? 1
-                  : 0.2
-                : 0.82,
-    },
-    classifierTerrainLayout,
-    selectedTransactionId,
-  );
-  renderClassifierTerrainRegions(classifierTerrainLayout, descriptor);
-  terrainCanvas.setAttribute(
-    "aria-label",
-    classifierUsesSummaryBuckets(descriptor)
-      ? `${descriptor.title} presentation groups for ${countFormat.format(currentSnapshot.transaction_count)} transactions. Every transaction appears once in a broad script-profile and coverage-state group; exact properties remain available per transaction. Group area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`
-      : `${descriptor.title} buckets for ${countFormat.format(currentSnapshot.transaction_count)} transactions. Every transaction appears once in its exact observed label-set and coverage-state bucket. Bucket area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`,
-  );
+    presentation,
+    previousLayout,
+    null,
+    { batchSize: 500, signal: controller.signal },
+  )
+    .then((layout) => {
+      if (
+        controller.signal.aborted ||
+        currentSnapshot !== snapshot ||
+        currentClassifierDescriptor() !== descriptor
+      ) {
+        return;
+      }
+      terrainRenderController = null;
+      classifierTerrainLayout = layout;
+      captureTerrainLayout(layout);
+      renderClassifierTerrainRegions(layout, descriptor);
+      terrainCanvas.setAttribute(
+        "aria-label",
+        classifierUsesSummaryBuckets(descriptor)
+          ? `${descriptor.title} presentation groups for ${countFormat.format(snapshot.transaction_count)} transactions. Every transaction appears once in a broad script-profile and coverage-state group; exact properties remain available per transaction. Group area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`
+          : `${descriptor.title} buckets for ${countFormat.format(snapshot.transaction_count)} transactions. Every transaction appears once in its exact observed label-set and coverage-state bucket. Bucket area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`,
+      );
+    })
+    .catch((error: unknown) => {
+      if (!controller.signal.aborted) throw error;
+    });
 };
 
 const scheduleTerrainRender = (): void => {
@@ -1735,49 +1666,60 @@ const renderFeeAgeFrame = (): void => {
   ) {
     return;
   }
-  const summary = renderSwimView(
+  const snapshot = currentSnapshot;
+  const transactions = filteredTransactions;
+  const controller = new AbortController();
+  feeAgeRenderController = controller;
+  void renderSwimViewCooperatively(
     feeAgeCanvas,
-    filteredTransactions,
-    currentSnapshot.observed_at_ms,
-  );
-  visualSummary.textContent = `${countFormat.format(summary.transactionCount)} transactions representing ${formatVsize(summary.totalVsize)}. Rows are base fee rate, columns and colour are age, and square area is virtual size.`;
-  feeAgeCanvas.setAttribute(
-    "aria-label",
-    `Fee rate by age view containing ${countFormat.format(summary.transactionCount)} filtered transactions.`,
-  );
+    transactions,
+    snapshot.observed_at_ms,
+    { signal: controller.signal },
+  )
+    .then((summary) => {
+      if (
+        controller.signal.aborted ||
+        feeAgeRenderController !== controller ||
+        currentSnapshot !== snapshot ||
+        filteredTransactions !== transactions ||
+        feeAgeView.hidden
+      ) {
+        return;
+      }
+      visualSummary.textContent = `${countFormat.format(summary.transactionCount)} transactions representing ${formatVsize(summary.totalVsize)}. Rows are base fee rate, columns and colour are age, and square area is virtual size.`;
+      feeAgeCanvas.setAttribute(
+        "aria-label",
+        `Fee rate by age view containing ${countFormat.format(summary.transactionCount)} filtered transactions.`,
+      );
+    })
+    .catch((error: unknown) => {
+      if (
+        !controller.signal.aborted &&
+        !(error instanceof DOMException && error.name === "AbortError")
+      ) {
+        console.error("Unable to render fee-rate by age view", error);
+      }
+    })
+    .finally(() => {
+      if (feeAgeRenderController === controller) {
+        feeAgeRenderController = null;
+      }
+    });
 };
 
 const scheduleFeeAgeRender = (): void => {
-  if (
-    pendingFeeAgeFrame !== null ||
-    currentSnapshot === null ||
-    filteredTransactions.length === 0
-  ) {
+  if (currentSnapshot === null || filteredTransactions.length === 0) {
     return;
   }
-  pendingFeeAgeFrame = window.requestAnimationFrame(renderFeeAgeFrame);
-};
-
-const renderHonestyBanner = (source: SourceSummary): void => {
-  const banner = honestyBanner(
-    source.availability,
-    source.last_error,
-    source.classification,
-    currentSnapshot?.transaction_count ?? 0,
-    currentSnapshot === null
-      ? null
-      : formatSnapshotFreshness(currentSnapshot.observed_at_ms),
-    (value) => countFormat.format(value),
-  );
-  honestyBannerElement.hidden = banner === null;
-  if (banner !== null) {
-    honestyBannerElement.dataset.tone = banner.tone;
-    honestyMessage.textContent = banner.message;
+  feeAgeRenderController?.abort();
+  if (pendingFeeAgeFrame !== null) {
+    window.cancelAnimationFrame(pendingFeeAgeFrame);
   }
-};
-
-const hideHonestyBanner = (): void => {
-  honestyBannerElement.hidden = true;
+  const callback = function feeAgeRenderFrame() {
+    renderFeeAgeFrame();
+  };
+  Object.assign(callback, { __atlasPerfLabel: "fee-age-render" });
+  pendingFeeAgeFrame = window.requestAnimationFrame(callback);
 };
 
 const selectCompositionSegment = (
@@ -1801,10 +1743,10 @@ const selectCompositionSegment = (
     if (currentClassification !== null) {
       renderClassification(snapshot, currentClassification);
     }
-    renderSnapshotDistributions();
+    startSnapshotDistributionsRender();
   }
   selectLens("terrain");
-  selectClassifierBucket(segmentKey as ClassifierBucketKey, false);
+  selectClassifierBucket(segmentKey as ClassifierBucketKey);
 };
 
 const snapshotDistributionsView = createSnapshotDistributionsView({
@@ -1813,37 +1755,98 @@ const snapshotDistributionsView = createSnapshotDistributionsView({
   },
 });
 
-const renderSnapshotDistributions = (): void => {
+const renderSnapshotDistributions = (): Promise<void> => {
   const snapshot = currentSnapshot;
-  if (snapshot === null) {
-    return;
-  }
-  snapshotDistributionsView.render(snapshot, {
-    classifierId: selectedClassifierId,
-    bucketKey: selectedClassifierBucketKey,
-    metric: terrainMode,
+  return snapshot === null || !snapshotIsComplete(snapshot)
+    ? Promise.resolve()
+    : snapshotDistributionsView.render(snapshot, {
+        classifierId: selectedClassifierId,
+        bucketKey: selectedClassifierBucketKey,
+        metric: terrainMode,
+      });
+};
+
+const startSnapshotDistributionsRender = (): void => {
+  void renderSnapshotDistributions().catch((error) => {
+    pageStatus.dataset.state = "error";
+    statusTitle.textContent = "Distribution view unavailable";
+    statusDetail.textContent =
+      error instanceof Error ? error.message : "Unable to render distributions";
   });
 };
 
-const applyFilters = (): void => {
-  if (currentSnapshot === null) {
-    filteredTransactions = [];
-    filterSummary.textContent = "No snapshot loaded.";
-    return;
-  }
-  filteredTransactions = filterTransactions(
-    currentSnapshot.transactions,
-    readFilters(),
-    currentSnapshot.observed_at_ms,
-  );
-  filterSummary.textContent = `Showing ${countFormat.format(filteredTransactions.length)} of ${countFormat.format(currentSnapshot.transaction_count)} transactions.`;
+const commitFilteredTransactions = (
+  snapshot: MempoolSnapshot,
+  transactions: MempoolTransaction[],
+): void => {
+  filteredTransactions = transactions;
+  filterSummary.textContent = `Showing ${countFormat.format(filteredTransactions.length)} of ${countFormat.format(snapshot.transaction_count)} transactions.`;
   feeAgeStage.hidden = filteredTransactions.length === 0;
   feeAgeEmpty.hidden = filteredTransactions.length !== 0;
   feeAgeEmpty.textContent =
-    currentSnapshot.transaction_count === 0
+    snapshot.transaction_count === 0
       ? "This snapshot contains an empty mempool."
       : "No transactions match the current filters.";
   scheduleFeeAgeRender();
+};
+
+const applyFilters = async (): Promise<boolean> => {
+  if (currentSnapshot === null || !snapshotIsComplete(currentSnapshot)) {
+    return false;
+  }
+  filterController?.abort();
+  filterController = null;
+  const snapshot = currentSnapshot;
+  const filters = readFilters();
+  const controller = new AbortController();
+  filterController = controller;
+  filterSummary.textContent = "Applying membership filters…";
+  try {
+    const nextTransactions = await filterTransactionsCooperatively(
+      snapshot.transactions,
+      filters,
+      snapshot.observed_at_ms,
+      { signal: controller.signal },
+    );
+    if (
+      controller.signal.aborted ||
+      filterController !== controller ||
+      currentSnapshot !== snapshot
+    ) {
+      return false;
+    }
+    commitFilteredTransactions(snapshot, nextTransactions);
+    return true;
+  } catch (error) {
+    if (controller.signal.aborted) return false;
+    throw error;
+  } finally {
+    if (filterController === controller) filterController = null;
+  }
+};
+
+const runFilterInteraction = (): void => {
+  void applyFilters().catch((error: unknown) => {
+    pageStatus.dataset.state = "error";
+    statusTitle.textContent = "Membership filters unavailable";
+    statusDetail.textContent =
+      error instanceof Error ? error.message : "Unable to filter this snapshot";
+  });
+};
+
+const startFilterInteraction = (delayMs = 0): void => {
+  if (filterInteractionTimeout !== null) {
+    window.clearTimeout(filterInteractionTimeout);
+    filterInteractionTimeout = null;
+  }
+  if (delayMs === 0) {
+    runFilterInteraction();
+    return;
+  }
+  filterInteractionTimeout = window.setTimeout(() => {
+    filterInteractionTimeout = null;
+    runFilterInteraction();
+  }, delayMs);
 };
 
 const selectLens = (lens: Lens): void => {
@@ -1860,6 +1863,10 @@ const selectLens = (lens: Lens): void => {
   overviewView.hidden = !overviewSelected;
   terrainView.hidden = !terrainSelected;
   feeAgeView.hidden = !feeAgeSelected;
+  if (!feeAgeSelected) {
+    feeAgeRenderController?.abort();
+    feeAgeRenderController = null;
+  }
   if (terrainSelected) {
     scheduleTerrainRender();
   } else if (feeAgeSelected) {
@@ -1871,23 +1878,7 @@ const selectLens = (lens: Lens): void => {
   renderInspector();
 };
 
-const chooseInitialRule = (snapshot: MempoolSnapshot): RuleId => {
-  let chosen: RuleId = "element_size";
-  let maximum = -1;
-  for (const rule of TERRAIN_RULES) {
-    const count = rulePopulation(snapshot.transactions, rule.id).count;
-    if (count > maximum) {
-      chosen = rule.id;
-      maximum = count;
-    }
-  }
-  return chosen;
-};
-
-const selectInspector = (
-  inspector: InspectorSelection,
-  loadSample: boolean,
-): void => {
+const selectInspector = (inspector: InspectorSelection): void => {
   const changed = !selectionsMatch(selectedInspector, inspector);
   selectedInspector = inspector;
   nodeViewState = {
@@ -1896,24 +1887,14 @@ const selectInspector = (
     selection: inspector,
   };
   if (changed) {
-    clearDetail("Choose a sample");
+    clearDetail("Select a transaction");
   }
   renderInspector();
   scheduleTerrainRender();
   replaceViewUrl();
-  if (loadSample && currentSnapshot !== null) {
-    const first = populationForSelection(currentSnapshot, selectedInspector)
-      ?.transactions[0];
-    if (first !== undefined) {
-      void loadTransactionDetail(first);
-    }
-  }
 };
 
-const selectClassifierBucket = (
-  bucketKey: ClassifierBucketKey,
-  loadSample: boolean,
-): void => {
+const selectClassifierBucket = (bucketKey: ClassifierBucketKey): void => {
   const changed = selectedClassifierBucketKey !== bucketKey;
   selectedClassifierBucketKey = bucketKey;
   nodeViewState = {
@@ -1922,7 +1903,7 @@ const selectClassifierBucket = (
     selection: null,
   };
   if (changed) {
-    clearDetail("Choose a sample");
+    clearDetail("Select a transaction");
   }
   renderInspector();
   scheduleTerrainRender();
@@ -1931,266 +1912,163 @@ const selectClassifierBucket = (
     selectedClassifierId,
     selectedClassifierBucketKey,
   );
-  if (loadSample) {
-    const first = classifierBucketSelectionPopulation()?.transactions[0];
-    if (first !== undefined) {
-      void loadTransactionDetail(first);
-    }
-  }
-};
-
-const setTerrainTotal = (
-  wrapper: HTMLElement,
-  labelElement: HTMLElement,
-  countElement: HTMLElement,
-  label: string,
-  count: number,
-  tone: string,
-): void => {
-  wrapper.dataset.tone = tone;
-  labelElement.textContent = label;
-  countElement.textContent = countFormat.format(count);
 };
 
 const renderClassification = (
   snapshot: MempoolSnapshot,
   progress: ClassificationProgress,
 ): void => {
-  const descriptor = currentClassifierDescriptor();
-  if (selectedClassifierIsBip110()) {
-    const totals = classificationTotals(snapshot.transactions);
-    terrainEyebrow.textContent = "Knots mempool policy lens";
-    terrainTitle.textContent = "BIP-110 rule buckets";
-    setTerrainTotal(
-      terrainTotalA,
-      terrainTotalALabel,
-      terrainTotalACount,
-      "Compatible",
-      totals.compatible.count,
-      "compatible",
-    );
-    setTerrainTotal(
-      terrainTotalB,
-      terrainTotalBLabel,
-      terrainTotalBCount,
-      "Indeterminate",
-      totals.indeterminate.count,
-      "indeterminate",
-    );
-    setTerrainTotal(
-      terrainTotalC,
-      terrainTotalCLabel,
-      terrainTotalCCount,
-      "Would violate",
-      totals.violating.count,
-      "violating",
-    );
-    terrainSummary.textContent = `Policy assessments for this source snapshot use ${snapshot.bip110_summary.evaluator_id} ${snapshot.bip110_summary.evaluator_version}. Each transaction appears once. Complete violations use exact rule-combination buckets; proven violations with unresolved checks remain separate. Bucket area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}.`;
-  } else if (descriptor !== null) {
-    const totals = classifierTerrainTotals(snapshot.transactions, descriptor);
-    const summaryBuckets = classifierUsesSummaryBuckets(descriptor);
-    terrainEyebrow.textContent = `${classifierMethodologyText(descriptor)} · version ${descriptor.version}`;
-    terrainTitle.textContent = `${descriptor.title} ${summaryBuckets ? "groups" : "buckets"}`;
-    setTerrainTotal(
-      terrainTotalA,
-      terrainTotalALabel,
-      terrainTotalACount,
-      "Complete",
-      totals.complete,
-      "complete",
-    );
-    setTerrainTotal(
-      terrainTotalB,
-      terrainTotalBLabel,
-      terrainTotalBCount,
-      "Partial",
-      totals.partial,
-      "partial",
-    );
-    setTerrainTotal(
-      terrainTotalC,
-      terrainTotalCLabel,
-      terrainTotalCCount,
-      "Unavailable",
-      totals.unavailable,
-      "unavailable",
-    );
-    terrainSummary.textContent = summaryBuckets
-      ? `Broad script-profile groups keep this overview readable; exact version, RBF, witness, data-carrier, and script labels remain on each transaction. Group area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}. Complete, partial, and unavailable results remain separate.`
-      : `Bucket area represents ${terrainMode === "count" ? "transaction count" : "virtual size"}. Complete, partial, and unavailable results remain separate. Choose a bucket for its population; open Labels & rules only when you need a marginal filter.`;
-  }
+  terrainSummaryView.render(
+    snapshot,
+    currentClassifierDescriptor(),
+    terrainMode,
+  );
   renderCoverage();
   renderClassificationLifecycle(progress, snapshot.transaction_count);
 };
 
-const renderResponse = (
-  response: SourceSnapshotResponse,
-  requestedState: NodeViewState,
-): void => {
-  const { source, snapshot } = response;
-  sourceLabel.textContent = source.source_label;
-  sourceId.textContent = source.source_id;
-  pageStatus.dataset.state = source.availability;
-  sourceSelect.value = source.source_id;
-
-  if (snapshot === null) {
-    selectedClassifierId =
-      requestedState.classifier ??
-      (requestedState.selection === null
-        ? selectedClassifierId
-        : KNOTS_BIP110_CLASSIFIER_ID);
-    selectedClassifierLabel = null;
-    selectedClassifierBucketKey = null;
-    currentSnapshot = null;
-    currentClassification = null;
-    transactionById = new Map();
-    filteredTransactions = [];
-    resetTerrainLayouts();
-    terrainStage.hidden = true;
-    feeAgeStage.hidden = true;
-    terrainEmpty.hidden = false;
-    feeAgeEmpty.hidden = false;
-    transactionCount.textContent = "Waiting";
-    totalVsize.textContent = "Waiting";
-    observedValue.textContent = "No snapshot";
-    tipValue.textContent = "Unknown";
-    terrainTotalACount.textContent = "0";
-    terrainTotalBCount.textContent = "0";
-    terrainTotalCCount.textContent = "0";
-    coverageComplete.textContent = "0";
-    coverageIncomplete.textContent = "0";
-    coverageUnclassified.textContent = "0";
-    renderCoverage();
-    renderClassificationLifecycle(null, null);
-    renderClassificationOverview();
-    snapshotDistributionsView.reset(
-      "The first complete mempool snapshot is being collected.",
-    );
-    renderHonestyBanner(source);
-    filterSummary.textContent = "No snapshot loaded.";
-    selectedInspector =
-      requestedState.selection ??
-      ({ kind: "rule", rule: "element_size" } as const);
-    nodeViewState = {
-      source: source.source_id,
-      classifier: selectedClassifierId,
-      selection: selectedClassifierIsBip110() ? requestedState.selection : null,
-      txid: requestedState.txid,
-    };
-    transactionSearchInput.value = requestedState.txid ?? "";
-    clearDetail(
-      requestedState.txid === null
-        ? "Choose a sample"
-        : "No snapshot available",
-      false,
-    );
-    setTransactionSearchStatus(
-      requestedState.txid === null
-        ? "Search this snapshot by txid."
-        : "No snapshot is available to search yet.",
-      requestedState.txid === null ? undefined : "absent",
-    );
-    renderInspector();
-    if (source.availability === "error") {
-      statusTitle.textContent = "Node snapshot unavailable";
-      statusDetail.textContent = `Latest poll failed: ${source.last_error ?? "unknown error"}`;
-      terrainEmpty.textContent = "Atlas has not received a valid snapshot yet.";
-      feeAgeEmpty.textContent = terrainEmpty.textContent;
-    } else {
-      statusTitle.textContent = "Waiting for the first snapshot";
-      statusDetail.textContent = `Atlas polls this source every ${formatPollInterval(source.poll_interval_seconds)}.`;
-      terrainEmpty.textContent =
-        "The first complete mempool snapshot is being collected.";
-      feeAgeEmpty.textContent = terrainEmpty.textContent;
-    }
-    replaceViewUrl();
-    return;
-  }
-
-  currentSnapshot = snapshot;
-  currentClassification = source.classification;
-  if (currentClassification === null) {
-    throw new Error("Loaded snapshot is missing classification progress");
-  }
-  const requestedClassifierId =
-    requestedState.classifier ??
-    (requestedState.selection === null
-      ? selectedClassifierId
-      : KNOTS_BIP110_CLASSIFIER_ID);
-  selectedClassifierId =
-    snapshot.classifier_catalog.find(({ id }) => id === requestedClassifierId)
-      ?.id ??
-    snapshot.classifier_catalog.find(({ id }) => id === DEFAULT_CLASSIFIER_ID)
-      ?.id ??
-    snapshot.classifier_catalog[0]?.id ??
-    DEFAULT_CLASSIFIER_ID;
-  selectedClassifierLabel = null;
-  selectedClassifierBucketKey = null;
-  resetTerrainLayouts();
-  transactionById = new Map(
-    snapshot.transactions.map((transaction) => [transaction.txid, transaction]),
+const renderResponse = async (
+  response: LoadedSourcePublication,
+  complete: boolean,
+  isCurrent: () => boolean,
+  signal: AbortSignal,
+): Promise<void> => {
+  const replacesCompletePublication =
+    complete && currentSnapshot !== null && snapshotIsComplete(currentSnapshot);
+  const prepared = await prepareNodePublicationCommit(
+    response,
+    complete,
+    replacesCompletePublication,
+    signal,
+    isCurrent,
+    () => ({
+      viewState: nodeViewState,
+      terrainMode,
+      filters: readFilters(),
+      currentSnapshotIdentity,
+      selectedClassifierLabel,
+      selectedClassifierBucketKey,
+      selectedInspector,
+    }),
+    snapshotDistributionsView,
   );
-  transactionCount.textContent = countFormat.format(snapshot.transaction_count);
-  totalVsize.textContent = formatVsize(snapshot.total_vsize);
-  observedValue.textContent = formatSnapshotFreshness(snapshot.observed_at_ms);
-  observedValue.title = new Date(snapshot.observed_at_ms).toLocaleString();
-  tipValue.textContent = countFormat.format(snapshot.chain_tip.height);
-  tipValue.title = snapshot.chain_tip.hash;
+  const {
+    candidate,
+    distributionSelection,
+    distributions,
+    filteredTransactions: preparedFilteredTransactions,
+  } = prepared;
+  const { source, snapshot, requestedTransaction } = candidate;
+
+  let completeFilteredTransactions: MempoolTransaction[] | null = null;
+  if (complete) {
+    if (preparedFilteredTransactions === null || distributions === null) {
+      throw new Error("Prepared complete node view is incomplete");
+    }
+    if (
+      !snapshotDistributionsView.commit(
+        distributions,
+        snapshot,
+        distributionSelection,
+      )
+    ) {
+      throw new Error("Prepared complete node view became stale");
+    }
+    completeFilteredTransactions = preparedFilteredTransactions;
+  }
+
+  pageStatus.dataset.state = complete
+    ? source.availability
+    : source.availability === "stale"
+      ? "stale"
+      : "waiting";
+  sourceSelect.value = source.source_id;
+  sourceSummaryView.renderSnapshot(source, snapshot);
+  filterController?.abort();
+  filterController = null;
+  currentSnapshot = snapshot;
+  currentSnapshotIdentity = candidate.snapshotIdentity;
+  currentClassification = candidate.classification;
+  selectedClassifierId = candidate.selectedClassifierId;
+  selectedClassifierLabels = [...candidate.viewState.classifierLabels];
+  classificationMatchMode = candidate.viewState.classifierMatch;
+  selectedClassifierLabel = candidate.selectedClassifierLabel;
+  selectedClassifierBucketKey = candidate.selectedClassifierBucketKey;
+  setMembershipControlsComplete(complete);
+  resetTerrainLayouts();
   terrainStage.hidden = snapshot.transaction_count === 0;
   terrainEmpty.hidden = snapshot.transaction_count !== 0;
   terrainEmpty.textContent = "This snapshot contains an empty mempool.";
-  const initialRule = chooseInitialRule(snapshot);
-  const requestedTransaction =
-    requestedState.txid === null
-      ? undefined
-      : transactionById.get(requestedState.txid);
-  if (selectedClassifierIsBip110()) {
-    selectedInspector =
-      requestedTransaction !== undefined
-        ? {
-            kind: "region",
-            regionKey: terrainRegionKey(requestedTransaction),
-          }
-        : (requestedState.selection ?? { kind: "rule", rule: initialRule });
+  selectedInspector = candidate.selectedInspector;
+  nodeViewState = candidate.viewState;
+  transactionSearchInput.value = candidate.viewState.txid ?? "";
+  if (completeFilteredTransactions !== null) {
+    commitFilteredTransactions(snapshot, completeFilteredTransactions);
+    clearDetail("Select a transaction", false);
+    setTransactionSearchStatus("Search this snapshot by txid.");
   } else {
-    selectedInspector = { kind: "rule", rule: initialRule };
-    const descriptor = currentClassifierDescriptor();
-    selectedClassifierBucketKey =
-      requestedTransaction === undefined || descriptor === null
-        ? null
-        : classifierBucketForTransaction(requestedTransaction, descriptor).key;
+    selectedTransactionId = requestedTransaction?.txid ?? null;
+    feeAgeStage.hidden = true;
+    feeAgeEmpty.hidden = false;
+    feeAgeEmpty.textContent = "Loading membership and fee data…";
+    filterSummary.textContent = "Loading membership filters…";
+    snapshotDistributionsView.reset("Loading remaining snapshot stages…");
+    setTransactionSearchStatus(
+      requestedTransaction === undefined
+        ? candidate.viewState.txid === null
+          ? "Search this snapshot by txid."
+          : "Not present in this snapshot."
+        : "Present in this snapshot.",
+      requestedTransaction === undefined
+        ? candidate.viewState.txid === null
+          ? undefined
+          : "absent"
+        : "found",
+    );
+    detailStatus.textContent =
+      requestedTransaction === undefined
+        ? "Loading membership stage…"
+        : "Present · loading membership stage…";
+    detailTransaction.replaceChildren(
+      ...(requestedTransaction === undefined
+        ? []
+        : [detailValue("txid", requestedTransaction.txid)]),
+    );
+    detailRules.replaceChildren();
   }
-  nodeViewState = {
-    source: source.source_id,
-    classifier: selectedClassifierId,
-    selection: selectedClassifierIsBip110() ? selectedInspector : null,
-    txid: requestedState.txid,
-  };
-  transactionSearchInput.value = requestedState.txid ?? "";
-  clearDetail("Choose a sample", false);
-  setTransactionSearchStatus("Search this snapshot by txid.");
   renderClassificationOverview();
   renderClassification(snapshot, currentClassification);
   renderInspector();
-  applyFilters();
-  renderSnapshotDistributions();
-  renderHonestyBanner(source);
-
-  if (source.availability === "stale") {
+  if (!complete) {
+    statusTitle.textContent = "Snapshot classifications ready";
+    statusDetail.textContent =
+      "Search and the selected classifier are interactive while membership and remaining lenses load.";
+  } else if (source.availability === "stale") {
     statusTitle.textContent = "Showing the last good snapshot";
     statusDetail.textContent = `Observed ${new Date(snapshot.observed_at_ms).toLocaleString()}. Latest poll failed: ${source.last_error ?? "unknown error"}`;
   } else {
-    statusTitle.textContent = "Snapshot healthy";
-    statusDetail.textContent = `Observed ${new Date(snapshot.observed_at_ms).toLocaleString()}. Browser refresh does not trigger a node poll.`;
+    statusTitle.textContent = `${snapshot.source_label} snapshot`;
+    statusDetail.textContent = `${countFormat.format(snapshot.transaction_count)} transactions · ${formatVsize(snapshot.total_vsize)} · observed ${new Date(snapshot.observed_at_ms).toLocaleString()} · chain tip ${countFormat.format(snapshot.chain_tip.height)}.`;
   }
   scheduleTerrainRender();
   replaceViewUrl();
-
-  if (requestedTransaction !== undefined) {
-    void loadTransactionDetail(requestedTransaction);
-  } else if (requestedState.txid !== null) {
-    showAbsentTransaction(requestedState.txid);
+  setAtlasLoadPhase(pageStatus, "interactive");
+  if (replacesCompletePublication) {
+    recordAtlasCandidateCommitted(prepared.detail);
   }
+  const readiness = markAtlasReadinessAfterPaint(
+    pageStatus,
+    "node",
+    complete ? "complete-feature-ready" : "primary-interactive",
+    () => isCurrent() && currentSnapshot === snapshot,
+  );
+
+  if (complete && requestedTransaction !== undefined) {
+    void loadTransactionDetail(requestedTransaction);
+  } else if (complete && candidate.viewState.txid !== null) {
+    showAbsentTransaction(candidate.viewState.txid);
+  }
+  return readiness;
 };
 
 const discoverSources = async (): Promise<void> => {
@@ -2219,6 +2097,18 @@ const discoverSources = async (): Promise<void> => {
   sourceSelect.value = selectedSourceId;
   sourceSelect.disabled = configuredSources.length < 2;
   updateCompareLink();
+  const selectedSource = configuredSources.find(
+    ({ source_id: source }) => source === selectedSourceId,
+  );
+  if (selectedSource === undefined) {
+    throw new Error("Selected Bitcoin source is unavailable");
+  }
+  sourceSummaryView.renderMetadata(selectedSource);
+  markAtlasReadiness(pageStatus, "node", "metadata-usable");
+  pageStatus.dataset.state = "waiting";
+  statusTitle.textContent = `${selectedSource.source_label} snapshot`;
+  statusDetail.textContent = "Loading the latest snapshot from Atlas memory.";
+  setAtlasLoadPhase(pageStatus, "metadata-ready");
 };
 
 const loadSnapshot = async (): Promise<void> => {
@@ -2227,12 +2117,44 @@ const loadSnapshot = async (): Promise<void> => {
     return;
   }
   const ticket = snapshotLifecycle.begin();
+  const retainActivePublication =
+    currentSnapshot !== null && snapshotIsComplete(currentSnapshot);
+  const requestedSource = configuredSources.find(
+    ({ source_id: source }) => source === requestedSourceId,
+  );
   refreshButton.disabled = true;
   refreshButton.textContent = "Loading…";
+  sourceSummaryView.setBusy(true);
+  pageStatus.dataset.state = "waiting";
+  statusTitle.textContent = `${requestedSource?.source_label ?? requestedSourceId} snapshot`;
+  statusDetail.textContent = retainActivePublication
+    ? "Refreshing from Atlas memory. The current complete snapshot remains interactive until its replacement is ready."
+    : "Loading the latest complete snapshot from Atlas memory.";
+  setAtlasLoadPhase(pageStatus, "loading-snapshot");
   try {
-    const response = await fetchSourceSnapshot(
+    const response = await fetchSourcePublication(
       requestedSourceId,
       ticket.signal,
+      nodeViewState.classifier ?? DEFAULT_CLASSIFIER_ID,
+      (primary) => {
+        if (
+          snapshotLifecycle.isCurrent(ticket) &&
+          selectedSourceId === requestedSourceId
+        ) {
+          if (retainActivePublication) return undefined;
+          return renderPrimaryNodePublication(() =>
+            renderResponse(
+              primary,
+              false,
+              () =>
+                snapshotLifecycle.isCurrent(ticket) &&
+                selectedSourceId === requestedSourceId,
+              ticket.signal,
+            ),
+          );
+        }
+        return undefined;
+      },
     );
     if (
       !snapshotLifecycle.isCurrent(ticket) ||
@@ -2240,15 +2162,77 @@ const loadSnapshot = async (): Promise<void> => {
     ) {
       return;
     }
-    renderResponse(response, nodeViewState);
+    setAtlasLoadPhase(pageStatus, "deriving-view");
+    await renderResponse(
+      response,
+      true,
+      () =>
+        snapshotLifecycle.isCurrent(ticket) &&
+        selectedSourceId === requestedSourceId,
+      ticket.signal,
+    );
   } catch (error) {
     if (!snapshotLifecycle.isCurrent(ticket)) {
       return;
     }
-    pageStatus.dataset.state = "error";
-    statusTitle.textContent = "Atlas website unavailable";
-    statusDetail.textContent =
+    let source = configuredSources.find(
+      ({ source_id: source }) => source === requestedSourceId,
+    );
+    const refreshed = await firstPublication.refreshSources(
+      error,
+      currentSnapshot !== null,
+      ticket.signal,
+    );
+    if (refreshed !== undefined) {
+      if (!snapshotLifecycle.isCurrent(ticket)) return;
+      if (refreshed === null) {
+        source = undefined;
+      } else {
+        configuredSources = refreshed.sources;
+        source = refreshed.sources.find(
+          ({ source_id: sourceId }) => sourceId === requestedSourceId,
+        );
+      }
+    }
+    const firstFailure =
+      currentSnapshot === null
+        ? firstPublication.presentation(error, source)
+        : null;
+    pageStatus.dataset.state = firstFailure?.state ?? "error";
+    const message =
       error instanceof Error ? error.message : "Unable to load snapshot";
+    const partialAvailable =
+      currentSnapshot !== null && !snapshotIsComplete(currentSnapshot);
+    statusTitle.textContent =
+      firstFailure?.title ??
+      (partialAvailable
+        ? "Snapshot partly available"
+        : "Refresh failed · showing the prior snapshot");
+    statusDetail.textContent =
+      firstFailure?.detail ??
+      (partialAvailable
+        ? `The selected classifier and transaction search remain available. Membership-dependent features did not finish loading: ${message}`
+        : `The prior complete snapshot remains usable. Refresh failed: ${message}`);
+    if (currentSnapshot === null) {
+      terrainEmpty.textContent = statusDetail.textContent;
+      feeAgeEmpty.textContent = statusDetail.textContent;
+      snapshotDistributionsView.reset(statusDetail.textContent);
+      if (source === undefined) {
+        sourceSummaryView.renderDiscoveryFailure();
+      } else {
+        sourceSummaryView.renderMetadata(source, false);
+      }
+    } else {
+      sourceSummaryView.setBusy(false);
+    }
+    setAtlasLoadPhase(
+      pageStatus,
+      currentSnapshot === null && source === undefined
+        ? "discovering-sources"
+        : currentSnapshot === null
+          ? "metadata-ready"
+          : "interactive",
+    );
   } finally {
     if (snapshotLifecycle.isCurrent(ticket)) {
       refreshButton.disabled = false;
@@ -2260,6 +2244,8 @@ const loadSnapshot = async (): Promise<void> => {
 const initialize = async (): Promise<void> => {
   refreshButton.disabled = true;
   sourceSelect.disabled = true;
+  sourceSummaryView.renderDiscovering();
+  setAtlasLoadPhase(pageStatus, "discovering-sources");
   try {
     await discoverSources();
     selectedClassifierId =
@@ -2281,27 +2267,35 @@ const initialize = async (): Promise<void> => {
     await loadSnapshot();
   } catch (error) {
     pageStatus.dataset.state = "error";
+    sourceSummaryView.renderDiscoveryFailure();
     statusTitle.textContent = "Atlas website unavailable";
     statusDetail.textContent =
       error instanceof Error ? error.message : "Unable to load snapshot";
+    setAtlasLoadPhase(pageStatus, "discovering-sources");
     refreshButton.disabled = false;
     refreshButton.textContent = "Refresh";
   }
 };
 
 const prepareForSourceLoad = (source: SourceSummary): void => {
+  filterController?.abort();
+  filterController = null;
   nodeViewState = {
     source: source.source_id,
     classifier: selectedClassifierId,
+    classifierLabels: selectedClassifierLabels,
+    classifierMatch: classificationMatchMode,
     selection: null,
     txid: null,
   };
   currentSnapshot = null;
+  setMembershipControlsComplete(false);
+  currentSnapshotIdentity = null;
   currentClassification = null;
-  transactionById = new Map();
   filteredTransactions = [];
   selectedClassifierLabel = null;
   selectedClassifierBucketKey = null;
+  if (selectedLens === "fee-age") selectLens("overview");
   resetTerrainLayouts();
   terrainStage.hidden = true;
   feeAgeStage.hidden = true;
@@ -2309,15 +2303,9 @@ const prepareForSourceLoad = (source: SourceSummary): void => {
   feeAgeEmpty.hidden = false;
   terrainEmpty.textContent = "Loading this node's current snapshot.";
   feeAgeEmpty.textContent = terrainEmpty.textContent;
-  sourceLabel.textContent = source.source_label;
-  sourceId.textContent = source.source_id;
-  observedValue.textContent = "Loading";
-  tipValue.textContent = "Loading";
-  transactionCount.textContent = "Loading";
-  totalVsize.textContent = "Loading";
-  terrainTotalACount.textContent = "0";
-  terrainTotalBCount.textContent = "0";
-  terrainTotalCCount.textContent = "0";
+  sourceSummaryView.renderMetadata(source);
+  markAtlasReadiness(pageStatus, "node", "metadata-usable");
+  terrainSummaryView.reset();
   coverageComplete.textContent = "0";
   coverageIncomplete.textContent = "0";
   coverageUnclassified.textContent = "0";
@@ -2325,14 +2313,14 @@ const prepareForSourceLoad = (source: SourceSummary): void => {
   renderClassificationLifecycle(null, null);
   renderClassificationOverview();
   snapshotDistributionsView.reset("Loading this node's current snapshot.");
-  hideHonestyBanner();
   filterSummary.textContent = "No snapshot loaded.";
   selectedInspector = { kind: "rule", rule: "element_size" };
-  clearDetail("Choose a sample");
+  clearDetail("Select a transaction");
   renderInspector();
   pageStatus.dataset.state = "waiting";
-  statusTitle.textContent = "Loading node snapshot";
-  statusDetail.textContent = `Reading the latest complete snapshot for ${source.source_label}.`;
+  statusTitle.textContent = `${source.source_label} snapshot`;
+  statusDetail.textContent = "Loading the latest snapshot from Atlas memory.";
+  setAtlasLoadPhase(pageStatus, "metadata-ready");
   replaceViewUrl();
 };
 
@@ -2354,7 +2342,6 @@ const searchForTransaction = (): void => {
     detailSequence += 1;
     detailStatus.textContent = "No snapshot available";
     detailTransaction.replaceChildren(detailValue("txid", txid));
-    detailClassifiers.replaceChildren();
     detailRules.replaceChildren();
     setTransactionSearchStatus(
       "No snapshot is available to search yet.",
@@ -2363,7 +2350,7 @@ const searchForTransaction = (): void => {
     replaceViewUrl();
     return;
   }
-  const transaction = transactionById.get(txid);
+  const transaction = currentTransaction(txid);
   if (transaction === undefined) {
     showAbsentTransaction(txid);
     return;
@@ -2425,16 +2412,23 @@ classificationLensSelect.addEventListener("change", () => {
     return;
   }
   selectedClassifierId = classificationLensSelect.value;
+  selectedClassifierLabels = [];
+  classificationMatchMode = "any";
   selectedClassifierLabel = null;
   selectedClassifierBucketKey = null;
   resetTerrainLayouts();
   if (selectedClassifierIsBip110()) {
-    selectedInspector = { kind: "rule", rule: chooseInitialRule(snapshot) };
+    selectedInspector = {
+      kind: "rule",
+      rule: chooseInitialNodeRule(snapshot),
+    };
   }
-  clearDetail("Choose a sample");
+  clearDetail("Select a transaction");
   nodeViewState = {
     ...nodeViewState,
     classifier: selectedClassifierId,
+    classifierLabels: [],
+    classifierMatch: "any",
     selection: selectedClassifierIsBip110() ? selectedInspector : null,
   };
   renderClassificationOverview();
@@ -2443,7 +2437,7 @@ classificationLensSelect.addEventListener("change", () => {
   }
   renderInspector();
   scheduleTerrainRender();
-  renderSnapshotDistributions();
+  startSnapshotDistributionsRender();
   replaceViewUrl();
 });
 
@@ -2454,9 +2448,10 @@ modeCount.addEventListener("click", () => {
   modeVsize.setAttribute("aria-pressed", "false");
   if (currentSnapshot !== null && currentClassification !== null) {
     renderClassification(currentSnapshot, currentClassification);
+    renderClassificationOverview();
   }
   scheduleTerrainRender();
-  renderSnapshotDistributions();
+  startSnapshotDistributionsRender();
 });
 
 modeVsize.addEventListener("click", () => {
@@ -2466,9 +2461,10 @@ modeVsize.addEventListener("click", () => {
   modeVsize.setAttribute("aria-pressed", "true");
   if (currentSnapshot !== null && currentClassification !== null) {
     renderClassification(currentSnapshot, currentClassification);
+    renderClassificationOverview();
   }
   scheduleTerrainRender();
-  renderSnapshotDistributions();
+  startSnapshotDistributionsRender();
 });
 
 const moveRuleFocus = (event: KeyboardEvent, container: HTMLElement): void => {
@@ -2506,7 +2502,7 @@ const moveRuleFocus = (event: KeyboardEvent, container: HTMLElement): void => {
     const next = buttons[nextIndex];
     const labelKey = next?.dataset.label;
     if (next !== undefined && labelKey !== undefined) {
-      selectClassifierLabel(labelKey, false);
+      selectTerrainClassifierLabel(labelKey);
       next.focus();
     }
     return;
@@ -2534,7 +2530,7 @@ const moveRuleFocus = (event: KeyboardEvent, container: HTMLElement): void => {
           keys.length;
   const rule = keys[nextIndex];
   if (rule !== undefined) {
-    selectInspector({ kind: "rule", rule }, false);
+    selectInspector({ kind: "rule", rule });
     container
       .querySelector<HTMLButtonElement>(`[data-rule="${rule}"]`)
       ?.focus();
@@ -2582,12 +2578,12 @@ terrainRegions.addEventListener("keydown", (event) => {
   const regionKey = next?.dataset.region;
   if (next !== undefined && regionKey !== undefined) {
     if (selectedClassifierIsBip110()) {
-      selectInspector(
-        { kind: "region", regionKey: regionKey as TerrainRegionKey },
-        false,
-      );
+      selectInspector({
+        kind: "region",
+        regionKey: regionKey as TerrainRegionKey,
+      });
     } else {
-      selectClassifierBucket(regionKey as ClassifierBucketKey, false);
+      selectClassifierBucket(regionKey as ClassifierBucketKey);
     }
     next.focus();
   }
@@ -2603,17 +2599,15 @@ terrainCanvas.addEventListener("click", (event) => {
     }
     const hit = hitTestTerrain(policyTerrainLayout, x, y);
     if (hit?.kind === "region") {
-      selectInspector({ kind: "region", regionKey: hit.region.key }, false);
+      selectInspector({ kind: "region", regionKey: hit.region.key });
       return;
     }
     if (hit?.kind === "transaction") {
-      selectInspector(
-        { kind: "region", regionKey: hit.glyph.regionKey },
-        false,
-      );
-      const transaction = transactionById.get(hit.glyph.txid);
+      const transaction = currentTransaction(hit.glyph.txid);
       if (transaction !== undefined) {
-        void loadTransactionDetail(transaction);
+        void loadTransactionDetail(transaction, {
+          preserveVisualSelection: true,
+        });
       }
     }
     return;
@@ -2623,14 +2617,15 @@ terrainCanvas.addEventListener("click", (event) => {
   }
   const hit = hitTestBucketTerrain(classifierTerrainLayout, x, y);
   if (hit?.kind === "region") {
-    selectClassifierBucket(hit.region.key, false);
+    selectClassifierBucket(hit.region.key);
     return;
   }
   if (hit?.kind === "transaction") {
-    selectClassifierBucket(hit.glyph.regionKey, false);
-    const transaction = transactionById.get(hit.glyph.txid);
+    const transaction = currentTransaction(hit.glyph.txid);
     if (transaction !== undefined) {
-      void loadTransactionDetail(transaction);
+      void loadTransactionDetail(transaction, {
+        preserveVisualSelection: true,
+      });
     }
   }
 });
@@ -2653,16 +2648,23 @@ terrainCanvas.addEventListener("keydown", (event) => {
   }
 });
 
-filtersForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  applyFilters();
+minimumFeeRate.addEventListener("input", () => {
+  startFilterInteraction(180);
+});
+
+minimumVsize.addEventListener("input", () => {
+  startFilterInteraction(180);
+});
+
+maximumAge.addEventListener("change", () => {
+  startFilterInteraction();
 });
 
 resetFilters.addEventListener("click", () => {
   minimumFeeRate.value = String(DEFAULT_FILTERS.minimumFeeRate);
   maximumAge.value = "all";
   minimumVsize.value = String(DEFAULT_FILTERS.minimumVsize);
-  applyFilters();
+  startFilterInteraction();
 });
 
 sourceSelect.addEventListener("change", () => {

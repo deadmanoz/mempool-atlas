@@ -1,23 +1,37 @@
 # Mempool Atlas
 
 Mempool Atlas shows the current mempool reported by one to four Bitcoin nodes.
-It classifies each transaction through four independent lenses. Comparison
+It classifies each transaction through five independent lenses. Comparison
 happens in the browser; the server never combines mempools.
 
 ![Classifier buckets rendered from deterministic fixture data](docs/assets/node-buckets.png)
 
 ## What it shows
 
-| Lens | Question |
-| --- | --- |
+| Lens                   | Question                                                                                |
+| ---------------------- | --------------------------------------------------------------------------------------- |
 | Transaction properties | Which exact version, witness, replaceability, and script-family properties are present? |
-| Transaction shape | Which conservative CoinJoin, consolidation, or batch-payout heuristics match? |
-| Data protocols | Which supported inscription, token, or OP_RETURN byte patterns are present? |
-| Knots BIP-110 | Would this witness variant violate Bitcoin Knots' deployed policy? |
+| Transaction shape      | Which conservative CoinJoin, consolidation, or batch-payout heuristics match?           |
+| Data protocols         | Which supported inscription, token, or OP_RETURN byte patterns are present?             |
+| Data carriage shapes   | Which high-confidence witness or output-field carrier shapes are present?                 |
+| Knots BIP-110          | Would this witness variant violate Bitcoin Knots' deployed policy?                      |
 
 Atlas also shows fee rate, age, virtual size, ancestor fee rate, ancestry,
 replaceability, structure facts, and transaction detail. The browser builds
-the distribution charts from the current snapshot.
+the distribution charts from the current snapshot. Node selection, current
+source facts, and transaction lookup share one source panel, matching the
+selector-to-details hierarchy used by Compare.
+
+In the default Classifications view, label cards are query controls. Select one
+or more labels from the active classifier, combine them with ANY or ALL, and
+inspect the full matching population as complete and partial transaction
+blocks. Choosing a block, or reaching it by keyboard, opens that transaction's
+detail without replacing the active query. Data-protocol and data-carriage
+details present bounded detection evidence as readable carrier, location,
+framing, and byte facts rather than raw JSON. The selected labels and match
+mode are preserved in the page URL. In ALL mode, Atlas dims labels that cannot
+occur with the current selection while keeping selected labels available for
+removal. Independent classifier taxonomies are never combined.
 
 Partial and unavailable results are reported separately, not counted as
 negatives. The
@@ -30,6 +44,22 @@ does not prove that a node rejected or filtered it.
 
 ## Snapshot distributions
 
+Hover or focus any plotted region for exact bin ranges and population shares.
+Click a spectrum or density cell to pin it while comparing panels; keyboard
+users can traverse chart bins with the arrow keys. Quantitative charts name
+both axes, and spectra show the active count or virtual-size scale vertically.
+The data-carriage spectrum is grouped by the independent Data carriage shapes
+lens, including an explicit no-detected-shape bucket for OP_RETURN-only rows.
+Data-carriage references
+distinguish the historical 40-byte payload limit from the conventional
+80-byte payload that serializes to an 83-byte OP_RETURN script.
+
+On Compare, the node-by-node distribution section keeps its classifier lens,
+Count/vsize metric, and membership population controls beside the charts they
+govern. Selecting a composition segment changes the local lens and bucket for
+the other distribution panels without changing the primary membership or
+policy comparison.
+
 ![Composition, fee structure, ancestor fee rate, and fee-rate-by-size density](docs/assets/snapshot-distributions.png)
 
 ![Age, data carriage, input-output density, and mempool entanglement](docs/assets/snapshot-distributions-detail.png)
@@ -38,13 +68,46 @@ does not prove that a node rejected or filtered it.
 
 ## Compare independent mempools
 
+Opening Atlas without URL state starts with the Bitcoin Core versus Bitcoin
+Knots comparison. Explicit `?source=...` URLs continue to open the single-node
+viewer, and the Node control in Compare opens its current left-hand source.
+
 The comparison page fetches two snapshots and derives three regions in the
 browser: present in both, observed only on the left, and observed only on the
-right. It shows the collection windows and their sampling skew.
+right. Within the shared region, it also derives overlapping counts for
+different witness variants, unconfirmed ancestor packages, and effective
+replaceability directly from the two packed source snapshots. Outlined cells
+carry at least one such difference, and selected transaction detail names the
+exact source-local values. When the reported chain tips differ, Snapshot timing
+also offers an explicit conflicting-spend analysis. It lazily compares compact
+source-local input fingerprints, then verifies every candidate against the full
+36-byte outpoints before reporting a pair. Coverage remains explicit when
+classification or the optional fact budget leaves rows unavailable. The result
+does not establish replacement intent, replay protection, rejection, relay
+cause, or safety. Same-tip comparisons make none of these optional requests.
+Snapshot timing states which source was observed later and whether the two
+collection windows overlapped. A prominent txid
+lookup immediately below that context opens one transaction across both
+current snapshots. The lookup and three membership populations share one
+transaction panel. Selected transaction IDs in both Node and Compare link to
+their transaction page on mempool.space.
+
+Both products render the lightweight current source metadata before their full
+snapshot bodies arrive. The comparison page keeps its primary membership
+workspace ahead of secondary distributions and the policy matrix, so those
+derived panels cannot displace the interactive view as they populate.
+The status strip below the Node/Compare switch remains visible: Node summarizes
+the current snapshot and chain tip, while Compare summarizes the selected pair,
+membership overlap, and whether both observations share a chain tip. Loading,
+stale, and failure states replace that summary with current operational context.
+Both browser products share a footer linking to the public source repository
+and the author's X and Nostr profiles.
 
 Each side keeps its own witness variant and policy assessment. Presence or
 absence describes the sampled mempools only. It does not prove that a node
 accepted, rejected, filtered, or relayed a transaction.
+
+![Membership overlap with per-node policy controls](docs/assets/comparison-membership.png)
 
 ![Side-by-side classifier composition and fee structure](docs/assets/comparison-distributions.png)
 
@@ -52,11 +115,9 @@ accepted, rejected, filtered, or relayed a transaction.
 
 ![Side-by-side data carriage, input-output density, and entanglement](docs/assets/comparison-distributions-structure.png)
 
-![Side-by-side output value and source-local policy outcomes](docs/assets/comparison-distributions-value.png)
+![Side-by-side output value and per-node policy outcomes](docs/assets/comparison-distributions-value.png)
 
-![The complete source-local policy matrix](docs/assets/policy-comparison.png)
-
-![Membership overlap with source-local policy controls](docs/assets/comparison-membership.png)
+![The complete per-node policy matrix](docs/assets/policy-comparison.png)
 
 ## Architecture
 
@@ -100,6 +161,12 @@ Edit `config/sources.json` to match the RPC URL, username, label, and credential
 filename for your node. Remove the second example source unless you also create
 its credential file. Atlas listens on <http://127.0.0.1:3101> by default.
 
+Atlas performs complete source-local membership collections every 15 minutes by
+default. Each collection has a five-minute source budget and a 120-second
+deadline per membership RPC so large verbose mempool responses remain bounded.
+The browser refresh control shows the latest completed observation; it does not
+trigger a new node poll.
+
 The example configures two mainnet nodes, and that is deliberate: every source
 you configure must observe the same Bitcoin network. Comparing a mainnet
 mempool against a testnet or signet one is meaningless, because the two
@@ -121,23 +188,46 @@ just clean
 ### Frontend development without a node
 
 Run `just web-fixtures` in one terminal and `just web-dev` in another. The
-fixture API serves three deterministic synthetic sources on
-<http://127.0.0.1:3101> using the live API contract.
+command first exports three deterministic synthetic sources from the Rust
+domain model, then serves their pre-encoded API bodies on
+<http://127.0.0.1:3101>. `just test-web-e2e` regenerates the same small profile
+automatically and always starts a fresh fixture server. Stop `just web-fixtures`
+before running E2E; the preflight reports occupied fixture and preview ports
+without reusing their existing processes.
+
+`just perf-web` builds the production website and measures it against a
+separate 70,000-transaction, two-source profile under recorded desktop and
+mobile conditions. Results are written to `web/.perf-results/latest.json`.
+See [client performance](docs/client-performance.md) for the measurement
+contract, reconciled baseline, and current checkpoints.
 
 ## API
 
 - `GET /healthz` reports process health.
 - `GET /readyz` becomes ready after the first valid snapshot.
-- `GET /api/v1/sources` reports the running Atlas version and lists configured
+- `GET /api/v2/sources` reports the running Atlas version and lists configured
   sources with their current status.
-- `GET /api/v1/sources/{source_id}/mempool` returns one current snapshot.
-- `GET /api/v1/sources/{source_id}/transactions/{txid}` returns classifier and
+- `GET /api/v2/sources/{source_id}/mempool` returns the current publication
+  manifest.
+- `GET /api/v2/sources/{source_id}/mempool/stages/{kind}/{content_id}` returns a
+  content-addressed population, membership, or structure stage.
+- `GET /api/v2/sources/{source_id}/mempool/stages/classifier/{classifier_id}/{content_id}`
+  returns one content-addressed classifier stage.
+- `GET /api/v2/sources/{source_id}/mempool/conflict-fingerprints/{population_id}/{structure_id}`
+  lazily returns the bounded binary candidate index for one terminal source
+  publication.
+- `GET /api/v2/sources/{source_id}/mempool/conflict-outpoints/{population_id}/{structure_id}/{txid}`
+  returns exact binary input outpoints for one covered transaction so a
+  candidate fingerprint match can be verified.
+- `GET /api/v2/sources/{source_id}/transactions/{txid}` returns classifier and
   policy detail for one current transaction.
 
 Source discovery, transaction detail, operational responses, and errors disable
-caching. A published full snapshot has an `ETag` and requires revalidation, so
-an unchanged conditional request returns `304` without transferring the full
-JSON body. The browser refresh action reads Atlas' latest in-memory copy; it
+caching. Published manifests have `ETag` validators and require revalidation.
+Successful stage and conflict-fact responses are publication-bound and remain
+fresh and immutable for one year. Their validators remain available, so an
+explicit matching conditional request returns `304` without transferring the
+body. The browser refresh action reads Atlas' latest in-memory publication; it
 does not trigger a Bitcoin RPC poll.
 
 ## Public deployment
@@ -147,6 +237,9 @@ See [Deploy behind Cloudflare](docs/deployment-cloudflare.md) for setup and the
 smoke test. A deployment can enable a self-hosted Umami tracker at build time;
 analytics is disabled by default. Keep deployment credentials, hostnames,
 private RPC addresses, and account identifiers out of this repository.
+The production HTML publishes canonical Node and Compare URLs, page-specific
+Open Graph and X cards, browser and touch icons, a web manifest, `robots.txt`,
+and a sitemap for `atlas.deadmanoz.xyz`.
 
 ## Contributing
 

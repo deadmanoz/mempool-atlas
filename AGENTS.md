@@ -20,23 +20,70 @@ lenses, and serves source-local node and comparison views.
 - `src/runtime.rs` coordinates source turns and the shared RPC work gate.
   `src/runtime/publisher.rs` owns atomic current-state publication. Tests live
   in `src/runtime/`.
+- `src/conflict_facts.rs` owns the bounded binary fingerprint and exact-outpoint
+  encodings used only by lazy different-tip comparison analysis.
 - `src/model.rs` defines public snapshots, lifecycle, assessments,
   and transaction detail.
 - `src/api.rs` serves health, readiness, source APIs, and static web
   assets.
+- `src/staged_snapshot.rs` encodes deterministic v2 publication bundles.
+  `src/staged_snapshot/validation.rs` rejects incoherent model inputs before
+  publication; focused tests live in `src/staged_snapshot/tests/`.
+- `src/perf_fixtures.rs` is the feature-gated canonical exporter for generated
+  browser fixture bodies. Production builds do not enable `perf-fixtures`.
 - `src/bip110/` is the private pure seven-rule evaluator.
 - `web/` contains the node viewer and browser-derived comparison page.
+- `web/src/node-entry.ts` sends the stateless public entry to the default Core
+  versus Knots comparison and loads the node viewer for explicit node URL state.
+- `web/src/source-summary.ts` owns the strict source-summary wire validator
+  shared by discovery parsing and staged-manifest parsing.
+- `web/src/atlas-worker.ts` owns staged publication fetch, bounded decoding,
+  semantic validation, cache and retry behavior, and the worker message surface.
+- `web/src/publication-digest.ts` owns canonical classification-set and
+  publication preimages plus SHA-256 digest verification used by the worker.
+- `web/src/source-summary-view.ts` owns early source metadata, stale-state
+  honesty, and the shared node/comparison loading phases.
+- `web/src/source-summary-styles.css` owns the node source-summary component
+  and all of its breakpoints.
+- `web/src/classification-overview-view.ts` owns the node lens selector,
+  multi-label ANY/ALL controls, lens semantics guidance, and classification
+  summary subtree. `web/src/classification-query-view.ts` owns the full-result
+  Canvas listbox, hit testing, keyboard traversal, resize lifecycle, and
+  transaction-local selection paint. `web/src/classifier-terrain.ts` owns the
+  compact marginal indexes and deduplicated ANY/ALL query resolution.
 - `web/src/snapshot-distributions.ts` owns aggregate-only distribution models
   and caching. The two `*-distributions-view.ts` modules own their complete
-  node and comparison distribution DOM subtrees.
-- `web/src/comparison-policy-view.ts` owns source-local policy aggregates and
-  bounded samples. `web/src/comparison-view-transition.ts` classifies
-  interactive state changes before the controller applies effects.
-- `web/src/styles.css` owns every shared shell, header, toolbar, and terrain
-  rule, including their breakpoints. `web/src/comparison-styles.css` adds only
-  comparison-page selectors.
-- `web/e2e/` holds Playwright viewport coverage driven by the fixture Atlas API
-  in `web/dev/fixture-server.mjs`.
+  node and comparison distribution DOM subtrees, including panel-local
+  comparison lens, metric, bucket, and population state;
+  `snapshot-distribution-view-state.ts` owns the node view's identity,
+  selection, and variant state.
+- `web/src/distribution-interaction.ts` owns the section-local tooltip and pin
+  lifecycle. `web/src/distribution-chart-inspection.ts` owns exact bin
+  descriptions and pointer hit-testing shared by SVG spectra and Canvas
+  densities. `web/src/snapshot-distribution-layout-control.ts` owns the node
+  distribution grid's persisted desktop column preference.
+- `web/src/comparison-policy-view.ts` owns per-node policy aggregates and
+  filter totals. `web/src/comparison-view-transition.ts` classifies
+  interactive state changes before the controller applies effects, including
+  observed asynchronous canvas scheduling.
+- `web/src/comparison-conflict-view.ts` owns optional different-tip
+  conflicting-spend loading, cooperative candidate matching, exact
+  verification, coverage copy, and its abort/reset lifecycle.
+- `web/src/terrain-selection-view.ts` restores the last bounded terrain paint
+  and overlays transaction-local focus without replaying the full population.
+- `web/src/styles.css` owns shared shell, header, toolbar, and terrain rules,
+  including their breakpoints. `web/src/distribution-styles.css` owns shared
+  Snapshot distributions and chart rules, including their breakpoints.
+  `web/src/comparison-styles.css` adds only comparison-page selectors.
+- `web/e2e/` holds Playwright viewport, early-metadata, and layout-shift
+  coverage driven by the fixture Atlas API in `web/dev/fixture-server.mjs`.
+- `web/perf/` holds the production-build performance server, Playwright
+  measurement harness, and result merger. `release-result-validator.mjs` owns
+  typed release-gate inputs and feasibility derivation. Generated profiles and
+  results live under gitignored `web/.perf-fixtures/` and `web/.perf-results/`.
+- `scripts/smoke-public.sh` validates the deployed edge contract;
+  `scripts/lib/smoke-public-helpers.sh` owns repeated-header parsing and bounded
+  first-transaction extraction.
 - `docs/architecture.md` is the current system reference.
 - `docs/classification.md` is the behavioral specification for classifier
   contracts, rules, thresholds, and limitations.
@@ -50,8 +97,21 @@ Use `just` targets whenever one exists:
 
 - `just build` builds Rust and the website.
 - `just test` runs Rust and website unit tests.
+  It enables `perf-fixtures` for the Rust suite so both cross-language
+  publication-digest goldens run; a bare `cargo test` omits those checks.
 - `just test-web-e2e` runs Playwright viewport coverage against the fixture
-  Atlas API, after a one-time `just test-web-e2e-install`.
+  Atlas API, after a one-time `just test-web-e2e-install`. It preflights ports
+  3101 and 5174 and never reuses an existing fixture or preview server.
+- `just functional-fixtures` exports the small Rust-owned functional profile.
+- `just perf-fixtures` also exports the 70,000-transaction performance profile.
+- `just publication-digest-fixture` regenerates both checked-in Rust/browser
+  publication-digest goldens from the Rust-owned model and source-metadata
+  cases.
+- `just stage-projection` regenerates and enforces the checked staged-byte
+  projection. Run it with exactly Node.js 22.23.2 so gzip output matches CI.
+- `just perf-web` builds the production web assets, runs the desktop and Slow
+  4G performance matrix in normal Chromium, and writes the merged result. Run
+  it with exactly Node.js 22.23.2 because it includes `stage-projection`.
 - `just lint` runs structure checks, Rust formatting and Clippy, Prettier, and
   TypeScript.
 - `just format` formats Rust and frontend source.
@@ -78,8 +138,8 @@ newer and npm 10 or newer.
 - Tokio owns runtime loops, locks, the listener, and shutdown.
 - Vite and TypeScript build the browser client.
 - `happy-dom` is a test-only browser DOM used for view-factory lifecycle tests.
-- `@playwright/test` is a test-only browser driver for viewport coverage. It
-  never runs against a live node.
+- `@playwright/test` is a test-only browser driver for viewport and local
+  production-build performance coverage. It never runs against a live node.
 
 ## Current-state invariants
 
@@ -133,22 +193,49 @@ newer and npm 10 or newer.
   in transaction detail.
 - Publish one matching `ETag` with every cached source representation. Waiting
   responses have no validator and remain non-cacheable.
+- Retain exact input outpoints only as an internal optional fact under a
+  dedicated 64 MiB per-source generation budget. Keep them out of ordinary
+  manifests, stages, and transaction detail. Budget exhaustion yields partial
+  conflict-fact coverage and never reduces classifier coverage or source
+  availability.
 
 ### Browser
 
+- Render the selected `SourceSummary` before requesting its complete snapshot.
+  Keep `discovering-sources`, `metadata-ready`, `loading-snapshot`,
+  `deriving-view`, and `interactive` separate from source availability.
+- Replace early node and comparison summaries in place, preserve retained
+  observation errors, and stop `aria-busy` when a request terminates.
+- Reserve source-summary, primary workspace, and derived-panel geometry. Keep
+  the primary comparison workspace before secondary distributions and policy.
 - Make the Classifications lens selector the default node view. Treat
   multi-label populations as marginal and potentially overlapping.
 - Use the selected classifier for both the Classifications overview and Buckets
   view. Never combine classifier taxonomies.
+- Let Classifications combine labels from the active classifier with ANY or ALL
+  and render every matching transaction once in a selectable Canvas. Keep
+  complete and partial matches separate, exclude unavailable results, preserve
+  the query in canonical URL state, and show only selected-transaction detail
+  in its inspector. In ALL mode, disable an unselected label when adding it
+  would empty the intersection, while keeping selected labels removable. Keep
+  Buckets label and rule controls independent.
 - Each transaction appears in exactly one terrain region. Lenses keep complete,
   partial, and unavailable results separate. Transaction properties uses broad
   script-profile presentation groups while retaining exact labels on each
   transaction; smaller generic lenses use exact observed label-set buckets.
 - Preserve one selectable Canvas block per transaction inside its terrain group.
+  Selecting a transaction preserves the active label, rule, and bucket
+  emphasis and adds a transaction-local highlight; only an explicit region or
+  filter control may restyle the wider terrain.
   Keep section and bucket area proportional to the selected count or virtual
   size metric, suppress labels that cannot fit, cache classifier partitions
-  across interactions, and keep filters, samples, and transaction evidence
-  behind explicit disclosure.
+  across interactions, and keep the selected transaction detail persistently
+  visible in the inspector. Membership filters apply directly without a
+  separate confirmation action, and the count/vsize metric remains a prominent
+  snapshot-wide control because it also changes the distribution panels. In
+  the inspector, show label and rule controls before their population outcome,
+  then show the selected transaction's membership facts and active-lens result.
+  Do not repeat every classifier as a cross-lens detail-card stack.
 - Keep BIP-110 as a specialist adapter: complete violations use one canonical
   exact `violated_rules` bucket, while partial violations use separate
   proven-plus-unknown buckets.
@@ -157,13 +244,41 @@ newer and npm 10 or newer.
 - Comparison merge-joins two independent sorted snapshots in the browser.
 - Common transactions retain both source-local witness variants and policy
   assessments.
+- Comparison policy focus highlights matching transactions inside the selected
+  membership region. Selecting a transaction preserves that focus and adds
+  only a local highlight; explicit region, node-policy, or filter changes may
+  repaint the wider comparison canvas.
 - Absence from a source is not evidence of rejection, filtering, or relay
   causality.
-- Keep source, classifier, optional policy region, filter, and optional
-  transaction in canonical URL state.
+- Offer conflicting-spend analysis only as an explicit, lazy action when the
+  reported tips differ and both classification lifecycles are terminal. Normal
+  same-tip comparisons make no conflict-fact request. Treat compact fingerprint
+  matches only as candidates, exclude the same txid, and require exact 36-byte
+  outpoint equality before reporting a pair. Always state per-source coverage
+  and never infer replacement intent, replay protection, rejection, or safety.
+- Keep source, classifier, Classifications label set and match mode, optional
+  policy region, filter, and optional transaction in canonical URL state.
+- Present Node and Compare as the shared primary view switch in both page
+  headers, with the active product visually explicit at every breakpoint.
 - Avoid one DOM node or a duplicate union-sized index per transaction.
 - Cache distribution and comparison-policy aggregates by their semantic input
-  identity. Keep only bounded transaction samples in derived browser models.
+  identity. Keep transaction selection direct rather than deriving parallel
+  sample tables.
+- Keep the comparison distribution lens, Count/vsize metric, and population
+  scope inside the node-by-node distribution section. Composition-segment
+  selection changes only that section's shared lens and bucket; it never
+  changes the primary comparison membership region or policy focus.
+- Keep distribution inspection presentation-only. Spectra and densities use
+  one tab stop per chart, pointer hit-testing, arrow-key region traversal, and
+  one pinned region without rescanning transactions or creating per-bin DOM.
+- Let desktop users persist an auto, one-, two-, or three-column Snapshot
+  distributions layout without rebuilding aggregate models. Narrow viewports
+  always render one readable column.
+- Position distribution ticks from their raw logarithmic domains and describe
+  exact bin bounds in inspectors. Name both quantitative axes and show the
+  selected metric scale on every spectrum. Do not present the 83-byte
+  serialized OP_RETURN script reference as an `op_return_bytes` payload
+  threshold.
 - Keep `main.ts` and `comparison-main.ts` focused on page lifecycle and
   cross-view orchestration. Visible distribution subtrees own their lookup,
   rendering, event, resize, cache, and reset lifecycles.

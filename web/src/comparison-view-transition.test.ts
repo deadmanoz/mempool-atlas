@@ -78,7 +78,7 @@ describe("resolveComparisonViewTransition", () => {
     },
   );
 
-  it("requires a population update when selecting a txid clears a filter", () => {
+  it("preserves the policy filter when selecting a transaction", () => {
     const resolved = resolveComparisonViewTransition(
       comparison,
       state({
@@ -91,11 +91,14 @@ describe("resolveComparisonViewTransition", () => {
       }),
     );
 
-    expect(resolved.filter).toEqual({ kind: "all" });
-    expect(resolved.updateKind).toBe("population");
+    expect(resolved.filter).toEqual({
+      kind: "status",
+      status: "compatible",
+    });
+    expect(resolved.updateKind).toBe("transaction");
   });
 
-  it("requires a population update when the source-local common side changes", () => {
+  it("requires a population update when the common-region node changes", () => {
     const resolved = resolveComparisonViewTransition(
       comparison,
       state({ side: "left", txid: txid(1) }),
@@ -142,10 +145,10 @@ describe("executeComparisonViewTransition", () => {
     const counters: Record<keyof ComparisonViewTransitionEffects, number> = {
       applyResolvedView: 0,
       renderPopulation: 0,
-      syncTransactionSelection: 0,
       renderTransactionNavigator: 0,
       updateQuery: 0,
       scheduleCanvasRender: 0,
+      handleCanvasRenderFailure: 0,
       loadTransactionDetail: 0,
     };
     const count =
@@ -158,10 +161,13 @@ describe("executeComparisonViewTransition", () => {
       effects: {
         applyResolvedView: count("applyResolvedView"),
         renderPopulation: count("renderPopulation"),
-        syncTransactionSelection: count("syncTransactionSelection"),
         renderTransactionNavigator: count("renderTransactionNavigator"),
         updateQuery: count("updateQuery"),
-        scheduleCanvasRender: count("scheduleCanvasRender"),
+        scheduleCanvasRender: () => {
+          count("scheduleCanvasRender")();
+          return Promise.resolve("rendered");
+        },
+        handleCanvasRenderFailure: count("handleCanvasRenderFailure"),
         loadTransactionDetail: count("loadTransactionDetail"),
       },
     };
@@ -182,10 +188,10 @@ describe("executeComparisonViewTransition", () => {
     expect(counters).toEqual({
       applyResolvedView: 0,
       renderPopulation: 0,
-      syncTransactionSelection: 0,
       renderTransactionNavigator: 0,
       updateQuery: 0,
       scheduleCanvasRender: 0,
+      handleCanvasRenderFailure: 0,
       loadTransactionDetail: 0,
     });
   });
@@ -204,11 +210,56 @@ describe("executeComparisonViewTransition", () => {
     expect(counters).toEqual({
       applyResolvedView: 1,
       renderPopulation: 0,
-      syncTransactionSelection: 1,
       renderTransactionNavigator: 1,
       updateQuery: 1,
       scheduleCanvasRender: 1,
+      handleCanvasRenderFailure: 0,
       loadTransactionDetail: 1,
     });
+  });
+
+  it("routes an asynchronous canvas fault into the failure effect", async () => {
+    const { counters, effects } = effectCounters();
+    const failure = new Error("Canvas context lost");
+    effects.scheduleCanvasRender = () => {
+      counters.scheduleCanvasRender += 1;
+      return Promise.reject(failure);
+    };
+    let observed: unknown;
+    effects.handleCanvasRenderFailure = (error) => {
+      counters.handleCanvasRenderFailure += 1;
+      observed = error;
+    };
+
+    executeComparisonViewTransition(
+      comparison,
+      state({ txid: txid(1) }),
+      state({ txid: txid(2) }),
+      effects,
+    );
+    await Promise.resolve();
+
+    expect(observed).toBe(failure);
+    expect(counters.scheduleCanvasRender).toBe(1);
+    expect(counters.handleCanvasRenderFailure).toBe(1);
+  });
+
+  it("does not treat a superseded render result as a failure", async () => {
+    const { counters, effects } = effectCounters();
+    effects.scheduleCanvasRender = () => {
+      counters.scheduleCanvasRender += 1;
+      return Promise.resolve("superseded");
+    };
+
+    executeComparisonViewTransition(
+      comparison,
+      state({ txid: txid(1) }),
+      state({ txid: txid(2) }),
+      effects,
+    );
+    await Promise.resolve();
+
+    expect(counters.scheduleCanvasRender).toBe(1);
+    expect(counters.handleCanvasRenderFailure).toBe(0);
   });
 });

@@ -1,17 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  comparisonWitnessVariantDescription,
+  comparisonPolicyFilterMatches,
   compareCurrentSnapshots,
   lookupComparisonTransaction,
-  requireLoadedSnapshot,
+  type ComparedTransaction,
+  type CurrentComparison,
 } from "./comparison-model";
 import { loadedSource } from "./comparison-test-fixtures";
+import {
+  SOURCE_DIFFERENCE_ANCESTOR_PACKAGE,
+  SOURCE_DIFFERENCE_REPLACEABILITY,
+  SOURCE_DIFFERENCE_WITNESS_VARIANT,
+} from "./packed-store";
 import { mempoolTransaction, txid } from "./test-fixtures";
-import type {
-  Bip110Assessment,
-  MempoolTransaction,
-  SourceSnapshotResponse,
-} from "./types";
+import type { Bip110Assessment, MempoolTransaction } from "./types";
 
 const transaction = (
   value: number,
@@ -26,6 +30,51 @@ const transaction = (
     entered_at_ms: 1_699_999_000_000 + value,
     bip110,
   });
+
+describe("comparisonPolicyFilterMatches", () => {
+  const violating: Bip110Assessment = {
+    status: "violating",
+    primary_rule: "element_size",
+    violated_rules: ["element_size"],
+    unknown_rules: ["output_size"],
+  };
+  const assessed = transaction(1, 100, violating);
+  const unassessed = transaction(2, 100, null);
+
+  it("matches status, marginal rule, and signature filters", () => {
+    expect(comparisonPolicyFilterMatches(assessed, { kind: "all" })).toBe(true);
+    expect(
+      comparisonPolicyFilterMatches(assessed, {
+        kind: "status",
+        status: "violating",
+      }),
+    ).toBe(true);
+    expect(
+      comparisonPolicyFilterMatches(assessed, {
+        kind: "rule",
+        rule: "element_size",
+      }),
+    ).toBe(true);
+    expect(
+      comparisonPolicyFilterMatches(assessed, {
+        kind: "rule",
+        rule: "output_size",
+      }),
+    ).toBe(false);
+    expect(
+      comparisonPolicyFilterMatches(assessed, {
+        kind: "signature",
+        signature: "partial:02:01",
+      }),
+    ).toBe(true);
+    expect(
+      comparisonPolicyFilterMatches(unassessed, {
+        kind: "status",
+        status: "unclassified",
+      }),
+    ).toBe(true);
+  });
+});
 
 describe("compareCurrentSnapshots", () => {
   it("merge-joins sorted membership into three disjoint regions", () => {
@@ -72,6 +121,10 @@ describe("compareCurrentSnapshots", () => {
       left_only_vsize: 200,
       right_only_count: 1,
       right_only_vsize: 400,
+      common_source_difference_count: 2,
+      common_witness_variant_count: 0,
+      common_ancestor_package_difference_count: 2,
+      common_replaceability_difference_count: 0,
     });
     expect(comparison.observed_skew_ms).toBe(3_000);
     expect(comparison.earlier_side).toBe("left");
@@ -100,12 +153,116 @@ describe("compareCurrentSnapshots", () => {
     expect(comparison.common).toHaveLength(1);
     expect(comparison.common[0]).toMatchObject({
       txid: txid(1),
-      same_wtxid: false,
+      witness_relation: "different",
       left: { wtxid: txid(10), vsize: 100 },
       right: { wtxid: txid(11), vsize: 120 },
     });
+    expect(comparison.common_source_difference_flags).toEqual(
+      Uint8Array.of(
+        SOURCE_DIFFERENCE_WITNESS_VARIANT | SOURCE_DIFFERENCE_ANCESTOR_PACKAGE,
+      ),
+    );
+    expect(comparison.totals).toMatchObject({
+      common_source_difference_count: 1,
+      common_witness_variant_count: 1,
+      common_ancestor_package_difference_count: 1,
+      common_replaceability_difference_count: 0,
+    });
     expect(comparison.totals.common_left_vsize).toBe(100);
     expect(comparison.totals.common_right_vsize).toBe(120);
+  });
+
+  it("distinguishes loading, one-sided, same, and differing witness states", () => {
+    const comparison = compareCurrentSnapshots(
+      loadedSource(
+        "core",
+        [
+          transaction(1, 100, null, txid(10)),
+          transaction(2, 100, null, txid(20)),
+          transaction(3, 100, null, txid(30)),
+        ],
+        1_700_000_001_000,
+      ),
+      loadedSource(
+        "knots",
+        [
+          transaction(1, 120, null, txid(11)),
+          transaction(2, 120, null, txid(20)),
+        ],
+        1_700_000_001_000,
+      ),
+      false,
+    );
+
+    expect(comparison.common[0]?.witness_relation).toBe("loading");
+    expect(
+      comparisonWitnessVariantDescription(
+        comparison.common[0]?.witness_relation ?? "one_sided",
+      ),
+    ).toBe("Witness variants are still loading");
+    expect(comparison.left_only[0]?.witness_relation).toBe("one_sided");
+    expect(
+      comparisonWitnessVariantDescription(
+        comparison.left_only[0]?.witness_relation ?? "loading",
+      ),
+    ).toBe("Observed in one snapshot");
+    expect(comparison.common_source_difference_flags).toEqual(
+      Uint8Array.of(0, 0),
+    );
+
+    const ready = compareCurrentSnapshots(comparison.left, comparison.right);
+    expect(ready.common[0]?.witness_relation).toBe("different");
+    expect(
+      comparisonWitnessVariantDescription(
+        ready.common[0]?.witness_relation ?? "loading",
+      ),
+    ).toBe("Different witness variants");
+    expect(ready.common[1]?.witness_relation).toBe("same");
+    expect(
+      comparisonWitnessVariantDescription(
+        ready.common[1]?.witness_relation ?? "loading",
+      ),
+    ).toBe("Same witness variant");
+    expect(ready.common_source_difference_flags).toEqual(
+      Uint8Array.of(
+        SOURCE_DIFFERENCE_WITNESS_VARIANT | SOURCE_DIFFERENCE_ANCESTOR_PACKAGE,
+        SOURCE_DIFFERENCE_ANCESTOR_PACKAGE,
+      ),
+    );
+  });
+
+  it("derives overlapping source-local difference flags without materializing rows", () => {
+    const left = mempoolTransaction(1, {
+      wtxid: txid(10),
+      ancestor_vsize: 300,
+      ancestor_fee_sats: 3_000,
+      replaceable: false,
+    });
+    const right = mempoolTransaction(1, {
+      wtxid: txid(11),
+      ancestor_vsize: 400,
+      ancestor_fee_sats: 5_000,
+      replaceable: true,
+    });
+
+    const comparison = compareCurrentSnapshots(
+      loadedSource("core", [left]),
+      loadedSource("knots", [right]),
+    );
+
+    expect(comparison.common_source_difference_flags).toEqual(
+      Uint8Array.of(
+        SOURCE_DIFFERENCE_WITNESS_VARIANT |
+          SOURCE_DIFFERENCE_ANCESTOR_PACKAGE |
+          SOURCE_DIFFERENCE_REPLACEABILITY,
+      ),
+    );
+    expect(comparison.totals).toMatchObject({
+      common_source_difference_count: 1,
+      common_witness_variant_count: 1,
+      common_ancestor_package_difference_count: 1,
+      common_replaceability_difference_count: 1,
+    });
   });
 
   it("looks up source-local entries across every sorted membership region", () => {
@@ -152,34 +309,58 @@ describe("compareCurrentSnapshots", () => {
     ).toMatchObject({
       left: { vsize: 300 },
       right: { vsize: 440 },
-      same_wtxid: true,
+      witness_relation: "same",
     });
     expect(lookupComparisonTransaction(comparison, txid(5))).toBeNull();
     expect(lookupComparisonTransaction(comparison, txid(0))).toBeNull();
     expect(lookupComparisonTransaction(comparison, txid(10))).toBeNull();
+    expect(lookupComparisonTransaction(comparison, txid(1))?.region).toBe(
+      "common",
+    );
   });
 
-  it("rejects comparing a source with itself or an unavailable snapshot", () => {
+  it("looks up a rendered region logarithmically without iterating it", () => {
+    const entries = Array.from(
+      { length: 1_024 },
+      (_, index): ComparedTransaction => ({
+        txid: txid(index),
+        left: null,
+        right: null,
+        witness_relation: "one_sided",
+      }),
+    );
+    let indexedReads = 0;
+    const guardedEntries = new Proxy(entries, {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator || property === "find") {
+          throw new Error("comparison lookup must not iterate a region");
+        }
+        if (
+          typeof property === "string" &&
+          /^(0|[1-9][0-9]*)$/.test(property)
+        ) {
+          indexedReads += 1;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const comparison = {
+      common: guardedEntries,
+      left_only: [],
+      right_only: [],
+    } as unknown as CurrentComparison;
+
+    expect(lookupComparisonTransaction(comparison, txid(777))).toMatchObject({
+      region: "common",
+      entry: { txid: txid(777) },
+    });
+    expect(indexedReads).toBeLessThan(20);
+  });
+
+  it("rejects comparing a source with itself", () => {
     const source = loadedSource("core", [], 1_700_000_001_000);
     expect(() => compareCurrentSnapshots(source, source)).toThrow(
       "two distinct sources",
-    );
-
-    const waiting: SourceSnapshotResponse = {
-      source: {
-        ...source.source,
-        availability: "waiting",
-        last_poll_started_at_ms: null,
-        snapshot_observed_at_ms: null,
-        chain_tip: null,
-        transaction_count: null,
-        total_vsize: null,
-        classification: null,
-      },
-      snapshot: null,
-    };
-    expect(() => requireLoadedSnapshot(waiting)).toThrow(
-      "has no complete mempool snapshot",
     );
   });
 });

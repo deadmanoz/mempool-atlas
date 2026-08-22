@@ -5,6 +5,10 @@ import type {
   MempoolSnapshot,
   MempoolTransaction,
 } from "./types";
+import {
+  filterTransactionView,
+  sortTransactionViewByVsize,
+} from "./transaction-view";
 
 export const DEFAULT_CLASSIFIER_ID = "transaction_properties";
 
@@ -42,18 +46,15 @@ export const classificationPopulation = (
   classifierId: string,
   label: string,
 ): ClassificationPopulation => {
-  const matching = transactions
-    .filter(
+  const matching = sortTransactionViewByVsize(
+    filterTransactionView(
+      transactions,
       (transaction) =>
         classificationResult(transaction, classifierId)?.labels.includes(
           label,
         ) ?? false,
-    )
-    .sort((left, right) =>
-      right.vsize === left.vsize
-        ? left.txid.localeCompare(right.txid)
-        : right.vsize - left.vsize,
-    );
+    ),
+  );
   const vsize = matching.reduce(
     (total, transaction) => total + transaction.vsize,
     0,
@@ -66,16 +67,3 @@ export const classificationPopulation = (
     transactions: matching,
   };
 };
-
-export const firstPopulatedLabel = (
-  descriptor: ClassifierDescriptor,
-  summary: ClassifierSummary,
-): string =>
-  descriptor.labels.reduce(
-    (selected, candidate) =>
-      (summary.label_counts[candidate.key] ?? 0) >
-      (summary.label_counts[selected] ?? 0)
-        ? candidate.key
-        : selected,
-    descriptor.labels[0]?.key ?? "",
-  );

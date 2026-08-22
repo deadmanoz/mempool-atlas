@@ -1,3 +1,4 @@
+use bitcoin::OutPoint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ pub const BIP110_EVALUATOR_VERSION: &str = ATLAS_VERSION;
 pub const TRANSACTION_PROPERTIES_CLASSIFIER_ID: &str = "transaction_properties";
 pub const TRANSACTION_SHAPE_CLASSIFIER_ID: &str = "transaction_shape";
 pub const DATA_PROTOCOLS_CLASSIFIER_ID: &str = "data_protocols";
+pub const DATA_CARRIAGE_SHAPE_CLASSIFIER_ID: &str = "data_carriage_shape";
 pub const KNOTS_BIP110_CLASSIFIER_ID: &str = "knots_bip110";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -220,7 +222,7 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
         },
         ClassifierDescriptor {
             id: DATA_PROTOCOLS_CLASSIFIER_ID.to_owned(),
-            version: "2".to_owned(),
+            version: "3".to_owned(),
             title: "Data protocols".to_owned(),
             methodology: ClassifierMethodology::Fingerprint,
             semantics: ClassifierSemantics::MultiLabel,
@@ -260,7 +262,60 @@ pub fn classifier_catalog() -> Vec<ClassifierDescriptor> {
                 label(
                     "no_detected_protocol",
                     "No detected protocol",
-                    "No registered data-protocol fingerprint fired.",
+                    "No supported data-protocol fingerprint fired; this does not mean the transaction contains no embedded data.",
+                ),
+            ],
+        },
+        ClassifierDescriptor {
+            id: DATA_CARRIAGE_SHAPE_CLASSIFIER_ID.to_owned(),
+            version: "5".to_owned(),
+            title: "Data carriage shapes".to_owned(),
+            methodology: ClassifierMethodology::Heuristic,
+            semantics: ClassifierSemantics::MultiLabel,
+            required_facts: vec![
+                "raw_transaction".to_owned(),
+                "input_script_pubkeys".to_owned(),
+            ],
+            labels: vec![
+                label(
+                    "push_drop_witness",
+                    "Push/drop witness carrier",
+                    "A revealed witness script contains a large balanced data-push and drop run.",
+                ),
+                label(
+                    "opcode_value_coding",
+                    "Opcode-value coding",
+                    "A revealed witness script contains a valid self-framed OP_PLENTY opcode sequence.",
+                ),
+                label(
+                    "p2wsh_envelope",
+                    "P2WSH conditional envelope",
+                    "A committed P2WSH witness script has the exact JXL-n-hide never-taken conditional grammar.",
+                ),
+                label(
+                    "witness_argument_carrier",
+                    "Witness-argument carrier",
+                    "Large witness arguments are exactly consumed by a drop-only revealed script.",
+                ),
+                label(
+                    "output_key_carrier",
+                    "Output-field carrier",
+                    "A self-consistent OLGA-style payload spans an exact equal-value P2WSH output run.",
+                ),
+                label(
+                    "off_curve_p2tr",
+                    "Off-curve P2TR key",
+                    "A P2TR output contains bytes that are not a valid secp256k1 x-only public key.",
+                ),
+                label(
+                    "embedded_file_magic",
+                    "Embedded file signature",
+                    "Canonical raw transaction bytes contain a strong registered file-format signature.",
+                ),
+                label(
+                    "no_detected_carriage_shape",
+                    "No detected carriage shape",
+                    "No registered data-carriage shape heuristic fired; this does not mean no hidden or unrecognized carrier exists.",
                 ),
             ],
         },
@@ -325,6 +380,14 @@ pub(crate) fn test_classifier_results(assessment: &Bip110Assessment) -> Vec<Clas
             state: ClassificationResultState::Complete,
             primary_label: Some("no_detected_protocol".to_owned()),
             labels: vec!["no_detected_protocol".to_owned()],
+            missing_facts: Vec::new(),
+            evidence: Some(serde_json::json!({ "fixture": true })),
+        },
+        ClassificationResult {
+            classifier_id: DATA_CARRIAGE_SHAPE_CLASSIFIER_ID.to_owned(),
+            state: ClassificationResultState::Complete,
+            primary_label: Some("no_detected_carriage_shape".to_owned()),
+            labels: vec!["no_detected_carriage_shape".to_owned()],
             missing_facts: Vec::new(),
             evidence: Some(serde_json::json!({ "fixture": true })),
         },
@@ -523,6 +586,7 @@ pub struct TransactionStructure {
     pub input_count: u64,
     pub output_count: u64,
     pub op_return_bytes: u64,
+    pub recognized_carried_bytes: u64,
     pub output_sats: u64,
     pub witness_bytes: u64,
 }
@@ -556,9 +620,30 @@ impl TransactionStructure {
             input_count,
             output_count,
             op_return_bytes,
+            recognized_carried_bytes: op_return_bytes,
             output_sats,
             witness_bytes,
         })
+    }
+
+    pub fn with_recognized_carried_bytes(
+        mut self,
+        recognized_carried_bytes: u64,
+    ) -> Result<Self, ModelError> {
+        if recognized_carried_bytes < self.op_return_bytes {
+            return Err(ModelError::RecognizedCarriedBytesBelowOpReturn {
+                recognized_carried_bytes,
+                op_return_bytes: self.op_return_bytes,
+            });
+        }
+        if recognized_carried_bytes > MAX_SAFE_JSON_INTEGER {
+            return Err(ModelError::UnsafeJsonInteger {
+                field: "recognized_carried_bytes",
+                value: recognized_carried_bytes,
+            });
+        }
+        self.recognized_carried_bytes = recognized_carried_bytes;
+        Ok(self)
     }
 }
 
@@ -837,6 +922,11 @@ pub struct TransactionClassification {
     pub results: Vec<ClassificationResult>,
     pub assessment: Bip110Assessment,
     pub rules: Vec<Bip110RuleDetail>,
+    /// Exact input outpoints retained only for publication-bound, lazy
+    /// conflicting-spend verification. They never enter the ordinary snapshot
+    /// or transaction-detail JSON contracts.
+    #[serde(skip)]
+    pub(crate) input_outpoints: Option<Arc<[OutPoint]>>,
 }
 
 pub type TransactionClassifications = BTreeMap<String, Arc<TransactionClassification>>;
@@ -965,6 +1055,20 @@ impl MempoolObservation {
 }
 
 fn validate_classification(classification: &TransactionClassification) -> Result<(), ModelError> {
+    if let Some(outpoints) = &classification.input_outpoints {
+        if u64::try_from(outpoints.len()).ok() != Some(classification.structure.input_count) {
+            return Err(ModelError::InvalidClassificationDetail {
+                txid: classification.txid.clone(),
+                reason: "retained input outpoints do not match the transaction input count",
+            });
+        }
+        if outpoints.iter().any(OutPoint::is_null) {
+            return Err(ModelError::InvalidClassificationDetail {
+                txid: classification.txid.clone(),
+                reason: "retained input outpoints cannot contain a null outpoint",
+            });
+        }
+    }
     validate_classifier_results(&classification.txid, &classification.results)?;
     let policy = classification
         .results
@@ -1234,12 +1338,6 @@ pub struct SourcesResponse {
     pub sources: Vec<SourceSummary>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct SourceSnapshotResponse {
-    pub source: SourceSummary,
-    pub snapshot: Option<Arc<MempoolSnapshot>>,
-}
-
 pub fn validate_source_id(value: &str) -> Result<(), ModelError> {
     if value.is_empty()
         || matches!(value, "." | "..")
@@ -1286,6 +1384,13 @@ pub enum ModelError {
         "transaction structure must describe at least one input and one output, got {input_count} and {output_count}"
     )]
     EmptyTransactionStructure { input_count: u64, output_count: u64 },
+    #[error(
+        "recognized carried bytes {recognized_carried_bytes} cannot be below OP_RETURN bytes {op_return_bytes}"
+    )]
+    RecognizedCarriedBytesBelowOpReturn {
+        recognized_carried_bytes: u64,
+        op_return_bytes: u64,
+    },
     #[error("{field} value {value} cannot be represented exactly in JSON")]
     UnsafeJsonInteger { field: &'static str, value: u64 },
     #[error("{field} value {value} cannot be represented exactly in JSON")]
@@ -1335,6 +1440,20 @@ mod tests {
         TransactionStructure::new(1, 2, 0, 50_000, 107).expect("structure")
     }
 
+    #[test]
+    fn recognized_carriage_cannot_erase_op_return_bytes() {
+        let structure = TransactionStructure::new(1, 1, 80, 1_000, 0).expect("structure");
+        assert_eq!(structure.recognized_carried_bytes, 80);
+        assert!(structure.with_recognized_carried_bytes(79).is_err());
+        assert_eq!(
+            structure
+                .with_recognized_carried_bytes(1_610)
+                .expect("recognized carriage")
+                .recognized_carried_bytes,
+            1_610
+        );
+    }
+
     fn compatible_classification(txid: &str, wtxid: &str) -> Arc<TransactionClassification> {
         let assessment = Bip110Assessment {
             status: Bip110Status::Compatible,
@@ -1360,7 +1479,49 @@ mod tests {
                     missing: Vec::new(),
                 })
                 .collect(),
+            input_outpoints: None,
         })
+    }
+
+    fn retained_outpoint(marker: &str, vout: u32) -> OutPoint {
+        OutPoint {
+            txid: marker.repeat(32).parse().expect("outpoint txid"),
+            vout,
+        }
+    }
+
+    #[test]
+    fn classification_validates_private_input_outpoint_cardinality() {
+        let mut classification = compatible_classification("00", "10");
+        Arc::make_mut(&mut classification).input_outpoints =
+            Some(vec![retained_outpoint("11", 0), retained_outpoint("22", 1)].into());
+
+        assert!(matches!(
+            validate_classification(&classification),
+            Err(ModelError::InvalidClassificationDetail { reason, .. })
+                if reason.contains("input count")
+        ));
+    }
+
+    #[test]
+    fn classification_rejects_a_private_null_input_outpoint() {
+        let mut classification = compatible_classification("00", "10");
+        Arc::make_mut(&mut classification).input_outpoints = Some(vec![OutPoint::null()].into());
+
+        assert!(matches!(
+            validate_classification(&classification),
+            Err(ModelError::InvalidClassificationDetail { reason, .. })
+                if reason.contains("null outpoint")
+        ));
+    }
+
+    #[test]
+    fn classification_accepts_matching_private_input_outpoints() {
+        let mut classification = compatible_classification("00", "10");
+        Arc::make_mut(&mut classification).input_outpoints =
+            Some(vec![retained_outpoint("33", 7)].into());
+
+        validate_classification(&classification).expect("valid retained outpoints");
     }
 
     #[test]
@@ -1650,6 +1811,7 @@ mod tests {
             results: test_classifier_results(&assessment),
             assessment,
             rules,
+            input_outpoints: None,
         });
 
         assert!(matches!(

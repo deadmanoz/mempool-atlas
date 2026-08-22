@@ -17,7 +17,7 @@
 //! assert our verdict matches.
 
 use crate::bip110::{
-    EvaluationContext, EvaluationMode, PrevoutFacts, PrevoutSet, RuleId, evaluate,
+    EvaluationContext, EvaluationMode, PrevoutFacts, PrevoutSet, RuleId, evaluate_consensus,
     evaluate_mempool_policy,
 };
 use bitcoin::consensus::encode::deserialize_hex;
@@ -107,7 +107,7 @@ fn official_vectors_replay() {
         let prevouts = prevouts(v, creation_height);
 
         let ctx = EvaluationContext::new(Some(ACTIVATION), SPEND);
-        let evidence = evaluate(&tx, &ctx, &prevouts);
+        let evidence = evaluate_consensus(&tx, &ctx, &prevouts);
 
         assert!(
             evidence.rules_applied,

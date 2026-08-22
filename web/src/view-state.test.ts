@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ComparisonPolicyFilter } from "./comparison-model";
 import {
+  mergeCampaignQuery,
   parseComparisonPolicyFilter,
   parseComparisonViewState,
   parseNodeViewState,
@@ -12,15 +13,39 @@ import {
 
 const TXID = "ab".repeat(32);
 
+describe("campaign URL state", () => {
+  it("preserves repeated UTM parameters without retaining unrelated input", () => {
+    expect(
+      mergeCampaignQuery(
+        "source=core",
+        "?utm_source=social&utm_source=nostr&utm_campaign=launch&ignored=value",
+      ),
+    ).toBe(
+      "source=core&utm_source=social&utm_source=nostr&utm_campaign=launch",
+    );
+  });
+
+  it("keeps serialized application state authoritative", () => {
+    expect(
+      mergeCampaignQuery(
+        "left=core&right=knots&region=common",
+        "?left=ignored&utm_medium=profile",
+      ),
+    ).toBe("left=core&right=knots&region=common&utm_medium=profile");
+  });
+});
+
 describe("node URL state", () => {
   it("parses source, classifier, rule, and transaction state", () => {
     expect(
       parseNodeViewState(
-        `?source=core&classifier=data_protocols&rule=element_size&txid=${TXID}&ignored=value`,
+        `?source=core&classifier=data_protocols&label=runes&label=inscription&match=all&rule=element_size&txid=${TXID}&ignored=value`,
       ),
     ).toEqual({
       source: "core",
       classifier: "data_protocols",
+      classifierLabels: ["inscription", "runes"],
+      classifierMatch: "all",
       selection: { kind: "rule", rule: "element_size" },
       txid: TXID,
     });
@@ -43,6 +68,8 @@ describe("node URL state", () => {
     ).toEqual({
       source: null,
       classifier: null,
+      classifierLabels: [],
+      classifierMatch: "any",
       selection: null,
       txid: TXID,
     });
@@ -56,6 +83,8 @@ describe("node URL state", () => {
     ).toEqual({
       source: null,
       classifier: null,
+      classifierLabels: [],
+      classifierMatch: "any",
       selection: null,
       txid: null,
     });
@@ -72,11 +101,13 @@ describe("node URL state", () => {
       serializeNodeViewState({
         source: "core",
         classifier: "data_protocols",
+        classifierLabels: ["runes", "inscription", "runes"],
+        classifierMatch: "all",
         selection: { kind: "region", regionKey: "exact:2" },
         txid: TXID.toUpperCase(),
       }),
     ).toBe(
-      `source=core&classifier=data_protocols&region=exact%3A02&txid=${TXID}`,
+      `source=core&classifier=data_protocols&label=inscription&label=runes&match=all&region=exact%3A02&txid=${TXID}`,
     );
   });
 
@@ -85,13 +116,26 @@ describe("node URL state", () => {
       serializeNodeViewState({
         source: "..",
         classifier: "Not Valid",
+        classifierLabels: ["invalid-label", "valid_label"],
+        classifierMatch: "all",
         selection: {
           kind: "region",
           regionKey: "partial:00:40",
         },
         txid: "z".repeat(64),
       }),
-    ).toBe("");
+    ).toBe("label=valid_label&match=all");
+  });
+
+  it("canonicalizes classifier label queries and defaults unknown modes to any", () => {
+    expect(
+      parseNodeViewState(
+        "?label=p2wsh&label=bad-label&label=p2tr&label=p2wsh&match=neither",
+      ),
+    ).toMatchObject({
+      classifierLabels: ["p2tr", "p2wsh"],
+      classifierMatch: "any",
+    });
   });
 });
 

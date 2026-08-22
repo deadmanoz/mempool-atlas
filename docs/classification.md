@@ -3,8 +3,9 @@
 Mempool Atlas classifies current transactions through independent lenses. A
 lens answers one bounded question and never attempts to infer a single
 universal transaction type. The same transaction can therefore carry exact
-structural labels, one or more heuristic shape labels, data-protocol
-fingerprints, and a source-local policy assessment at the same time.
+structural labels, transaction and data-carriage shape heuristics,
+data-protocol fingerprints, and a source-local policy assessment at the same
+time.
 
 This specification is original to Mempool Atlas. The transaction-properties
 vocabulary is intended to be familiar to users of public mempool explorers,
@@ -127,7 +128,7 @@ no labels at all rather than claiming that no shape applies. Version 1 emitted
 `other_shape` in that case, which asserted a negative fact while a rule was
 still unresolved.
 
-## `data_protocols` version 2
+## `data_protocols` version 3
 
 This fingerprint, multi-label lens locates recognizable data-carrier patterns
 in transaction bytes. It does not execute a protocol state machine or prove
@@ -148,9 +149,12 @@ relies on ARC4 for any security property.
 
 ### Witness carriers
 
-- `inscription` identifies `OP_FALSE OP_IF <push "ord">` in an inferred
-  Taproot leaf script. A raw witness-byte fallback may also identify the same
-  opening and records lower-confidence evidence.
+- `inscription` identifies either the classic `OP_FALSE OP_IF <push "ord">`
+  envelope or the RDTS-compatible bare `ord` push followed by data pushes
+  balanced back to zero depth with `OP_DROP` and `OP_2DROP`. The latter accepts
+  data pushes through 256 bytes and rejects a 257-byte push. Evidence records
+  which framing matched. A raw witness-byte fallback may also identify the
+  classic opening and records lower-confidence evidence.
 - `brc20` additionally requires an inscription body containing the
   whitespace-insensitive marker `"p":"brc-20"`. Every `brc20` result also
   includes `inscription`. Atlas does not validate the JSON document.
@@ -247,6 +251,75 @@ output indexes.
   offsets. An unrelated Counterparty message whose text contains one of the
   markers would also match.
 
+Version 3 adds the RDTS-compatible Ordinals push/drop framing. It scans the
+complete revealed script and reports every valid classic and push/drop
+envelope, so an earlier inscription cannot hide a later BRC-20 marker. It keeps
+the existing `inscription` and `brc20` questions and label keys because only
+the recognized wire representation changed.
+
+## `data_carriage_shape` version 5
+
+This heuristic, multi-label lens asks whether a transaction contains a
+high-confidence bulk-carrier witness or output-field shape, independently of
+protocol branding or BIP-110 policy outcome. It inspects every output directly
+from the raw transaction and scripts revealed by known P2TR and P2WSH inputs.
+P2WSH witness scripts must match the spent output's SHA256 commitment. For
+P2TR inputs, Atlas checks the control-block shape but does not recompute the
+Taproot commitment.
+
+- `push_drop_witness` requires one contiguous, stack-neutral sequence made only
+  of data pushes no larger than 256 bytes, push-number opcodes, `OP_DROP`, and
+  `OP_2DROP`. The sequence must contain at least two pushed elements, carry at
+  least 64 pushed bytes, and balance to zero depth without an underflow or an
+  intervening opcode. This recognizes large push/drop carrier shapes without
+  treating an ordinary single value cleanup as bulk carriage.
+- `opcode_value_coding` requires OP_PLENTY's self-framing v2 form: seven
+  consecutive `OP_5` opcodes, eight valid modulo-22 length nibbles, an even and
+  fully present payload length, only registered encoding opcodes in the body,
+  and one of the three defined footers. Atlas does not infer this label from a
+  merely unusual opcode distribution.
+- `p2wsh_envelope` requires a revealed P2WSH witness script whose SHA256
+  commitment matches the spent output and whose complete instruction sequence
+  is the JXL-n-hide grammar: `OP_1 OP_NOTIF`, exactly six 255-byte pushes, then
+  `OP_ENDIF OP_1`. The same byte sequence in Tapscript does not match.
+- `witness_argument_carrier` requires at least four preceding witness arguments
+  of exactly 255 bytes each. The complete revealed P2WSH or P2TR script must
+  consist only of `OP_DROP` and `OP_2DROP` operations that consume exactly
+  those arguments, followed by `OP_1`.
+- `output_key_carrier` requires OLGA's two-byte big-endian payload length to
+  select exactly two or more consecutive equal-value P2WSH outputs. The
+  declared payload must consume that complete run, and every unused byte in
+  the final 32-byte program must be zero padding. An adjacent equal-value
+  P2WSH output makes the run ambiguous and prevents the label.
+- `off_curve_p2tr` requires a 34-byte P2TR output whose 32-byte program cannot
+  be parsed as a secp256k1 x-only public key. That proves the output key is
+  unusable, but it does not prove why those bytes were chosen.
+- `embedded_file_magic` requires a strong registered file-format signature in
+  the canonical raw transaction serialization. Version 5 recognizes PDF, the
+  full PNG signature, GIF87a/GIF89a, WASM version 1, the JPEG XL container,
+  JFIF JPEG, and common ISO-BMFF `ftyp` brands. The scanner retains only a fixed
+  overlap window and the first matching byte offset; it never buffers another
+  serialized transaction.
+- `no_detected_carriage_shape` is emitted only when every input script is known
+  and none of the seven registered heuristics fires.
+
+The seven positive labels are shapes, not proof of intent, protocol validity, or
+policy rejection. A partial result preserves a positive match while naming
+`input_script_pubkeys` as missing. If a spent-output script is unavailable and
+no positive match is proven, the lens emits no negative label.
+
+Version 5 adds the bounded raw-transaction file-signature scan. Version 4 added
+the exact witness-argument/drop correlation; version 3 added the exact
+committed P2WSH conditional envelope; version 2 added the exact OLGA output-run
+grammar and the off-curve P2TR test; version 1 contained only the two general
+witness-resident labels. The lens still does not claim generic on-curve
+output-key carriers, hash160 carriers, file validity from a signature alone,
+short collision-prone gzip or generic JPEG magic, other witness-argument ratios
+or item sizes, field steganography, signature channels, or commitments. The
+lens does not estimate total carried bytes. The separate
+`structure.recognized_carried_bytes` fact publishes only a conservative lower
+bound justified by the recognized shapes and OP_RETURN measure.
+
 ## `knots_bip110` version 1
 
 This rule-set lens is the existing compatibility assessment against Bitcoin
@@ -277,8 +350,23 @@ their existing meaning.
 
 The browser presents one classifier lens at a time through a shared selector.
 That selection drives both the Classifications overview and the Buckets view.
-Every lens remains visible in transaction-detail cards. Atlas never forms
-Cartesian-product regions across classifiers.
+Atlas never forms Cartesian-product regions across classifiers. Changing the
+selected lens changes the classifier outcome shown for the selected transaction;
+the inspector does not render a cross-lens card stack.
+
+In Classifications, each declared label is an independent toggle. ANY matches
+at least one selected label and ALL matches every selected label. ALL is
+available when at least two labels are selected from a multi-label descriptor;
+other classifier semantics normalize to ANY. Each matching transaction appears
+once in the full query result, with complete and partial populations rendered
+in separate Canvas sections. A proven label in a partial result remains
+queryable, while unavailable results never match. Selecting a block by pointer
+or keyboard opens only the transaction's membership facts and active-lens
+result. The label set and match mode are canonical URL state.
+In ALL mode, an unselected label is disabled when adding it would produce an
+empty intersection. Selected labels remain enabled so an impossible query
+restored from the URL can always be reduced, and the empty result explains how
+to recover by removing a label or switching to ANY.
 
 For an exact, heuristic, or fingerprint lens, Buckets partitions transactions
 by result coverage and a lens-specific presentation adapter. Complete,
@@ -298,10 +386,12 @@ The terrain preserves one selectable block per transaction inside its group.
 Section, bucket, and transaction area remain proportional to transaction count
 or virtual size, while density-aware spacing prevents the blocks from
 overwhelming the grouping hierarchy. Labels appear only where their region can
-display them cleanly, and marginal filters, samples, and transaction evidence
-remain available through progressive disclosure. Classifier partitions are
-cached for the current snapshot so selecting a group does not regroup and
-resort the full mempool.
+display them cleanly. Marginal filters remain available through progressive
+disclosure, while the selected transaction's facts and evidence remain directly
+visible in the inspector. The snapshot-wide count/vsize metric controls both
+terrain area and distribution weighting. Classifier partitions are cached for
+the current snapshot so selecting a group does not regroup and resort the full
+mempool.
 
 Selecting `knots_bip110` activates the specialist policy presentation. It uses
 compatible, indeterminate, unavailable, exact violated-rule-set, and partial
@@ -317,6 +407,16 @@ The default node view is Classifications. Buckets follows the selected
 classifier, while Fee rate by age remains independent of every classifier. The
 comparison page remains a source-local policy matrix rather than combining
 classifier taxonomies.
+
+Cross-source conflicting-spend analysis is also not a classifier. It answers a
+relationship question over two independent populations, so it stays in the
+browser-derived comparison product and never adds a label to either source.
+When chain tips differ and both classification lifecycles are terminal, the
+user can explicitly load a bounded source-local input fingerprint index.
+Fingerprint matches identify candidates only. Atlas reports a pair only after
+full 36-byte outpoints compare equal, excludes the same transaction ID, and
+states analyzed-row coverage for both sources. A match does not prove
+replacement intent, replay protection, rejection, relay cause, or safety.
 
 ## Structure facts
 
@@ -341,15 +441,41 @@ including inherited signaling; it is deliberately distinct from the exact
 Derived facts arrive progressively in the nullable `structure` object,
 computed from the same raw transaction bytes fetched for classification:
 
-| Fact | Definition |
-| --- | --- |
-| `input_count` | Number of transaction inputs |
-| `output_count` | Number of transaction outputs |
-| `op_return_bytes` | Sum of decoded pushed bytes across OP_RETURN output scripts; if a tail is not valid push-only script, count its serialized bytes after OP_RETURN |
-| `output_sats` | Sum of all output values in satoshis |
-| `witness_bytes` | Serialized total size minus base size |
+| Fact                       | Definition                                                                                                                                                                                                      |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `input_count`              | Number of transaction inputs                                                                                                                                                                                    |
+| `output_count`             | Number of transaction outputs                                                                                                                                                                                   |
+| `op_return_bytes`          | Sum across OP_RETURN outputs. When a tail decodes entirely to pushes, count the decoded pushed bytes; if decoding fails or any non-push opcode is present, count that output's serialized bytes after OP_RETURN |
+| `recognized_carried_bytes` | `op_return_bytes` plus the non-OP_RETURN bytes justified by the recognized high-confidence carrier shapes described below                                                                                   |
+| `output_sats`              | Sum of all output values in satoshis                                                                                                                                                                            |
+| `witness_bytes`            | Serialized total size minus base size                                                                                                                                                                           |
 
 `structure` is non-null exactly when classifier results are present for the
 transaction, and it carries forward between snapshots only while the exact
 `txid` and `wtxid` survive. Panels that consume derived facts state how many
 transactions they cover rather than treating missing facts as zeros.
+
+`recognized_carried_bytes` sums disjoint positive detections. It adds pushed
+bytes in a qualifying push/drop script, the decoded OP_PLENTY payload length,
+the six exact JXL-n-hide envelope pushes, exact 255-byte witness arguments
+consumed by matching drops, the declared OLGA payload length, and 32 bytes for
+each provably off-curve P2TR output key. Embedded file signatures add no bytes
+because they can describe bytes already counted through another carrier. The
+evidence display remains bounded, but that display limit does not truncate the
+byte total.
+
+This is a conservative recognized-carriage measure, not an estimate of all
+hidden data. It deliberately misses encrypted, on-curve, fragmented, or
+otherwise unrecognized channels, and it does not infer intent. The OP_RETURN
+component retains the hybrid definition above, including its serialized-tail
+fallback for malformed or non-push scripts. Positive facts can contribute while
+a classifier result is partial; missing facts are never treated as zero when
+the structure object itself is unavailable.
+
+The Data carriage distribution plots this transaction-total fact, not
+serialized script size and not a per-output policy limit. Its reference ticks
+include the historical 40-byte and 80-byte pushed-data defaults and exact sizes
+for recognized witness, JXL-n-hide, and OLGA carriers. The 80-byte tick explains
+the related 83-byte serialized OP_RETURN script reference without placing that
+different measurement on the axis. The axis extends to 512 KiB so large witness
+carriers remain visible.

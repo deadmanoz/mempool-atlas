@@ -1,7 +1,12 @@
 import {
+  comparisonPolicyFilterMatches,
   comparisonRegionEntries,
+  policySideForRegion,
+  sourceEntry,
   type ComparedTransaction,
+  type ComparisonPolicyFilter,
   type ComparisonRegionKey,
+  type ComparisonSide,
   type CurrentComparison,
 } from "./comparison-model";
 import { prepareCanvasBacking } from "./canvas-backing";
@@ -18,20 +23,26 @@ export interface ComparisonRegionLayout {
   rect: ComparisonRect;
   contentRect: ComparisonRect;
   transactionCount: number;
+  entries: readonly ComparedTransaction[];
+  sourceDifferenceFlags: Uint8Array | null;
+  columns: number;
+  rows: number;
+  cellWidth: number;
+  cellHeight: number;
+  gap: number;
 }
 
 export interface ComparisonGlyph {
   txid: string;
   regionKey: ComparisonRegionKey;
   rect: ComparisonRect;
-  differingWitnessVariant: boolean;
+  sourceDifferenceFlags: number;
 }
 
 export interface ComparisonLayout {
   width: number;
   height: number;
   regions: ComparisonRegionLayout[];
-  glyphs: ComparisonGlyph[];
 }
 
 export interface ComparisonGeometry {
@@ -47,6 +58,20 @@ export interface ComparisonCanvasRenderResult {
   reusedGeometry: boolean;
 }
 
+export type ComparisonPaintBatch =
+  | {
+      kind: "population";
+      region: ComparisonRegionLayout;
+      start: number;
+      end: number;
+    }
+  | {
+      kind: "source-difference";
+      region: ComparisonRegionLayout;
+      start: number;
+      end: number;
+    };
+
 export type ComparisonHit =
   | { kind: "transaction"; glyph: ComparisonGlyph }
   | { kind: "region"; region: ComparisonRegionLayout }
@@ -60,6 +85,7 @@ const REGION_ORDER: readonly ComparisonRegionKey[] = [
 const OUTER_INSET = 10;
 const REGION_GAP = 5;
 const LABEL_HEIGHT = 48;
+export const COMPARISON_PAINT_BATCH_SIZE = 1_500;
 
 const contains = (rect: ComparisonRect, x: number, y: number): boolean =>
   x >= rect.x &&
@@ -67,39 +93,86 @@ const contains = (rect: ComparisonRect, x: number, y: number): boolean =>
   x <= rect.x + rect.width &&
   y <= rect.y + rect.height;
 
-const packRegion = (
+const configureRegionGrid = (
   entries: readonly ComparedTransaction[],
-  region: ComparisonRegionLayout,
-): ComparisonGlyph[] => {
+  contentRect: ComparisonRect,
+): Pick<
+  ComparisonRegionLayout,
+  "entries" | "columns" | "rows" | "cellWidth" | "cellHeight" | "gap"
+> => {
   if (
     entries.length === 0 ||
-    region.contentRect.width <= 0 ||
-    region.contentRect.height <= 0
+    contentRect.width <= 0 ||
+    contentRect.height <= 0
   ) {
-    return [];
+    return {
+      entries,
+      columns: 0,
+      rows: 0,
+      cellWidth: 0,
+      cellHeight: 0,
+      gap: 0,
+    };
   }
-  const aspect = region.contentRect.width / region.contentRect.height;
+  const aspect = contentRect.width / contentRect.height;
   const columns = Math.max(1, Math.ceil(Math.sqrt(entries.length * aspect)));
   const rows = Math.max(1, Math.ceil(entries.length / columns));
-  const cellWidth = region.contentRect.width / columns;
-  const cellHeight = region.contentRect.height / rows;
+  const cellWidth = contentRect.width / columns;
+  const cellHeight = contentRect.height / rows;
   const gap = Math.min(0.65, cellWidth * 0.08, cellHeight * 0.08);
+  return { entries, columns, rows, cellWidth, cellHeight, gap };
+};
 
-  return entries.map((entry, index) => {
-    const column = index % columns;
-    const row = Math.floor(index / columns);
-    return {
-      txid: entry.txid,
-      regionKey: region.key,
-      rect: {
-        x: region.contentRect.x + column * cellWidth + gap,
-        y: region.contentRect.y + row * cellHeight + gap,
-        width: Math.max(0.2, cellWidth - gap * 2),
-        height: Math.max(0.2, cellHeight - gap * 2),
-      },
-      differingWitnessVariant: entry.same_wtxid === false,
-    };
-  });
+const glyphRect = (
+  region: ComparisonRegionLayout,
+  index: number,
+): ComparisonRect => {
+  const column = index % region.columns;
+  const row = Math.floor(index / region.columns);
+  return {
+    x: region.contentRect.x + column * region.cellWidth + region.gap,
+    y: region.contentRect.y + row * region.cellHeight + region.gap,
+    width: Math.max(0.2, region.cellWidth - region.gap * 2),
+    height: Math.max(0.2, region.cellHeight - region.gap * 2),
+  };
+};
+
+const glyphAtPoint = (
+  region: ComparisonRegionLayout,
+  x: number,
+  y: number,
+): ComparisonGlyph | null => {
+  if (region.columns === 0 || !contains(region.contentRect, x, y)) return null;
+  const column = Math.floor((x - region.contentRect.x) / region.cellWidth);
+  const row = Math.floor((y - region.contentRect.y) / region.cellHeight);
+  const index = row * region.columns + column;
+  const entry = region.entries[index];
+  if (entry === undefined) return null;
+  const rect = glyphRect(region, index);
+  return contains(rect, x, y)
+    ? {
+        txid: entry.txid,
+        regionKey: region.key,
+        rect,
+        sourceDifferenceFlags: region.sourceDifferenceFlags?.[index] ?? 0,
+      }
+    : null;
+};
+
+const entryIndex = (
+  entries: readonly ComparedTransaction[],
+  txid: string,
+): number | null => {
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const candidate = entries[middle];
+    if (candidate === undefined) return null;
+    if (candidate.txid < txid) low = middle + 1;
+    else high = middle;
+  }
+  return entries[low]?.txid === txid ? low : null;
 };
 
 export const createComparisonLayout = (
@@ -139,16 +212,21 @@ export const createComparisonLayout = (
       height: innerHeight,
     };
     const labelHeight = Math.min(LABEL_HEIGHT, Math.max(0, rect.height - 1));
+    const entries = comparisonRegionEntries(comparison, key);
+    const contentRect = {
+      x: rect.x + 4,
+      y: rect.y + labelHeight,
+      width: Math.max(0, rect.width - 8),
+      height: Math.max(0, rect.height - labelHeight - 4),
+    };
     regions.push({
       key,
       rect,
-      contentRect: {
-        x: rect.x + 4,
-        y: rect.y + labelHeight,
-        width: Math.max(0, rect.width - 8),
-        height: Math.max(0, rect.height - labelHeight - 4),
-      },
-      transactionCount: comparisonRegionEntries(comparison, key).length,
+      contentRect,
+      transactionCount: entries.length,
+      sourceDifferenceFlags:
+        key === "common" ? comparison.common_source_difference_flags : null,
+      ...configureRegionGrid(entries, contentRect),
     });
     x += regionWidth + REGION_GAP;
   }
@@ -157,9 +235,6 @@ export const createComparisonLayout = (
     width: safeWidth,
     height: safeHeight,
     regions,
-    glyphs: regions.flatMap((region) =>
-      packRegion(comparisonRegionEntries(comparison, region.key), region),
-    ),
   };
 };
 
@@ -168,9 +243,9 @@ export const hitTestComparison = (
   x: number,
   y: number,
 ): ComparisonHit => {
-  const glyph = layout.glyphs.find(({ rect }) => contains(rect, x, y));
-  if (glyph !== undefined) {
-    return { kind: "transaction", glyph };
+  for (const region of layout.regions) {
+    const glyph = glyphAtPoint(region, x, y);
+    if (glyph !== null) return { kind: "transaction", glyph };
   }
   const region = layout.regions.find(({ rect }) => contains(rect, x, y));
   return region === undefined ? null : { kind: "region", region };
@@ -194,12 +269,11 @@ const regionTitle = (
     : `Observed only in ${comparison.right.snapshot.source_label} snapshot`;
 };
 
-export const paintComparison = (
+const paintComparisonHeaders = (
   context: CanvasRenderingContext2D,
   layout: ComparisonLayout,
   comparison: CurrentComparison,
   selectedRegion: ComparisonRegionKey,
-  activeTransactionId: string | null = null,
 ): void => {
   context.clearRect(0, 0, layout.width, layout.height);
   context.textBaseline = "middle";
@@ -239,50 +313,194 @@ export const paintComparison = (
       Math.max(0, region.rect.width - 16),
     );
   }
+};
 
+export const comparisonPaintBatches = (
+  layout: ComparisonLayout,
+  batchSize = COMPARISON_PAINT_BATCH_SIZE,
+): ComparisonPaintBatch[] => {
+  if (!Number.isSafeInteger(batchSize) || batchSize <= 0) {
+    throw new RangeError("Comparison paint batch size must be positive");
+  }
+  const batches: ComparisonPaintBatch[] = [];
   for (const region of layout.regions) {
-    context.fillStyle = REGION_COLOR[region.key];
-    context.globalAlpha = region.key === selectedRegion ? 0.9 : 0.52;
-    for (const glyph of layout.glyphs) {
-      if (glyph.regionKey === region.key) {
-        context.fillRect(
-          glyph.rect.x,
-          glyph.rect.y,
-          glyph.rect.width,
-          glyph.rect.height,
-        );
-      }
+    for (let start = 0; start < region.transactionCount; start += batchSize) {
+      batches.push({
+        kind: "population",
+        region,
+        start,
+        end: Math.min(start + batchSize, region.transactionCount),
+      });
     }
   }
+  const common = layout.regions.find(({ key }) => key === "common");
+  if (common !== undefined) {
+    for (let start = 0; start < common.transactionCount; start += batchSize) {
+      batches.push({
+        kind: "source-difference",
+        region: common,
+        start,
+        end: Math.min(start + batchSize, common.transactionCount),
+      });
+    }
+  }
+  return batches;
+};
+
+const paintComparisonBatch = (
+  context: CanvasRenderingContext2D,
+  batch: ComparisonPaintBatch,
+  selectedRegion: ComparisonRegionKey,
+  policySide: ComparisonSide,
+  policyFilter: ComparisonPolicyFilter,
+): void => {
+  const { region } = batch;
+  if (batch.kind === "population") {
+    context.fillStyle = REGION_COLOR[region.key];
+    if (region.key !== selectedRegion || policyFilter.kind === "all") {
+      context.beginPath();
+      context.globalAlpha = region.key === selectedRegion ? 0.9 : 0.52;
+      for (let index = batch.start; index < batch.end; index += 1) {
+        const rect = glyphRect(region, index);
+        context.rect(rect.x, rect.y, rect.width, rect.height);
+      }
+      context.fill();
+      return;
+    }
+
+    context.beginPath();
+    context.globalAlpha = 0.11;
+    for (let index = batch.start; index < batch.end; index += 1) {
+      const rect = glyphRect(region, index);
+      context.rect(rect.x, rect.y, rect.width, rect.height);
+    }
+    context.fill();
+
+    context.beginPath();
+    context.globalAlpha = 0.96;
+    const effectiveSide = policySideForRegion(region.key, policySide);
+    for (let index = batch.start; index < batch.end; index += 1) {
+      const entry = region.entries[index];
+      const transaction =
+        entry === undefined ? null : sourceEntry(entry, effectiveSide);
+      if (
+        transaction !== null &&
+        comparisonPolicyFilterMatches(transaction, policyFilter)
+      ) {
+        const rect = glyphRect(region, index);
+        context.rect(rect.x, rect.y, rect.width, rect.height);
+      }
+    }
+    context.fill();
+    return;
+  }
+  context.beginPath();
   context.globalAlpha = 1;
   context.strokeStyle = "#e1aa4b";
   context.lineWidth = 1;
-  for (const glyph of layout.glyphs) {
-    if (glyph.differingWitnessVariant) {
-      context.strokeRect(
-        glyph.rect.x,
-        glyph.rect.y,
-        glyph.rect.width,
-        glyph.rect.height,
-      );
+  const addDifference = (index: number): void => {
+    if ((region.sourceDifferenceFlags?.[index] ?? 0) === 0) return;
+    const rect = glyphRect(region, index);
+    context.rect(rect.x, rect.y, rect.width, rect.height);
+  };
+  if (policyFilter.kind === "all") {
+    for (let index = batch.start; index < batch.end; index += 1) {
+      addDifference(index);
     }
+    context.stroke();
+    return;
   }
-  if (activeTransactionId !== null) {
-    const activeGlyph = layout.glyphs.find(
-      ({ txid }) => txid === activeTransactionId,
-    );
-    if (activeGlyph !== undefined) {
-      context.strokeStyle = "#f5fbff";
-      context.lineWidth = 2;
-      context.strokeRect(
-        activeGlyph.rect.x,
-        activeGlyph.rect.y,
-        activeGlyph.rect.width,
-        activeGlyph.rect.height,
-      );
+  const effectiveSide = policySideForRegion(region.key, policySide);
+  for (let index = batch.start; index < batch.end; index += 1) {
+    if ((region.sourceDifferenceFlags?.[index] ?? 0) === 0) {
+      continue;
     }
+    const entry = region.entries[index];
+    const transaction =
+      entry === undefined ? null : sourceEntry(entry, effectiveSide);
+    if (
+      region.key === selectedRegion &&
+      (transaction === null ||
+        !comparisonPolicyFilterMatches(transaction, policyFilter))
+    ) {
+      continue;
+    }
+    addDifference(index);
   }
+  context.stroke();
 };
+
+export const comparisonTransactionRect = (
+  layout: ComparisonLayout,
+  activeTransactionId: string | null,
+): ComparisonRect | null => {
+  if (activeTransactionId === null) return null;
+  for (const region of layout.regions) {
+    const index = entryIndex(region.entries, activeTransactionId);
+    if (index !== null) return glyphRect(region, index);
+  }
+  return null;
+};
+
+export const paintActiveComparisonTransaction = (
+  context: CanvasRenderingContext2D,
+  layout: ComparisonLayout,
+  activeTransactionId: string | null,
+): void => {
+  context.globalAlpha = 1;
+  const rect = comparisonTransactionRect(layout, activeTransactionId);
+  if (rect === null) return;
+  context.strokeStyle = "#f5fbff";
+  context.lineWidth = 2;
+  context.strokeRect(rect.x, rect.y, rect.width, rect.height);
+};
+
+export const paintComparison = (
+  context: CanvasRenderingContext2D,
+  layout: ComparisonLayout,
+  comparison: CurrentComparison,
+  selectedRegion: ComparisonRegionKey,
+  policySide: ComparisonSide,
+  policyFilter: ComparisonPolicyFilter,
+  activeTransactionId: string | null = null,
+): void => {
+  paintComparisonHeaders(context, layout, comparison, selectedRegion);
+  for (const batch of comparisonPaintBatches(layout, Number.MAX_SAFE_INTEGER)) {
+    paintComparisonBatch(
+      context,
+      batch,
+      selectedRegion,
+      policySide,
+      policyFilter,
+    );
+  }
+  paintActiveComparisonTransaction(context, layout, activeTransactionId);
+};
+
+const runInAnimationFrame = (
+  work: () => void,
+  signal: AbortSignal,
+): Promise<void> =>
+  new Promise((resolve, reject) => {
+    signal.throwIfAborted();
+    const abort = (): void => {
+      window.cancelAnimationFrame(frame);
+      reject(signal.reason);
+    };
+    const callback = function comparisonPaintFrame() {
+      signal.removeEventListener("abort", abort);
+      try {
+        signal.throwIfAborted();
+        work();
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    };
+    Object.assign(callback, { __atlasPerfLabel: "comparison-paint" });
+    const frame = window.requestAnimationFrame(callback);
+    signal.addEventListener("abort", abort, { once: true });
+  });
 
 export const resolveComparisonGeometry = (
   comparison: CurrentComparison,
@@ -319,6 +537,8 @@ export const renderComparisonCanvas = (
   canvas: HTMLCanvasElement,
   comparison: CurrentComparison,
   selectedRegion: ComparisonRegionKey,
+  policySide: ComparisonSide,
+  policyFilter: ComparisonPolicyFilter,
   activeTransactionId: string | null,
   cached: ComparisonGeometry | null,
 ): ComparisonCanvasRenderResult => {
@@ -338,7 +558,66 @@ export const renderComparisonCanvas = (
     result.geometry.layout,
     comparison,
     selectedRegion,
+    policySide,
+    policyFilter,
     activeTransactionId,
+  );
+  return result;
+};
+
+export const renderComparisonCanvasProgressively = async (
+  canvas: HTMLCanvasElement,
+  comparison: CurrentComparison,
+  selectedRegion: ComparisonRegionKey,
+  policySide: ComparisonSide,
+  policyFilter: ComparisonPolicyFilter,
+  activeTransactionId: string | null,
+  cached: ComparisonGeometry | null,
+  signal: AbortSignal,
+): Promise<ComparisonCanvasRenderResult> => {
+  signal.throwIfAborted();
+  const { context, width, height, pixelRatio } = prepareCanvasBacking(
+    canvas,
+    "whole-pixel",
+  );
+  const result = resolveComparisonGeometry(
+    comparison,
+    width,
+    height,
+    pixelRatio,
+    cached,
+  );
+  await runInAnimationFrame(
+    () =>
+      paintComparisonHeaders(
+        context,
+        result.geometry.layout,
+        comparison,
+        selectedRegion,
+      ),
+    signal,
+  );
+  for (const batch of comparisonPaintBatches(result.geometry.layout)) {
+    await runInAnimationFrame(
+      () =>
+        paintComparisonBatch(
+          context,
+          batch,
+          selectedRegion,
+          policySide,
+          policyFilter,
+        ),
+      signal,
+    );
+  }
+  await runInAnimationFrame(
+    () =>
+      paintActiveComparisonTransaction(
+        context,
+        result.geometry.layout,
+        activeTransactionId,
+      ),
+    signal,
   );
   return result;
 };

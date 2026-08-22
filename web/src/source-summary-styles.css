@@ -1,0 +1,221 @@
+.node-heading-copy {
+  display: grid;
+  align-content: center;
+  gap: 0.25rem;
+  padding: 0.65rem 1rem;
+  border-right: 1px solid var(--border);
+}
+
+.node-heading-copy strong {
+  font-size: 0.78rem;
+}
+
+.node-heading-copy span {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.node-controls {
+  box-shadow: var(--shadow);
+}
+
+.node-controls-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.72rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.node-controls-heading > p {
+  max-width: 32rem;
+  margin: 0;
+  color: var(--faint);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.node-source-picker {
+  padding: 0.7rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.source-summary {
+  display: grid;
+  grid-template-rows: auto minmax(2.75rem, auto);
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: #0a171f;
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+.source-summary-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-rows: minmax(4.5rem, auto);
+  min-block-size: 4.5rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.source-summary-facts > div {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  padding: 0.6rem 0.9rem;
+  border-right: 1px solid var(--border);
+}
+
+.source-summary-facts > div:last-child {
+  border-right: 0;
+}
+
+.source-summary-facts dt {
+  margin-bottom: 0.22rem;
+  color: var(--faint);
+  font-size: 0.62rem;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.source-summary-facts dd {
+  display: flex;
+  align-items: baseline;
+  gap: 0.38rem;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-summary-facts dd strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-summary-facts dd code,
+.source-summary-facts dd small {
+  color: var(--faint);
+  font-size: 0.67rem;
+}
+
+#source-classification-summary {
+  display: grid;
+  min-width: 0;
+  min-block-size: 2.75rem;
+  align-items: center;
+  margin: 0;
+  padding: 0.48rem 0.9rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+#source-classification-summary[data-state="classifying"] {
+  color: #b9e9ec;
+}
+
+#source-classification-summary[data-state="paused"] {
+  color: #c9b989;
+}
+
+.node-transaction-search {
+  gap: 0.45rem;
+  padding: 0.8rem 0.85rem 0.85rem;
+  background:
+    linear-gradient(90deg, rgba(83, 217, 212, 0.08), transparent 18rem), #091820;
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+.node-transaction-search-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.node-transaction-search-heading > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.node-transaction-search-heading > div > strong {
+  color: var(--text);
+  font-size: 0.84rem;
+}
+
+.node-transaction-search-heading > span {
+  color: var(--faint);
+  font-size: 0.64rem;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.node-transaction-search input {
+  min-height: 2.75rem;
+  border-color: rgba(83, 217, 212, 0.5);
+  background: #07141c;
+  font-size: 0.78rem;
+}
+
+.node-transaction-search .transaction-search-row button {
+  min-width: 6.25rem;
+  min-height: 2.75rem;
+}
+
+@media (max-width: 900px) {
+  .node-header .node-heading-copy {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    border-top: 1px solid var(--border);
+    border-right: 0;
+  }
+
+  .node-controls-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .node-controls-heading > p {
+    max-width: none;
+    text-align: left;
+  }
+}
+
+@media (max-width: 620px) {
+  .source-summary-facts {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .source-summary-facts > div {
+    padding: 0.5rem 0.65rem;
+  }
+
+  .source-summary-facts > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .source-summary-facts > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  #source-classification-summary {
+    min-block-size: 4.5rem;
+    padding: 0.48rem 0.65rem;
+  }
+
+  .node-transaction-search-heading {
+    flex-direction: column;
+  }
+
+  .node-transaction-search-heading > span {
+    text-align: left;
+  }
+}

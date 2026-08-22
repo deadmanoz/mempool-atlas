@@ -1,0 +1,26 @@
+{
+  "name": "Mempool Atlas",
+  "short_name": "Atlas",
+  "description": "Explore current Bitcoin mempool membership and transaction classifications for a single node, or compare between two.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#071018",
+  "theme_color": "#071018",
+  "categories": ["finance", "utilities"],
+  "icons": [
+    {
+      "src": "/icons/mempool-atlas-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/mempool-atlas-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

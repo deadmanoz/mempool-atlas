@@ -8,6 +8,7 @@ import {
   type CurrentComparison,
 } from "./comparison-model";
 import type { ComparisonViewState } from "./view-state";
+import type { ComparisonCanvasRenderStatus } from "./comparison-canvas-view";
 
 export type ComparisonViewUpdateKind = "none" | "transaction" | "population";
 
@@ -24,10 +25,10 @@ export interface ResolvedComparisonViewTransition {
 export interface ComparisonViewTransitionEffects {
   applyResolvedView: (resolved: ResolvedComparisonViewTransition) => void;
   renderPopulation: () => void;
-  syncTransactionSelection: () => void;
   renderTransactionNavigator: () => void;
   updateQuery: () => void;
-  scheduleCanvasRender: () => void;
+  scheduleCanvasRender: () => Promise<ComparisonCanvasRenderStatus>;
+  handleCanvasRenderFailure: (error: unknown) => void;
   loadTransactionDetail: (entry: ComparedTransaction) => void;
 }
 
@@ -62,7 +63,7 @@ export const comparisonPolicyFiltersMatch = (
 /**
  * Resolve txid-driven region changes before deciding which comparison UI is
  * stale. Population identity excludes txid and includes only the effective
- * source-local region, side, and policy filter.
+ * per-node region, side, and policy filter.
  */
 export const resolveComparisonViewTransition = (
   comparison: CurrentComparison,
@@ -75,8 +76,7 @@ export const resolveComparisonViewTransition = (
       : lookupComparisonTransaction(comparison, requested.txid);
   const region = lookup?.region ?? requested.region ?? "common";
   const side = policySideForRegion(region, requested.side ?? "left");
-  const filter: ComparisonPolicyFilter =
-    requested.txid === null ? requested.filter : { kind: "all" };
+  const filter = requested.filter;
   const previousRegion = previous.region ?? "common";
   const previousSide = policySideForRegion(
     previousRegion,
@@ -126,12 +126,12 @@ export const executeComparisonViewTransition = (
   effects.applyResolvedView(resolved);
   if (resolved.updateKind === "population") {
     effects.renderPopulation();
-  } else {
-    effects.syncTransactionSelection();
   }
   effects.renderTransactionNavigator();
   effects.updateQuery();
-  effects.scheduleCanvasRender();
+  void effects
+    .scheduleCanvasRender()
+    .catch((error: unknown) => effects.handleCanvasRenderFailure(error));
   if (resolved.selectedEntry !== null) {
     effects.loadTransactionDetail(resolved.selectedEntry);
   }

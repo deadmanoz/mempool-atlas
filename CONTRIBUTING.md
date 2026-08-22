@@ -7,8 +7,10 @@ be agreed first.
 ## Development setup
 
 Install Rust 1.88 or newer, Node.js 20.19.x or 22.12 or newer, npm 10 or newer,
-and [`just`](https://github.com/casey/just). Then install the locked frontend
-dependencies and run the quality gate:
+and [`just`](https://github.com/casey/just). The local public-contract smoke run
+by `just test` also requires `awk`, `cp`, `curl`, `grep`, `head`, `jq`, `mkdir`,
+`mktemp`, `node`, `openssl`, `rm`, `sleep`, and `xxd` on `PATH`. Then install the
+locked frontend dependencies and run the quality gate:
 
 ```sh
 npm --prefix web ci
@@ -16,6 +18,18 @@ just lint
 just test
 just build
 ```
+
+Most development commands support the Node.js version range above. Run
+`just stage-projection` and `just perf-web` with exactly Node.js 22.23.2. The
+staged projection checks runtime-sensitive gzip byte evidence and rejects other
+Node.js versions; `just perf-web` includes that projection before running the
+browser performance matrix. Treat a Node patch update as a reviewed evidence
+change: update the CI runtime and projection pin together, regenerate the
+checked-in projection, and review its byte and gate diff.
+
+On a cold tree, `just test` builds both the optimized fixture-export profile
+used by public-contract smoke tests and the ordinary development/test trees.
+Seeing both Rust build paths compile during the first run is expected.
 
 Rust code must remain compatible with the declared 1.88 MSRV. Check it with:
 

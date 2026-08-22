@@ -1,3 +1,5 @@
+import { formatMembershipAge } from "./membership-table";
+
 export const countFormat = new Intl.NumberFormat();
 export const decimalFormat = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 2,
@@ -19,6 +21,23 @@ export const formatVsize = (value: number): string => {
   }
   return `${countFormat.format(value)} vB`;
 };
+
+export const formatDuration = (milliseconds: number): string => {
+  if (milliseconds < 1_000) return `${countFormat.format(milliseconds)} ms`;
+  if (milliseconds < 60_000) {
+    return `${decimalFormat.format(milliseconds / 1_000)} s`;
+  }
+  return formatMembershipAge(milliseconds);
+};
+
+export const formatTime = (milliseconds: number): string =>
+  new Date(milliseconds).toLocaleTimeString();
+
+export const compactTxid = (txid: string): string =>
+  `${txid.slice(0, 10)}…${txid.slice(-8)}`;
+
+export const formatTxidCount = (count: number): string =>
+  `${countFormat.format(count)} transaction ${count === 1 ? "ID" : "IDs"}`;
 
 const SATS_PER_BTC = 100_000_000;
 

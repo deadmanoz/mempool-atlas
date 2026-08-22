@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  fetchSourceSnapshot,
+  fetchSources,
   fetchTransactionDetail,
-  parseSourceSnapshotResponse,
+  parseSourceSummary,
   parseSourcesResponse,
   parseTransactionDetailResponse,
   transactionDetailMatchesSnapshot,
@@ -14,68 +14,38 @@ import type {
   TransactionDetailResponse,
 } from "./types";
 
-const TXID = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const BLOCK_HASH = "00".repeat(32);
+const TXID = "00".repeat(32);
+const BLOCK_HASH = "01".repeat(32);
 
-const classifierCatalog = () => [
-  {
-    id: "transaction_properties",
-    version: "1",
-    title: "Transaction properties",
-    methodology: "exact" as const,
-    semantics: "multi_label" as const,
-    required_facts: ["raw_transaction", "input_script_pubkeys"],
-    labels: [
-      { key: "version_2", label: "Version 2", description: "Version 2." },
-      { key: "p2wpkh", label: "P2WPKH", description: "Uses P2WPKH." },
-    ],
+const waitingSource = () => ({
+  source_id: "core",
+  source_label: "Bitcoin Core",
+  availability: "waiting",
+  poll_interval_seconds: 300,
+  last_poll_started_at_ms: null,
+  snapshot_observed_at_ms: null,
+  chain_tip: null,
+  transaction_count: null,
+  total_vsize: null,
+  classification: null,
+  last_error: null,
+});
+
+const readySource = () => ({
+  ...waitingSource(),
+  availability: "ready",
+  last_poll_started_at_ms: 1_700_000_000_000,
+  snapshot_observed_at_ms: 1_700_000_001_000,
+  chain_tip: { height: 900_000, hash: BLOCK_HASH },
+  transaction_count: 1,
+  total_vsize: 141,
+  classification: {
+    state: "complete",
+    revision: 3,
+    classified_count: 1,
+    unclassified_count: 0,
   },
-  {
-    id: "transaction_shape",
-    version: "1",
-    title: "Transaction shape",
-    methodology: "heuristic" as const,
-    semantics: "multi_label" as const,
-    required_facts: ["raw_transaction", "input_script_pubkeys"],
-    labels: [
-      {
-        key: "other_shape",
-        label: "Other shape",
-        description: "No shape matched.",
-      },
-    ],
-  },
-  {
-    id: "data_protocols",
-    version: "1",
-    title: "Data protocols",
-    methodology: "fingerprint" as const,
-    semantics: "multi_label" as const,
-    required_facts: ["raw_transaction"],
-    labels: [
-      {
-        key: "no_detected_protocol",
-        label: "No detected protocol",
-        description: "No fingerprint fired.",
-      },
-    ],
-  },
-  {
-    id: "knots_bip110",
-    version: "1",
-    title: "Knots BIP-110 compatibility",
-    methodology: "policy" as const,
-    semantics: "rule_set" as const,
-    required_facts: ["raw_transaction", "input_script_pubkeys"],
-    labels: [
-      {
-        key: "violating",
-        label: "Would violate",
-        description: "A violation was proven.",
-      },
-    ],
-  },
-];
+});
 
 const compactClassifications = () => [
   {
@@ -111,132 +81,6 @@ const compactClassifications = () => [
     evidence: null,
   },
 ];
-
-const classificationSummaries = () => [
-  {
-    classifier_id: "transaction_properties",
-    complete_count: 1,
-    partial_count: 0,
-    unclassified_count: 0,
-    label_counts: { version_2: 1, p2wpkh: 1 },
-  },
-  {
-    classifier_id: "transaction_shape",
-    complete_count: 1,
-    partial_count: 0,
-    unclassified_count: 0,
-    label_counts: { other_shape: 1 },
-  },
-  {
-    classifier_id: "data_protocols",
-    complete_count: 1,
-    partial_count: 0,
-    unclassified_count: 0,
-    label_counts: { no_detected_protocol: 1 },
-  },
-  {
-    classifier_id: "knots_bip110",
-    complete_count: 1,
-    partial_count: 0,
-    unclassified_count: 0,
-    label_counts: { violating: 1 },
-  },
-];
-
-const makeUnclassified = (value: MempoolSnapshot): void => {
-  value.transactions[0]!.classifications = [];
-  value.transactions[0]!.bip110 = null;
-  value.transactions[0]!.structure = null;
-  value.classification_summaries = value.classification_summaries.map(
-    (summary) => ({
-      ...summary,
-      complete_count: 0,
-      partial_count: 0,
-      unclassified_count: 1,
-      label_counts: Object.fromEntries(
-        Object.keys(summary.label_counts).map((label) => [label, 0]),
-      ),
-    }),
-  );
-  value.bip110_summary = {
-    ...value.bip110_summary,
-    violating_count: 0,
-    unclassified_count: 1,
-  };
-};
-
-const source = () => ({
-  source_id: "core",
-  source_label: "Bitcoin Core",
-  availability: "ready",
-  poll_interval_seconds: 300,
-  last_poll_started_at_ms: 1_700_000_000_000,
-  snapshot_observed_at_ms: 1_700_000_001_000,
-  chain_tip: { height: 900_000, hash: BLOCK_HASH },
-  transaction_count: 1,
-  total_vsize: 141,
-  classification: {
-    state: "complete",
-    revision: 3,
-    classified_count: 1,
-    unclassified_count: 0,
-  },
-  last_error: null,
-});
-
-const snapshot = (): MempoolSnapshot => ({
-  source_id: "core",
-  source_label: "Bitcoin Core",
-  collection_started_at_ms: 1_700_000_000_000,
-  collection_completed_at_ms: 1_700_000_001_000,
-  collection_duration_ms: 1_000,
-  observed_at_ms: 1_700_000_001_000,
-  classification_revision: 3,
-  chain_tip: { height: 900_000, hash: BLOCK_HASH },
-  transaction_count: 1,
-  total_vsize: 141,
-  classifier_catalog: classifierCatalog(),
-  classification_summaries: classificationSummaries(),
-  bip110_summary: {
-    evaluator_id: "rdts",
-    evaluator_version: "0.1.0",
-    scope: "knots_mempool_policy",
-    compatible_count: 0,
-    violating_count: 1,
-    indeterminate_count: 0,
-    unclassified_count: 0,
-  },
-  transactions: [
-    {
-      txid: TXID,
-      wtxid: TXID,
-      vsize: 141,
-      weight: 561,
-      fee_sats: 423,
-      entered_at_ms: 1_699_999_000_000,
-      ancestor_count: 1,
-      ancestor_vsize: 141,
-      ancestor_fee_sats: 423,
-      descendant_count: 1,
-      descendant_vsize: 141,
-      replaceable: false,
-      structure: {
-        input_count: 1,
-        output_count: 2,
-        op_return_bytes: 0,
-        output_sats: 50_000,
-        witness_bytes: 107,
-      },
-      classifications: compactClassifications(),
-      bip110: {
-        status: "violating",
-        primary_rule: "element_size",
-        violated_rules: ["element_size"],
-        unknown_rules: [],
-      },
-    },
-  ],
-});
 
 const transactionDetail = (): TransactionDetailResponse => ({
   source_id: "core",
@@ -321,466 +165,224 @@ const transactionDetail = (): TransactionDetailResponse => ({
   ],
 });
 
+const emptyUnsigned = () => ({ width: 1, values: new ArrayBuffer(0) });
+
+const publicationManifest = {
+  source: {
+    ...waitingSource(),
+    availability: "ready",
+    last_poll_started_at_ms: 90,
+    snapshot_observed_at_ms: 100,
+    chain_tip: { height: 1, hash: "01".repeat(32) },
+    transaction_count: 0,
+    total_vsize: 0,
+    classification: {
+      state: "complete",
+      revision: 1,
+      classified_count: 0,
+      unclassified_count: 0,
+    },
+  },
+  source_id: "core",
+  source_label: "Bitcoin Core",
+  collection_started_at_ms: 90,
+  collection_completed_at_ms: 100,
+  collection_duration_ms: 10,
+  observed_at_ms: 100,
+  classification_revision: 1,
+  chain_tip: { height: 1, hash: "01".repeat(32) },
+  transaction_count: 0,
+  total_vsize: 0,
+  classifier_catalog: [],
+  classification_summaries: [],
+  bip110_summary: {
+    evaluator_id: "rdts-rules",
+    evaluator_version: "1",
+    scope: "knots_mempool_policy",
+    compatible_count: 0,
+    violating_count: 0,
+    indeterminate_count: 0,
+    unclassified_count: 0,
+  },
+  row_count: 0,
+  population_id: "00".repeat(32),
+  classification_set_id: "11".repeat(32),
+  publication_id: "22".repeat(32),
+  stages: [],
+};
+
+const populationTransfer = {
+  contentId: "00".repeat(32),
+  txids: new ArrayBuffer(0),
+  vsize: emptyUnsigned(),
+};
+
+const workerTiming = {
+  manifestFetchValidateMs: 0,
+  stages: [],
+  semanticValidationMs: 0,
+  quorumMs: 0,
+  supersessionRestarts: 0,
+  populationRebaseMs: null,
+};
+
+const completeTransfer = () => ({
+  manifest: publicationManifest,
+  population: populationTransfer,
+  membership: {
+    contentId: "33".repeat(32),
+    differingWtxidBits: new ArrayBuffer(0),
+    differingWtxidRanks: new ArrayBuffer(0),
+    differingWtxids: new ArrayBuffer(0),
+    weight: emptyUnsigned(),
+    feeSats: emptyUnsigned(),
+    enteredAtMs: emptyUnsigned(),
+    ancestorCount: emptyUnsigned(),
+    ancestorVsize: emptyUnsigned(),
+    ancestorFeeSats: emptyUnsigned(),
+    descendantCount: emptyUnsigned(),
+    descendantVsize: emptyUnsigned(),
+    replaceableBits: new ArrayBuffer(0),
+  },
+  structure: {
+    contentId: "44".repeat(32),
+    presenceBits: new ArrayBuffer(0),
+    presenceRanks: new ArrayBuffer(0),
+    inputCount: emptyUnsigned(),
+    outputCount: emptyUnsigned(),
+    opReturnBytes: emptyUnsigned(),
+    recognizedNonOpReturnBytes: emptyUnsigned(),
+    outputSats: emptyUnsigned(),
+    witnessBytes: emptyUnsigned(),
+  },
+  classifiers: [],
+});
+
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
-describe("parseSourceSnapshotResponse", () => {
-  it("validates and retains the API object without rebuilding it", () => {
-    const value = { source: source(), snapshot: snapshot() };
-    const response = parseSourceSnapshotResponse(value);
-
-    expect(response).toBe(value);
-    expect(response.source.availability).toBe("ready");
-    expect(response.snapshot?.transactions[0]?.fee_sats).toBe(423);
-  });
-
-  it("accepts waiting state before the first snapshot", () => {
-    const waiting = {
-      ...source(),
-      availability: "waiting",
-      last_poll_started_at_ms: null,
-      snapshot_observed_at_ms: null,
-      chain_tip: null,
-      transaction_count: null,
-      total_vsize: null,
-      classification: null,
-    };
-
-    expect(
-      parseSourceSnapshotResponse({ source: waiting, snapshot: null }),
-    ).toMatchObject({
-      source: { availability: "waiting" },
-      snapshot: null,
-    });
-  });
-
-  it("accepts stale state only with a last error and retained snapshot", () => {
+describe("parseSourceSummary", () => {
+  it("accepts coherent waiting, ready, stale, and error states", () => {
+    const waiting = waitingSource();
+    const ready = readySource();
     const stale = {
-      ...source(),
+      ...readySource(),
       availability: "stale",
       last_error: "node unavailable",
     };
-
-    expect(
-      parseSourceSnapshotResponse({ source: stale, snapshot: snapshot() }),
-    ).toMatchObject({
-      source: { availability: "stale", last_error: "node unavailable" },
-    });
-  });
-
-  it("rejects inconsistent totals and source metadata", () => {
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: { ...snapshot(), total_vsize: 142 },
-      }),
-    ).toThrow("Snapshot total vsize does not match payload");
-
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: { ...snapshot(), source_id: "knots" },
-      }),
-    ).toThrow("Source summary does not match its snapshot");
-  });
-
-  it("requires classification progress exactly when a snapshot exists", () => {
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: { ...source(), classification: null },
-        snapshot: snapshot(),
-      }),
-    ).toThrow(
-      "Source summary classification does not match its snapshot metadata",
-    );
-
-    const waiting = {
-      ...source(),
-      availability: "waiting",
-      last_poll_started_at_ms: null,
-      snapshot_observed_at_ms: null,
-      chain_tip: null,
-      transaction_count: null,
-      total_vsize: null,
-    };
-    expect(() =>
-      parseSourceSnapshotResponse({ source: waiting, snapshot: null }),
-    ).toThrow(
-      "Source without a snapshot unexpectedly contains classification progress",
-    );
-  });
-
-  it("requires strict and conserving classification progress", () => {
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: {
-          ...source(),
-          classification: {
-            ...source().classification,
-            state: "unknown",
-          },
-        },
-        snapshot: snapshot(),
-      }),
-    ).toThrow("Invalid classification progress");
-
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: {
-          ...source(),
-          classification: {
-            ...source().classification,
-            classified_count: 0,
-          },
-        },
-        snapshot: snapshot(),
-      }),
-    ).toThrow(
-      "Source summary classification does not match its snapshot metadata",
-    );
-
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: {
-          ...source(),
-          classification: {
-            ...source().classification,
-            extra: true,
-          },
-        },
-        snapshot: snapshot(),
-      }),
-    ).toThrow("Invalid classification progress");
-  });
-
-  it("binds classification revision and counts to the returned snapshot", () => {
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: {
-          ...source(),
-          classification: {
-            ...source().classification,
-            revision: 4,
-          },
-        },
-        snapshot: snapshot(),
-      }),
-    ).toThrow("Source summary does not match its snapshot");
-
-    const unclassifiedSnapshot = snapshot();
-    makeUnclassified(unclassifiedSnapshot);
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: unclassifiedSnapshot,
-      }),
-    ).toThrow("Source summary does not match its snapshot");
-  });
-
-  it("accepts every lifecycle state and complete snapshots with coverage gaps", () => {
-    const noAssessmentSnapshot = snapshot();
-    makeUnclassified(noAssessmentSnapshot);
-
-    for (const state of ["classifying", "complete", "paused"] as const) {
-      const value = {
-        source: {
-          ...source(),
-          classification: {
-            state,
-            revision: 3,
-            classified_count: 0,
-            unclassified_count: 1,
-          },
-        },
-        snapshot: noAssessmentSnapshot,
-      };
-      expect(parseSourceSnapshotResponse(value)).toBe(value);
-    }
-  });
-
-  it("rejects membership facts and structure that break the contract", () => {
-    const withTransaction = (patch: Partial<MempoolTransaction>) => {
-      const value = snapshot();
-      Object.assign(value.transactions[0]!, patch);
-      return { source: source(), snapshot: value };
+    const error = {
+      ...waitingSource(),
+      availability: "error",
+      last_error: "initial poll failed",
     };
 
-    expect(() =>
-      parseSourceSnapshotResponse(withTransaction({ weight: 141 * 4 + 1 })),
-    ).toThrow("inconsistent weight");
-    expect(() =>
-      parseSourceSnapshotResponse(withTransaction({ weight: 0 })),
-    ).toThrow("inconsistent weight");
-    expect(() =>
-      parseSourceSnapshotResponse(withTransaction({ ancestor_vsize: 140 })),
-    ).toThrow("inconsistent ancestry");
-    expect(() =>
-      parseSourceSnapshotResponse(withTransaction({ descendant_count: 0 })),
-    ).toThrow("inconsistent ancestry");
-    expect(() =>
-      parseSourceSnapshotResponse(withTransaction({ structure: null })),
-    ).toThrow("couples structure and assessment");
-    expect(() =>
-      parseSourceSnapshotResponse(
-        withTransaction({
-          structure: {
-            input_count: 0,
-            output_count: 1,
-            op_return_bytes: 0,
-            output_sats: 0,
-            witness_bytes: 0,
-          },
-        }),
-      ),
-    ).toThrow("Invalid transaction structure");
+    expect(parseSourceSummary(waiting)).toBe(waiting);
+    expect(parseSourceSummary(ready)).toBe(ready);
+    expect(parseSourceSummary(stale)).toBe(stale);
+    expect(parseSourceSummary(error)).toBe(error);
   });
 
-  it("accepts a delta-adjusted ancestor fee below zero", () => {
-    const value = snapshot();
-    value.transactions[0]!.ancestor_fee_sats = -12_500;
+  it("rejects partial snapshot metadata and classification count drift", () => {
+    expect(() =>
+      parseSourceSummary({ ...waitingSource(), transaction_count: 1 }),
+    ).toThrow("partial snapshot");
 
-    expect(
-      parseSourceSnapshotResponse({ source: source(), snapshot: value })
-        .snapshot?.transactions[0]?.ancestor_fee_sats,
-    ).toBe(-12_500);
+    expect(() =>
+      parseSourceSummary({
+        ...readySource(),
+        classification: {
+          state: "complete",
+          revision: 3,
+          classified_count: 0,
+          unclassified_count: 0,
+        },
+      }),
+    ).toThrow("classification does not match its snapshot metadata");
   });
 
-  it("still requires unsigned base fees and ancestry sizes", () => {
-    const withTransaction = (patch: Partial<MempoolTransaction>) => {
-      const value = snapshot();
-      Object.assign(value.transactions[0]!, patch);
-      return { source: source(), snapshot: value };
-    };
+  it("rejects classification without a snapshot and availability mismatches", () => {
+    expect(() =>
+      parseSourceSummary({
+        ...waitingSource(),
+        classification: {
+          state: "classifying",
+          revision: 1,
+          classified_count: 0,
+          unclassified_count: 0,
+        },
+      }),
+    ).toThrow("without a snapshot unexpectedly contains classification");
 
     expect(() =>
-      parseSourceSnapshotResponse(withTransaction({ fee_sats: -1 })),
-    ).toThrow("Invalid transaction at index 0");
+      parseSourceSummary({
+        ...readySource(),
+        availability: "waiting",
+      }),
+    ).toThrow("Unavailable source unexpectedly contains a snapshot");
+
     expect(() =>
-      parseSourceSnapshotResponse(withTransaction({ ancestor_vsize: -141 })),
-    ).toThrow("Invalid transaction at index 0");
-    expect(() =>
-      parseSourceSnapshotResponse(withTransaction({ ancestor_fee_sats: -0.5 })),
-    ).toThrow("Invalid transaction at index 0");
+      parseSourceSummary({
+        ...waitingSource(),
+        availability: "ready",
+      }),
+    ).toThrow("Available source is missing its snapshot");
   });
 
-  it("rejects a classifier catalog that repeats an ID", () => {
-    const value = snapshot();
-    value.classifier_catalog = [
-      ...classifierCatalog(),
-      classifierCatalog()[0]!,
-    ];
+  it("requires errors only on failed source states", () => {
+    expect(() =>
+      parseSourceSummary({
+        ...readySource(),
+        last_error: "unexpected error",
+      }),
+    ).toThrow("Healthy source unexpectedly contains an error");
 
     expect(() =>
-      parseSourceSnapshotResponse({ source: source(), snapshot: value }),
-    ).toThrow("Invalid classifier descriptor at index 4");
-  });
-
-  it("rejects a classifier that repeats a label key", () => {
-    const value = snapshot();
-    const descriptor = value.classifier_catalog[0]!;
-    descriptor.labels = [descriptor.labels[0]!, descriptor.labels[0]!];
+      parseSourceSummary({
+        ...readySource(),
+        availability: "stale",
+      }),
+    ).toThrow("Failed source is missing its error");
 
     expect(() =>
-      parseSourceSnapshotResponse({ source: source(), snapshot: value }),
-    ).toThrow("Invalid classifier label at 0:1");
+      parseSourceSummary({
+        ...waitingSource(),
+        availability: "error",
+      }),
+    ).toThrow("Failed source is missing its error");
+
+    expect(() =>
+      parseSourceSummary({
+        ...waitingSource(),
+        last_error: "unexpected error",
+      }),
+    ).toThrow("Healthy source unexpectedly contains an error");
   });
 
-  it("rejects unsafe, negative, and fractional lifecycle numbers", () => {
-    const invalidNumbers = [
-      ["revision", Number.MAX_SAFE_INTEGER + 1],
-      ["classified_count", -1],
-      ["unclassified_count", 0.5],
-    ] as const;
-
-    for (const [field, invalid] of invalidNumbers) {
+  it("rejects URL dot segments, extra fields, and a zero poll interval", () => {
+    for (const sourceId of [".", ".."]) {
       expect(() =>
-        parseSourceSnapshotResponse({
-          source: {
-            ...source(),
-            classification: {
-              ...source().classification,
-              [field]: invalid,
-            },
-          },
-          snapshot: snapshot(),
-        }),
-      ).toThrow("Invalid classification progress");
+        parseSourceSummary({ ...waitingSource(), source_id: sourceId }),
+      ).toThrow("Invalid source summary");
     }
-  });
-
-  it("requires a reader-visible classification revision", () => {
-    const value = snapshot() as unknown as Record<string, unknown>;
-    delete value.classification_revision;
-
     expect(() =>
-      parseSourceSnapshotResponse({ source: source(), snapshot: value }),
-    ).toThrow("Invalid mempool snapshot");
-  });
-
-  it("requires internally consistent snapshot collection timing", () => {
+      parseSourceSummary({ ...waitingSource(), unexpected: true }),
+    ).toThrow("Invalid source summary");
     expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: { ...snapshot(), collection_duration_ms: 999 },
-      }),
-    ).toThrow("Invalid mempool snapshot collection timing");
-
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: {
-          ...snapshot(),
-          collection_started_at_ms: 1_700_000_002_000,
-        },
-      }),
-    ).toThrow("Invalid mempool snapshot collection timing");
-
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: { ...snapshot(), observed_at_ms: 1_700_000_001_001 },
-      }),
-    ).toThrow("Invalid mempool snapshot collection timing");
-  });
-
-  it("rejects malformed or unordered transactions", () => {
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: {
-          ...snapshot(),
-          transaction_count: 2,
-          total_vsize: 282,
-          transactions: [
-            snapshot().transactions[0],
-            snapshot().transactions[0],
-          ],
-        },
-      }),
-    ).toThrow("Transactions are not strictly ordered by txid");
-
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: {
-          ...snapshot(),
-          transactions: [{ ...snapshot().transactions[0], vsize: 0 }],
-        },
-      }),
-    ).toThrow("Invalid transaction at index 0");
-  });
-
-  it("rejects inconsistent classification summaries and assessments", () => {
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: {
-          ...snapshot(),
-          bip110_summary: {
-            ...snapshot().bip110_summary,
-            compatible_count: 1,
-            violating_count: 0,
-          },
-        },
-      }),
-    ).toThrow("BIP-110 summary does not match payload");
-
-    expect(() =>
-      parseSourceSnapshotResponse({
-        source: source(),
-        snapshot: {
-          ...snapshot(),
-          transactions: [
-            {
-              ...snapshot().transactions[0],
-              bip110: {
-                status: "violating",
-                primary_rule: "element_size",
-                violated_rules: [],
-                unknown_rules: [],
-              },
-            },
-          ],
-        },
-      }),
-    ).toThrow("Inconsistent BIP-110 assessment");
-  });
-
-  it("accepts a partial shape result that proves no labels yet", () => {
-    const value = snapshot();
-    const shape = value.transactions[0]!.classifications.find(
-      ({ classifier_id }) => classifier_id === "transaction_shape",
-    )!;
-    shape.state = "partial";
-    shape.primary_label = null;
-    shape.labels = [];
-    shape.missing_facts = ["input_script_pubkeys"];
-    const shapeSummary = value.classification_summaries.find(
-      ({ classifier_id }) => classifier_id === "transaction_shape",
-    )!;
-    shapeSummary.complete_count = 0;
-    shapeSummary.partial_count = 1;
-    shapeSummary.label_counts = { other_shape: 0 };
-
-    expect(
-      parseSourceSnapshotResponse({ source: source(), snapshot: value })
-        .snapshot?.transactions[0]?.classifications,
-    ).toBeDefined();
-  });
-
-  it("rejects a complete result without labels", () => {
-    const value = snapshot();
-    const shape = value.transactions[0]!.classifications.find(
-      ({ classifier_id }) => classifier_id === "transaction_shape",
-    )!;
-    shape.primary_label = null;
-    shape.labels = [];
-
-    expect(() =>
-      parseSourceSnapshotResponse({ source: source(), snapshot: value }),
-    ).toThrow("Inconsistent transaction_shape classification result");
-  });
-
-  it("accepts a definite violation without a deterministic primary rule", () => {
-    const value = snapshot();
-    value.transactions[0]!.bip110 = {
-      status: "violating",
-      primary_rule: null,
-      violated_rules: ["element_size"],
-      unknown_rules: ["element_size", "undefined_version"],
-    };
-    const policy = value.transactions[0]!.classifications.find(
-      ({ classifier_id }) => classifier_id === "knots_bip110",
-    )!;
-    policy.state = "partial";
-    policy.missing_facts = ["policy_facts"];
-    const policySummary = value.classification_summaries.find(
-      ({ classifier_id }) => classifier_id === "knots_bip110",
-    )!;
-    policySummary.complete_count = 0;
-    policySummary.partial_count = 1;
-
-    expect(
-      parseSourceSnapshotResponse({ source: source(), snapshot: value })
-        .snapshot?.transactions[0]?.bip110,
-    ).toMatchObject({
-      status: "violating",
-      primary_rule: null,
-      violated_rules: ["element_size"],
-      unknown_rules: ["element_size", "undefined_version"],
-    });
+      parseSourceSummary({ ...waitingSource(), poll_interval_seconds: 0 }),
+    ).toThrow("Invalid source summary");
   });
 });
 
 describe("parseTransactionDetailResponse", () => {
-  it("validates the canonical seven-rule detail", () => {
+  it("accepts the canonical seven-rule detail", () => {
     const value = transactionDetail();
 
     expect(parseTransactionDetailResponse(value)).toBe(value);
   });
 
-  it("rejects rule order or verdicts that disagree with the assessment", () => {
+  it("rejects rule order and internally inconsistent verdicts", () => {
     const wrongOrder = transactionDetail();
     wrongOrder.rules[0] = {
       ...wrongOrder.rules[0]!,
@@ -800,7 +402,7 @@ describe("parseTransactionDetailResponse", () => {
     );
   });
 
-  it("accepts a rule that is both proven and unresolved for other inputs", () => {
+  it("accepts a rule that is both proven and unresolved", () => {
     const value = transactionDetail();
     if (value.assessment === null) {
       throw new Error("Fixture unexpectedly lacks an assessment");
@@ -818,7 +420,7 @@ describe("parseTransactionDetailResponse", () => {
     expect(parseTransactionDetailResponse(value)).toBe(value);
   });
 
-  it("accepts a detailed partial shape result without labels", () => {
+  it("accepts a detailed partial classifier result without labels", () => {
     const value = transactionDetail();
     const shape = value.classifications.find(
       ({ classifier_id }) => classifier_id === "transaction_shape",
@@ -848,180 +450,690 @@ describe("parseTransactionDetailResponse", () => {
     );
   });
 
-  it("rejects an unclassified payload on the classified detail route", () => {
-    const value = transactionDetail() as unknown as Record<string, unknown>;
-    value.assessment = null;
+  it("requires the canonical rule verdicts to match the assessment", () => {
+    const value = transactionDetail();
+    value.rules[1] = {
+      ...value.rules[1]!,
+      verdict: "pass",
+      evidence_count: 0,
+      evidence: [],
+    };
 
     expect(() => parseTransactionDetailResponse(value)).toThrow(
+      "Transaction detail rules do not match assessment",
+    );
+  });
+
+  it("requires an assessment and matching policy classification", () => {
+    const unclassified = transactionDetail() as unknown as Record<
+      string,
+      unknown
+    >;
+    unclassified.assessment = null;
+    expect(() => parseTransactionDetailResponse(unclassified)).toThrow(
       "Classified transaction detail is missing its assessment",
     );
-  });
 
-  it("rejects detailed classifications that repeat a classifier ID", () => {
-    const value = transactionDetail();
-    value.classifications = [
-      ...value.classifications,
-      value.classifications[0]!,
-    ];
-
-    expect(() => parseTransactionDetailResponse(value)).toThrow(
-      "Invalid detailed classification at index 4",
+    const mismatchedPolicy = transactionDetail();
+    const policy = mismatchedPolicy.classifications.find(
+      ({ classifier_id }) => classifier_id === "knots_bip110",
+    )!;
+    policy.primary_label = "compatible";
+    policy.labels = ["compatible"];
+    expect(() => parseTransactionDetailResponse(mismatchedPolicy)).toThrow(
+      "classifiers do not match policy assessment",
     );
   });
 
-  it("requires the matching classification revision", () => {
-    const value = transactionDetail() as unknown as Record<string, unknown>;
-    delete value.classification_revision;
+  it("rejects duplicate classifiers and missing identity fields", () => {
+    const duplicateClassifier = transactionDetail();
+    duplicateClassifier.classifications = [
+      ...duplicateClassifier.classifications,
+      duplicateClassifier.classifications[0]!,
+    ];
+    expect(() => parseTransactionDetailResponse(duplicateClassifier)).toThrow(
+      "Invalid detailed classification at index 4",
+    );
 
-    expect(() => parseTransactionDetailResponse(value)).toThrow(
+    const missingRevision = transactionDetail() as unknown as Record<
+      string,
+      unknown
+    >;
+    delete missingRevision.classification_revision;
+    expect(() => parseTransactionDetailResponse(missingRevision)).toThrow(
       "Invalid transaction detail response",
     );
   });
 });
 
-describe("transactionDetailMatchesSnapshot", () => {
-  it("accepts exact and newer revisions with the same compact assessment", () => {
-    const currentSnapshot = snapshot();
-    const transaction = currentSnapshot.transactions[0]!;
-    const exact = transactionDetail();
-    const newer = {
-      ...transactionDetail(),
-      classification_revision: exact.classification_revision + 1,
-    };
-
-    expect(
-      transactionDetailMatchesSnapshot(currentSnapshot, transaction, exact),
-    ).toBe(true);
-    expect(
-      transactionDetailMatchesSnapshot(currentSnapshot, transaction, newer),
-    ).toBe(true);
-  });
-
-  it("rejects older revisions and newer changed assessments", () => {
-    const currentSnapshot = snapshot();
-    const transaction = currentSnapshot.transactions[0]!;
-    const older = {
-      ...transactionDetail(),
-      classification_revision: currentSnapshot.classification_revision - 1,
-    };
-    const changed = transactionDetail();
-    changed.classification_revision += 1;
-    changed.assessment = {
-      status: "indeterminate",
-      primary_rule: null,
-      violated_rules: [],
-      unknown_rules: ["element_size"],
-    };
-
-    expect(
-      transactionDetailMatchesSnapshot(currentSnapshot, transaction, older),
-    ).toBe(false);
-    expect(
-      transactionDetailMatchesSnapshot(currentSnapshot, transaction, changed),
-    ).toBe(false);
-  });
-});
-
 describe("parseSourcesResponse", () => {
-  it("parses source discovery", () => {
-    const parsed = parseSourcesResponse({
-      atlas_version: "1.0.0",
-      sources: [source()],
-    });
-
-    expect(parsed.atlas_version).toBe("1.0.0");
-    expect(parsed.sources[0]?.source_id).toBe("core");
+  it("accepts the strict v2 source-discovery body", () => {
+    const value = { atlas_version: "1.0.0", sources: [waitingSource()] };
+    expect(parseSourcesResponse(value)).toBe(value);
   });
 
-  it("rejects an invalid Atlas version", () => {
+  it("accepts a SemVer prerelease with build metadata", () => {
+    const value = {
+      atlas_version: "2.0.0-rc.1+perf.7",
+      sources: [readySource()],
+    };
+
+    expect(parseSourcesResponse(value)).toBe(value);
+  });
+
+  it("rejects invalid versions, repeated IDs, and invalid source summaries", () => {
     expect(() =>
       parseSourcesResponse({
         atlas_version: "latest",
-        sources: [source()],
+        sources: [waitingSource()],
       }),
     ).toThrow("Invalid sources response");
-  });
-
-  it("rejects a repeated source ID", () => {
     expect(() =>
       parseSourcesResponse({
         atlas_version: "1.0.0",
-        sources: [source(), { ...source(), source_label: "Second reader" }],
+        sources: [waitingSource(), waitingSource()],
       }),
-    ).toThrow("Sources response repeats a source ID");
+    ).toThrow("repeats a source ID");
+    expect(() =>
+      parseSourcesResponse({
+        atlas_version: "1.0.0",
+        sources: [{ ...waitingSource(), transaction_count: 1 }],
+      }),
+    ).toThrow("partial snapshot");
+    expect(() =>
+      parseSourcesResponse({
+        atlas_version: "1.0.0",
+        sources: [{ ...waitingSource(), source_id: ".." }],
+      }),
+    ).toThrow("Invalid source summary");
   });
 
-  it("rejects source IDs that normalize as URL dot segments", () => {
-    for (const sourceId of [".", ".."]) {
-      expect(() =>
-        parseSourcesResponse({
-          atlas_version: "1.0.0",
-          sources: [{ ...source(), source_id: sourceId }],
-        }),
-      ).toThrow("Invalid source summary");
-    }
+  it("rejects unknown top-level fields", () => {
+    expect(() =>
+      parseSourcesResponse({
+        atlas_version: "1.0.0",
+        sources: [waitingSource()],
+        legacy: true,
+      }),
+    ).toThrow("Invalid sources response");
   });
 });
 
-describe("fetchSourceSnapshot", () => {
-  it("requests the source-scoped current snapshot", async () => {
+describe("request paths", () => {
+  it("uses the source discovery endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ source: source(), snapshot: snapshot() }),
+      json: async () => ({
+        atlas_version: "1.0.0",
+        sources: [waitingSource()],
+      }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await fetchSourceSnapshot("core");
+    await fetchSources();
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/v1/sources/core/mempool", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/v2/sources", {
       headers: { Accept: "application/json" },
     });
   });
 
-  it("passes a cancellation signal to a snapshot request", async () => {
+  it("uses the transaction-detail endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ source: source(), snapshot: snapshot() }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const controller = new AbortController();
-
-    await fetchSourceSnapshot("core", controller.signal);
-
-    expect(fetchMock).toHaveBeenCalledWith("/api/v1/sources/core/mempool", {
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
-  });
-
-  it("requests and validates a source-scoped transaction detail", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => transactionDetail(),
+      ok: false,
+      status: 503,
+      json: async () => ({
+        type: "v2_unavailable",
+        title: "Current v2 publication unavailable",
+        status: 503,
+        detail:
+          "Atlas has not published a current complete snapshot for this source.",
+      }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await fetchTransactionDetail("core", TXID);
-
+    const rejected = fetchTransactionDetail("core", TXID).catch(
+      (error: unknown) => error,
+    );
+    await expect(rejected).resolves.toMatchObject({
+      message: "Atlas request failed (503): Current v2 publication unavailable",
+      name: "AtlasRequestError",
+      problemType: "v2_unavailable",
+      status: 503,
+    });
     expect(fetchMock).toHaveBeenCalledWith(
-      `/api/v1/sources/core/transactions/${TXID}`,
+      `/api/v2/sources/core/transactions/${TXID}`,
       { headers: { Accept: "application/json" } },
     );
   });
+});
 
-  it("surfaces an API error body", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: false,
-        status: 404,
-        json: async () => ({ error: 'unknown source "missing"' }),
+describe("transactionDetailMatchesSnapshot", () => {
+  it("requires the exact source, observation, witness, and revision", () => {
+    const transaction = {
+      txid: TXID,
+      wtxid: TXID,
+      classifications: [],
+      bip110: null,
+    } as unknown as MempoolTransaction;
+    const snapshot = {
+      source_id: "core",
+      observed_at_ms: 100,
+      classification_revision: 4,
+    } as unknown as MempoolSnapshot;
+    const detail = {
+      source_id: "core",
+      snapshot_observed_at_ms: 100,
+      classification_revision: 4,
+      txid: TXID,
+      wtxid: TXID,
+      classifications: [],
+      assessment: null,
+    } as unknown as TransactionDetailResponse;
+
+    expect(
+      transactionDetailMatchesSnapshot(snapshot, transaction, detail),
+    ).toBe(true);
+    expect(
+      transactionDetailMatchesSnapshot(snapshot, transaction, {
+        ...detail,
+        wtxid: "11".repeat(32),
       }),
-    );
+    ).toBe(false);
+  });
+});
 
-    await expect(fetchSourceSnapshot("missing")).rejects.toMatchObject({
-      status: 404,
-      message: 'Atlas request failed (404): unknown source "missing"',
+describe("publication worker lifecycle", () => {
+  it("cancels a publication that exceeds the bounded load deadline", async () => {
+    vi.useFakeTimers();
+    class FakeWorker {
+      static instance: FakeWorker;
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+
+      constructor() {
+        FakeWorker.instance = this;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(data: unknown): void {
+        this.listeners
+          .get("message")
+          ?.forEach((listener) => listener({ data }));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    let releasePrimary = (): void => undefined;
+    const primaryPaint = new Promise<void>((resolve) => {
+      releasePrimary = resolve;
+    });
+    const request = fetchSourcePublication(
+      "core",
+      undefined,
+      "transaction_properties",
+      () => primaryPaint,
+    );
+    FakeWorker.instance.emit({
+      type: "primary",
+      requestId: 1,
+      publication: {
+        manifest: publicationManifest,
+        population: populationTransfer,
+        classifiers: [],
+      },
+      timing: workerTiming,
+    });
+    await Promise.resolve();
+    const rejection = expect(request).rejects.toMatchObject({
+      message: "Atlas v2 publication timed out",
+      name: "TimeoutError",
+    });
+
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    expect(FakeWorker.instance.postMessage).toHaveBeenLastCalledWith({
+      type: "cancel",
+      requestId: 1,
+    });
+    await rejection;
+    releasePrimary();
+  });
+
+  it("bounds a terminal worker error behind an unsettled primary callback", async () => {
+    vi.useFakeTimers();
+    class FakeWorker {
+      static instance: FakeWorker;
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+
+      constructor() {
+        FakeWorker.instance = this;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(data: unknown): void {
+        this.listeners
+          .get("message")
+          ?.forEach((listener) => listener({ data }));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    let releasePrimary = (): void => undefined;
+    const primaryPaint = new Promise<void>((resolve) => {
+      releasePrimary = resolve;
+    });
+    const request = fetchSourcePublication(
+      "core",
+      undefined,
+      "transaction_properties",
+      () => primaryPaint,
+    );
+    FakeWorker.instance.emit({
+      type: "primary",
+      requestId: 1,
+      publication: {
+        manifest: publicationManifest,
+        population: populationTransfer,
+        classifiers: [],
+      },
+      timing: workerTiming,
+    });
+    await Promise.resolve();
+    FakeWorker.instance.emit({
+      type: "error",
+      requestId: 1,
+      status: 503,
+      problem: null,
+      message: "Current v2 publication unavailable",
+      retryable: false,
+    });
+    let settled = false;
+    const rejected = request.catch((error: unknown) => {
+      settled = true;
+      return error;
+    });
+
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(rejected).resolves.toMatchObject({
+      message: "Atlas request failed (503): Current v2 publication unavailable",
+      status: 503,
+    });
+    expect(FakeWorker.instance.postMessage).toHaveBeenLastCalledWith({
+      type: "cancel",
+      requestId: 1,
+    });
+    releasePrimary();
+  });
+
+  it("cleans pending state when worker construction fails", async () => {
+    vi.useFakeTimers();
+    class FakeWorker {
+      constructor() {
+        throw new Error("worker construction failed");
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+
+    await expect(fetchSourcePublication("core")).rejects.toThrow(
+      "worker construction failed",
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves a worker problem without duplicating the HTTP prefix", async () => {
+    class FakeWorker {
+      static instance: FakeWorker;
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+
+      constructor() {
+        FakeWorker.instance = this;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(data: unknown): void {
+        this.listeners
+          .get("message")
+          ?.forEach((listener) => listener({ data }));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    const request = fetchSourcePublication("core");
+
+    FakeWorker.instance.emit({
+      type: "error",
+      requestId: 1,
+      status: 503,
+      problem: {
+        type: "v2_unavailable",
+        title: "Current v2 publication unavailable",
+        status: 503,
+        detail:
+          "Atlas has not published a current complete snapshot for this source.",
+      },
+      message: "Current v2 publication unavailable",
+      retryable: false,
+    });
+
+    const rejected = request.catch((error: unknown) => error);
+    await expect(rejected).resolves.toMatchObject({
+      message: "Atlas request failed (503): Current v2 publication unavailable",
+      problemType: "v2_unavailable",
+      status: 503,
     });
   });
+
+  it("does not deliver the complete publication before primary paint finishes", async () => {
+    class FakeWorker {
+      static instance: FakeWorker;
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+
+      constructor() {
+        FakeWorker.instance = this;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(data: unknown): void {
+        this.listeners
+          .get("message")
+          ?.forEach((listener) => listener({ data }));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    let finishPrimaryPaint = (): void => undefined;
+    const primaryPaint = new Promise<void>((resolve) => {
+      finishPrimaryPaint = resolve;
+    });
+    const onPrimary = vi.fn(() => primaryPaint);
+    let completeDelivered = false;
+    const request = fetchSourcePublication(
+      "core",
+      undefined,
+      "transaction_properties",
+      onPrimary,
+    ).then((publication) => {
+      completeDelivered = true;
+      return publication;
+    });
+
+    FakeWorker.instance.emit({
+      type: "primary",
+      requestId: 1,
+      publication: {
+        manifest: publicationManifest,
+        population: populationTransfer,
+        classifiers: [],
+      },
+      timing: workerTiming,
+    });
+    await Promise.resolve();
+    expect(onPrimary).toHaveBeenCalledOnce();
+    FakeWorker.instance.emit({
+      type: "complete",
+      requestId: 1,
+      publication: completeTransfer(),
+      timing: workerTiming,
+    });
+    await Promise.resolve();
+    expect(completeDelivered).toBe(false);
+
+    finishPrimaryPaint();
+    await expect(request).resolves.toMatchObject({
+      publication: { transaction_count: 0 },
+    });
+  });
+
+  it("delivers a terminal worker failure after in-flight primary paint", async () => {
+    class FakeWorker {
+      static instance: FakeWorker;
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+      readonly terminate = vi.fn();
+
+      constructor() {
+        FakeWorker.instance = this;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(type: string, event: any): void {
+        this.listeners.get(type)?.forEach((listener) => listener(event));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    let releasePrimary = (): void => undefined;
+    const primaryPaint = new Promise<void>((resolve) => {
+      releasePrimary = resolve;
+    });
+    let rejected: Error | undefined;
+    const request = fetchSourcePublication(
+      "core",
+      undefined,
+      "transaction_properties",
+      () => primaryPaint,
+    );
+    void request.catch((error: Error) => {
+      rejected = error;
+    });
+
+    FakeWorker.instance.emit("message", {
+      data: {
+        type: "primary",
+        requestId: 1,
+        publication: {
+          manifest: publicationManifest,
+          population: populationTransfer,
+          classifiers: [],
+        },
+        timing: workerTiming,
+      },
+    });
+    await Promise.resolve();
+    FakeWorker.instance.emit("error", {
+      message: "worker crashed",
+      preventDefault: vi.fn(),
+    });
+    await Promise.resolve();
+    expect(rejected).toBeUndefined();
+
+    releasePrimary();
+    await expect(request).rejects.toThrow("worker crashed");
+    expect(FakeWorker.instance.terminate).toHaveBeenCalledOnce();
+  });
+
+  it("cancels the worker request when primary delivery rejects", async () => {
+    class FakeWorker {
+      static instance: FakeWorker;
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+
+      constructor() {
+        FakeWorker.instance = this;
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(data: unknown): void {
+        this.listeners
+          .get("message")
+          ?.forEach((listener) => listener({ data }));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    const request = fetchSourcePublication(
+      "core",
+      undefined,
+      "transaction_properties",
+      () => Promise.reject(new Error("primary paint failed")),
+    );
+
+    FakeWorker.instance.emit({
+      type: "primary",
+      requestId: 1,
+      publication: {
+        manifest: publicationManifest,
+        population: populationTransfer,
+        classifiers: [],
+      },
+      timing: workerTiming,
+    });
+
+    await expect(request).rejects.toThrow("primary paint failed");
+    expect(FakeWorker.instance.postMessage).toHaveBeenLastCalledWith({
+      type: "cancel",
+      requestId: 1,
+    });
+  });
+
+  it("rejects and recreates the worker after malformed complete materialization", async () => {
+    class FakeWorker {
+      static readonly instances: FakeWorker[] = [];
+      readonly listeners = new Map<string, Array<(event: any) => void>>();
+      readonly postMessage = vi.fn();
+      readonly terminate = vi.fn();
+
+      constructor() {
+        FakeWorker.instances.push(this);
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        const listeners = this.listeners.get(type) ?? [];
+        listeners.push(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      emit(data: unknown): void {
+        this.listeners
+          .get("message")
+          ?.forEach((listener) => listener({ data }));
+      }
+    }
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.resetModules();
+    const { fetchSourcePublication } = await import("./api");
+    const request = fetchSourcePublication("core");
+    const first = FakeWorker.instances[0]!;
+    first.emit({
+      type: "primary",
+      requestId: 1,
+      publication: {
+        manifest: publicationManifest,
+        population: populationTransfer,
+        classifiers: [],
+      },
+      timing: workerTiming,
+    });
+    await Promise.resolve();
+    const malformed = completeTransfer();
+    malformed.membership.differingWtxidRanks = new ArrayBuffer(1);
+    first.emit({
+      type: "complete",
+      requestId: 1,
+      publication: malformed,
+      timing: workerTiming,
+    });
+
+    await expect(request).rejects.toThrow();
+    expect(first.terminate).toHaveBeenCalledOnce();
+    const controller = new AbortController();
+    const retry = fetchSourcePublication("core", controller.signal);
+    expect(FakeWorker.instances).toHaveLength(2);
+    controller.abort();
+    await expect(retry).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it.each(["error", "messageerror"] as const)(
+    "recreates the worker after a terminal %s event",
+    async (eventType) => {
+      class FakeWorker {
+        static readonly instances: FakeWorker[] = [];
+        readonly listeners = new Map<string, Array<(event: any) => void>>();
+        readonly postMessage = vi.fn();
+        readonly terminate = vi.fn();
+
+        constructor() {
+          FakeWorker.instances.push(this);
+        }
+
+        addEventListener(type: string, listener: (event: any) => void): void {
+          const listeners = this.listeners.get(type) ?? [];
+          listeners.push(listener);
+          this.listeners.set(type, listeners);
+        }
+
+        emit(type: string, event: any): void {
+          this.listeners.get(type)?.forEach((listener) => listener(event));
+        }
+      }
+      vi.stubGlobal("Worker", FakeWorker);
+      vi.resetModules();
+      const { fetchSourcePublication } = await import("./api");
+
+      const first = fetchSourcePublication("core");
+      const firstRejection = expect(first).rejects.toThrow(
+        eventType === "error" ? "worker crashed" : "unreadable message",
+      );
+      const failed = FakeWorker.instances[0];
+      expect(failed).toBeDefined();
+      failed?.emit(
+        eventType,
+        eventType === "error"
+          ? { message: "worker crashed", preventDefault: vi.fn() }
+          : {},
+      );
+      await firstRejection;
+      expect(failed?.terminate).toHaveBeenCalledOnce();
+
+      const controller = new AbortController();
+      const second = fetchSourcePublication("core", controller.signal);
+      expect(FakeWorker.instances).toHaveLength(2);
+      controller.abort();
+      await expect(second).rejects.toMatchObject({ name: "AbortError" });
+    },
+  );
 });

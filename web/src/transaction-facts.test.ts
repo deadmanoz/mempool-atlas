@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ancestorFeeRate,
+  baseFeeRate,
   transactionFactPairs,
   transactionFactSummary,
 } from "./transaction-facts";
@@ -23,6 +24,7 @@ const transaction = (
       input_count: 1,
       output_count: 2,
       op_return_bytes: 80,
+      recognized_carried_bytes: 80,
       output_sats: 250_000_000,
       witness_bytes: 107,
     },
@@ -45,10 +47,22 @@ describe("ancestorFeeRate", () => {
   });
 });
 
+describe("baseFeeRate", () => {
+  it("divides the exact base fee by source-reported vsize", () => {
+    expect(baseFeeRate(transaction())).toBe(2);
+  });
+
+  it("returns zero for a defensive zero vsize", () => {
+    expect(baseFeeRate(transaction({ vsize: 0 }))).toBe(0);
+  });
+});
+
 describe("transactionFactPairs", () => {
   it("lists membership and structure facts with exact copy", () => {
     const pairs = transactionFactPairs(transaction());
     expect(pairs.map(([label]) => label)).toEqual([
+      "Virtual size",
+      "Base fee",
       "Weight",
       "Ancestors",
       "Descendants",
@@ -58,17 +72,22 @@ describe("transactionFactPairs", () => {
       "Witness",
       "OP_RETURN bytes",
     ]);
-    expect(pairs[1]?.[1]).toBe("2 tx incl. self · 500 vB · 3 sat/vB");
-    expect(pairs[3]?.[1]).toBe("Yes, as reported by the source");
-    expect(pairs[4]?.[1]).toBe("1 input → 2 outputs");
-    expect(pairs[5]?.[1]).toBe("2.5 BTC");
+    const values = new Map(pairs);
+    expect(values.get("Virtual size")).toBe("200 vB");
+    expect(values.get("Base fee")).toBe("400 sats · 2 sat/vB");
+    expect(values.get("Ancestors")).toBe("2 tx incl. self · 500 vB · 3 sat/vB");
+    expect(values.get("Replaceable")).toBe("Yes, as reported by the source");
+    expect(values.get("Shape")).toBe("1 input → 2 outputs");
+    expect(values.get("Output value")).toBe("2.5 BTC");
   });
 
   it("renders a negative ancestor fee rate with its sign", () => {
     const pairs = transactionFactPairs(
       transaction({ ancestor_fee_sats: -1_250 }),
     );
-    expect(pairs[1]?.[1]).toBe("2 tx incl. self · 500 vB · -2.5 sat/vB");
+    expect(new Map(pairs).get("Ancestors")).toBe(
+      "2 tx incl. self · 500 vB · -2.5 sat/vB",
+    );
   });
 
   it("marks structure facts as pending when null", () => {
@@ -86,6 +105,7 @@ describe("transactionFactPairs", () => {
           input_count: 1,
           output_count: 1,
           op_return_bytes: 0,
+          recognized_carried_bytes: 0,
           output_sats: 1_000,
           witness_bytes: 0,
         },
@@ -93,11 +113,32 @@ describe("transactionFactPairs", () => {
     );
     expect(pairs.some(([label]) => label === "OP_RETURN bytes")).toBe(false);
   });
+
+  it("shows recognized non-OP_RETURN carriage without relabelling OP_RETURN", () => {
+    const structure = {
+      input_count: 1,
+      output_count: 1,
+      op_return_bytes: 0,
+      recognized_carried_bytes: 1_530,
+      output_sats: 1_000,
+      witness_bytes: 1_600,
+    };
+    const pairs = new Map(transactionFactPairs(transaction({ structure })));
+
+    expect(pairs.has("OP_RETURN bytes")).toBe(false);
+    expect(pairs.get("Recognized carriage, lower bound")).toBe(
+      "At least 1,530 bytes",
+    );
+    expect(transactionFactSummary(transaction({ structure }))).toContain(
+      "at least 1,530 recognized bytes",
+    );
+  });
 });
 
 describe("transactionFactSummary", () => {
   it("joins the same facts into one compact line", () => {
     const summary = transactionFactSummary(transaction());
+    expect(summary).toContain("200 vB · 400 sats @ 2 sat/vB");
     expect(summary).toContain("800 wu");
     expect(summary).toContain("ancestors 2 tx · 500 vB @ 3 sat/vB");
     expect(summary).toContain("replaceable");

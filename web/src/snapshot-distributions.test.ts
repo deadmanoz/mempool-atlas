@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { compareCurrentSnapshots } from "./comparison-model";
 import { loadedSource } from "./comparison-test-fixtures";
@@ -6,6 +6,7 @@ import { mempoolTransaction, txid } from "./test-fixtures";
 import {
   SnapshotDistributionCache,
   buildSnapshotDistributionModel,
+  buildSnapshotDistributionModelCooperatively,
   type SnapshotDistributionInput,
   type SnapshotDistributionModel,
 } from "./snapshot-distributions";
@@ -42,6 +43,27 @@ const dataDescriptor: ClassifierDescriptor = {
   ],
 };
 
+const carriageDescriptor: ClassifierDescriptor = {
+  id: "data_carriage_shape",
+  version: "5",
+  title: "Data carriage shapes",
+  methodology: "heuristic",
+  semantics: "multi_label",
+  required_facts: ["raw_transaction", "input_script_pubkeys"],
+  labels: [
+    {
+      key: "push_drop_witness",
+      label: "Push/drop witness carrier",
+      description: "Balanced witness carrier.",
+    },
+    {
+      key: "no_detected_carriage_shape",
+      label: "No detected carriage shape",
+      description: "No registered shape detected.",
+    },
+  ],
+};
+
 const result = (
   classifierId: string,
   labels: string[],
@@ -58,9 +80,11 @@ interface TransactionOptions {
   vsize: number;
   structured?: boolean;
   carrierBytes?: number;
+  recognizedCarrierBytes?: number;
   replaceable?: boolean;
   propertyLabels?: string[];
   dataLabels?: string[];
+  carriageLabels?: string[];
   wtxid?: string;
 }
 
@@ -70,9 +94,11 @@ const transaction = (
     vsize,
     structured = true,
     carrierBytes = 0,
+    recognizedCarrierBytes = carrierBytes,
     replaceable = false,
     propertyLabels = ["p2pkh"],
     dataLabels = [],
+    carriageLabels = ["no_detected_carriage_shape"],
     wtxid = txid(suffix + 100),
   }: TransactionOptions,
 ): MempoolTransaction =>
@@ -92,6 +118,7 @@ const transaction = (
           input_count: suffix,
           output_count: suffix + 1,
           op_return_bytes: carrierBytes,
+          recognized_carried_bytes: recognizedCarrierBytes,
           output_sats: suffix * 10_000,
           witness_bytes: 0,
         }
@@ -99,6 +126,7 @@ const transaction = (
     classifications: [
       result(propertyDescriptor.id, propertyLabels),
       result(dataDescriptor.id, dataLabels),
+      result(carriageDescriptor.id, carriageLabels),
     ],
   });
 
@@ -119,7 +147,7 @@ const input = (
   population: readonly MempoolTransaction[] = transactions,
 ): SnapshotDistributionInput => ({
   transactions: population,
-  classifierCatalog: [propertyDescriptor, dataDescriptor],
+  classifierCatalog: [propertyDescriptor, dataDescriptor, carriageDescriptor],
   selectedClassifier: propertyDescriptor,
   observedAtMs: 1_700_000_010_000,
   metric,
@@ -171,6 +199,7 @@ describe("buildSnapshotDistributionModel", () => {
     expect(model.composition.map(({ classifierId }) => classifierId)).toEqual([
       propertyDescriptor.id,
       dataDescriptor.id,
+      carriageDescriptor.id,
     ]);
     expect(
       model.composition[0]?.segments.reduce(
@@ -218,11 +247,45 @@ describe("buildSnapshotDistributionModel", () => {
       input("vsize", rightPopulation),
     );
 
-    expect(comparison.common[0]?.same_wtxid).toBe(false);
+    expect(comparison.common[0]?.witness_relation).toBe("different");
     expect(leftModel.totals.population.vsize).toBe(120);
     expect(rightModel.totals.population.vsize).toBe(300);
     expect(leftModel.totals.carrier).toEqual({ count: 1, vsize: 120 });
     expect(rightModel.totals.carrier).toEqual({ count: 0, vsize: 0 });
+  });
+
+  it("groups recognized-carriage spectra by carriage shape in both builders", async () => {
+    const witnessCarrier = transaction(8, {
+      vsize: 420,
+      carrierBytes: 0,
+      recognizedCarrierBytes: 1_530,
+      dataLabels: ["ordinals"],
+      carriageLabels: ["push_drop_witness"],
+    });
+    const model = buildSnapshotDistributionModel(
+      input("count", [witnessCarrier]),
+    );
+    const cooperativeModel = await buildSnapshotDistributionModelCooperatively(
+      input("count", [witnessCarrier]),
+      { batchSize: 1, yieldBetweenBatches: () => Promise.resolve() },
+    );
+    const segmentLabels = (value: SnapshotDistributionModel): string[] =>
+      value.dataSpectrum.bins.flatMap(({ segments }) =>
+        segments.map(({ label }) => label),
+      );
+
+    expect(model.totals.carrier).toEqual({ count: 1, vsize: 420 });
+    expect(model.dataSpectrum.totalWeight).toBe(1);
+    expect(
+      model.dataSpectrum.bins.reduce((total, bin) => total + bin.total, 0),
+    ).toBe(1);
+    expect(
+      model.dataSpectrum.bins.flatMap(({ segments }) => segments),
+    ).toHaveLength(1);
+    expect(segmentLabels(model)).toEqual(["Push/drop witness carrier"]);
+    expect(segmentLabels(cooperativeModel)).toEqual([
+      "Push/drop witness carrier",
+    ]);
   });
 
   it("retains no transaction collections or transaction objects", () => {
@@ -243,6 +306,54 @@ describe("buildSnapshotDistributionModel", () => {
     };
 
     inspect(model);
+  });
+
+  it.each(["count", "vsize"] as const)(
+    "matches the synchronous %s reference model exactly",
+    async (metric) => {
+      const expected = buildSnapshotDistributionModel(input(metric));
+
+      await expect(
+        buildSnapshotDistributionModelCooperatively(input(metric), {
+          batchSize: 1,
+          yieldBetweenBatches: () => Promise.resolve(),
+        }),
+      ).resolves.toEqual(expected);
+    },
+  );
+
+  it("yields repeatedly while deriving one uncached population", async () => {
+    const population = [...transactions];
+    const yieldBetweenBatches = vi.fn(async () => Promise.resolve());
+
+    await buildSnapshotDistributionModelCooperatively(
+      input("vsize", population),
+      { batchSize: 1, yieldBetweenBatches },
+    );
+
+    expect(yieldBetweenBatches.mock.calls.length).toBeGreaterThan(2);
+  });
+
+  it("aborts without returning a partial model", async () => {
+    const controller = new AbortController();
+    const population = [...transactions];
+
+    await expect(
+      buildSnapshotDistributionModelCooperatively(input("count", population), {
+        batchSize: 1,
+        signal: controller.signal,
+        yieldBetweenBatches: () => controller.abort(),
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    await expect(
+      buildSnapshotDistributionModelCooperatively(input("count", population), {
+        batchSize: 1,
+        yieldBetweenBatches: () => Promise.resolve(),
+      }),
+    ).resolves.toEqual(
+      buildSnapshotDistributionModel(input("count", population)),
+    );
   });
 });
 
@@ -273,6 +384,17 @@ describe("SnapshotDistributionCache", () => {
     expect(builds).toBe(2);
   });
 
+  it("adopts a prepared variant without rebuilding it", () => {
+    const cache = new SnapshotDistributionCache();
+    const owner = {};
+    const prepared = buildSnapshotDistributionModel(input("count"));
+    const build = vi.fn(() => buildSnapshotDistributionModel(input("vsize")));
+
+    expect(cache.adopt(owner, "metric=count", prepared)).toBe(prepared);
+    expect(cache.get(owner, "metric=count", build)).toBe(prepared);
+    expect(build).not.toHaveBeenCalled();
+  });
+
   it("invalidates variants when the owner changes or the cache resets", () => {
     const cache = new SnapshotDistributionCache();
     const firstOwner = {};
@@ -293,5 +415,83 @@ describe("SnapshotDistributionCache", () => {
     expect(returnedOwner).not.toBe(first);
     expect(afterReset).not.toBe(returnedOwner);
     expect(builds).toBe(4);
+  });
+
+  it("deduplicates one in-flight async variant and reuses its result", async () => {
+    const cache = new SnapshotDistributionCache();
+    const owner = {};
+    const build = vi.fn(async () =>
+      buildSnapshotDistributionModel(input("count")),
+    );
+
+    const first = cache.getAsync(owner, "metric=count", build);
+    const repeated = cache.getAsync(owner, "metric=count", build);
+
+    expect(repeated).toBe(first);
+    const model = await first;
+    await expect(cache.getAsync(owner, "metric=count", build)).resolves.toBe(
+      model,
+    );
+    expect(build).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts an old owner and never caches its stale completion", async () => {
+    const cache = new SnapshotDistributionCache();
+    const firstOwner = {};
+    const secondOwner = {};
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stale = cache.getAsync(firstOwner, "metric=count", async () => {
+      await gate;
+      return buildSnapshotDistributionModel(input("count"));
+    });
+    const staleExpectation = expect(stale).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    const current = cache.getAsync(secondOwner, "metric=count", async () =>
+      buildSnapshotDistributionModel(input("vsize")),
+    );
+    release?.();
+
+    await staleExpectation;
+    const currentModel = await current;
+    await expect(
+      cache.getAsync(secondOwner, "metric=count", async () =>
+        buildSnapshotDistributionModel(input("count")),
+      ),
+    ).resolves.toBe(currentModel);
+  });
+
+  it("lets a same-owner render abort an obsolete variant", async () => {
+    const cache = new SnapshotDistributionCache();
+    const owner = {};
+    const controller = new AbortController();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const obsolete = cache.getAsync(
+      owner,
+      "metric=count",
+      async () => {
+        await gate;
+        return buildSnapshotDistributionModel(input("count"));
+      },
+      controller.signal,
+    );
+    const obsoleteExpectation = expect(obsolete).rejects.toMatchObject({
+      name: "AbortError",
+    });
+
+    controller.abort();
+    release?.();
+    await obsoleteExpectation;
+
+    const current = await cache.getAsync(owner, "metric=vsize", async () =>
+      buildSnapshotDistributionModel(input("vsize")),
+    );
+    expect(current.totals.population.vsize).toBe(750);
   });
 });

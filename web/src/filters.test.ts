@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_FILTERS, filterTransactions } from "./filters";
+import {
+  DEFAULT_FILTERS,
+  filterTransactions,
+  filterTransactionsCooperatively,
+} from "./filters";
 import { mempoolTransaction } from "./test-fixtures";
 import type { MempoolTransaction } from "./types";
 
@@ -28,6 +32,11 @@ describe("filterTransactions", () => {
 
     expect(
       filterTransactions(transactions, DEFAULT_FILTERS, OBSERVED_AT_MS),
+    ).toBe(transactions);
+    expect(
+      Array.from(
+        filterTransactions(transactions, DEFAULT_FILTERS, OBSERVED_AT_MS),
+      ),
     ).toEqual(transactions);
   });
 
@@ -58,11 +67,55 @@ describe("filterTransactions", () => {
     });
 
     expect(
-      filterTransactions(
-        [future],
-        { ...DEFAULT_FILTERS, maximumAgeMs: 0 },
-        OBSERVED_AT_MS,
+      Array.from(
+        filterTransactions(
+          [future],
+          { ...DEFAULT_FILTERS, maximumAgeMs: 0 },
+          OBSERVED_AT_MS,
+        ),
       ),
     ).toEqual([future]);
+  });
+
+  it("cooperatively preserves the complete filter result", async () => {
+    const transactions = Array.from({ length: 257 }, (_, index) =>
+      transaction(index + 1, {
+        fee_sats: 100 + index,
+        vsize: 100 + (index % 100),
+        entered_at_ms: OBSERVED_AT_MS - (index % 3) * HOUR_MS,
+      }),
+    );
+    const filters = {
+      minimumFeeRate: 1,
+      maximumAgeMs: HOUR_MS,
+      minimumVsize: 150,
+    };
+    const expected = filterTransactions(transactions, filters, OBSERVED_AT_MS);
+
+    const actual = await filterTransactionsCooperatively(
+      transactions,
+      filters,
+      OBSERVED_AT_MS,
+      { batchSize: 32 },
+    );
+
+    expect(actual.map(({ txid }) => txid)).toEqual(
+      expected.map(({ txid }) => txid),
+    );
+  });
+
+  it("preserves default-array identity without scheduling work", async () => {
+    const transactions = [transaction(1), transaction(2)];
+    let yielded = false;
+
+    await expect(
+      filterTransactionsCooperatively(
+        transactions,
+        DEFAULT_FILTERS,
+        OBSERVED_AT_MS,
+        { yieldBetweenBatches: () => void (yielded = true) },
+      ),
+    ).resolves.toBe(transactions);
+    expect(yielded).toBe(false);
   });
 });

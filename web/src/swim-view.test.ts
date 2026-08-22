@@ -5,8 +5,10 @@ import {
   FEE_RATE_LANES,
   ageColumnIndex,
   createSwimLayout,
+  createSwimLayoutCooperatively,
   feeRateLaneIndex,
   paintMembershipGlyphs,
+  paintMembershipGlyphsCooperatively,
 } from "./swim-view";
 import { mempoolTransaction } from "./test-fixtures";
 import type { MempoolTransaction } from "./types";
@@ -125,6 +127,62 @@ describe("createSwimLayout", () => {
       (glyphs[0]?.size ?? 0) ** 2 * 10,
       8,
     );
+  });
+
+  it("builds and paints the exact layout across cooperative batches", async () => {
+    const transactions = Array.from({ length: 24 }, (_, index) =>
+      transaction(index + 1, {
+        vsize: 120 + index * 7,
+        fee_sats: (120 + index * 7) * (1 + (index % 12)),
+        entered_at_ms: OBSERVED_AT_MS - index * HOUR_MS,
+      }),
+    );
+    const expected = createSwimLayout(transactions, 1_200, 640, OBSERVED_AT_MS);
+    let yields = 0;
+    const actual = await createSwimLayoutCooperatively(
+      transactions,
+      1_200,
+      640,
+      OBSERVED_AT_MS,
+      {
+        batchSize: 5,
+        yieldBetweenBatches: () => {
+          yields += 1;
+        },
+      },
+    );
+    let paintedGlyphs = 0;
+    await paintMembershipGlyphsCooperatively(
+      {
+        fillStyle: "",
+        fillRect: () => {
+          paintedGlyphs += 1;
+        },
+      },
+      actual,
+      { batchSize: 5, yieldBetweenBatches: () => undefined },
+    );
+
+    expect(actual).toEqual(expected);
+    expect(paintedGlyphs).toBe(transactions.length);
+    expect(yields).toBeGreaterThan(0);
+  });
+
+  it("does not expose an aborted cooperative layout", async () => {
+    const controller = new AbortController();
+    const layout = createSwimLayoutCooperatively(
+      Array.from({ length: 10 }, (_, index) => transaction(index + 1)),
+      1_200,
+      640,
+      OBSERVED_AT_MS,
+      {
+        batchSize: 2,
+        signal: controller.signal,
+        yieldBetweenBatches: () => controller.abort(),
+      },
+    );
+
+    await expect(layout).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("paints one Canvas glyph for each transaction at the 200,000-entry limit", () => {

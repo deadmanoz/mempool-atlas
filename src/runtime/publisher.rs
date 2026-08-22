@@ -2,14 +2,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use tokio::sync::OnceCell;
 use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::classification::{ClassificationGenerationStart, ClassificationRevisionDelta};
+use crate::conflict_facts::{encode_exact_outpoints, encode_fingerprints};
 use crate::model::{
     ClassificationProgress, ClassificationState, MempoolObservation, MempoolSnapshot,
-    SourceAvailability, SourceSnapshotResponse, SourceSummary, TransactionClassifications,
-    TransactionDetailResponse,
+    SourceAvailability, SourceSummary, TransactionClassifications, TransactionDetailResponse,
+};
+#[cfg(test)]
+use crate::staged_snapshot::reencode_manifest_for_source_with_limits;
+use crate::staged_snapshot::{
+    EncodedManifest, EncodedStage, StageDescriptor, StageKind, StagedSnapshotBundle,
+    StagedSnapshotLimits, encode_staged_snapshot_with_limits, reencode_manifest_for_source,
 };
 
 use super::{RuntimeError, TransactionLookup};
@@ -22,33 +29,80 @@ pub(super) struct CurrentStatePublisher {
     state: RwLock<CurrentState>,
     #[cfg(test)]
     next_classification_preparation: std::sync::Mutex<Option<Arc<PreparationBlock>>>,
+    #[cfg(test)]
+    next_publication_limits: std::sync::Mutex<Option<StagedSnapshotLimits>>,
+    #[cfg(test)]
+    next_poll_start_reencoding_limits: std::sync::Mutex<Option<StagedSnapshotLimits>>,
+    #[cfg(test)]
+    next_manifest_replacement_preparation: std::sync::Mutex<Option<Arc<PreparationBlock>>>,
 }
 
 #[derive(Debug, Default)]
 struct CurrentState {
     last_poll_started_at_ms: Option<u64>,
+    pending_poll_started_at_ms: Option<u64>,
+    poll_start_publication_failed: bool,
     membership: Option<Arc<MempoolSnapshot>>,
     latest: Option<Arc<MempoolSnapshot>>,
     classifications: TransactionClassifications,
     last_error: Option<String>,
-    cached_response: Option<CachedSnapshotResponse>,
+    publication: Option<CurrentV2Publication>,
     classification_generation: Option<u64>,
     classification_revision: u64,
     classification_state: Option<ClassificationState>,
     status_revision: u64,
-    response_revision: u64,
 }
 
 #[derive(Clone, Debug)]
-struct CachedSnapshotResponse {
+struct EncodedBody {
+    content_id: String,
     body: Bytes,
-    etag: Option<String>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SnapshotResponsePayload {
+struct PublishedStage {
+    descriptor: StageDescriptor,
+    body: Bytes,
+}
+
+#[derive(Clone, Debug)]
+struct CurrentV2Publication {
+    manifest_value: crate::staged_snapshot::StagedSnapshotManifest,
+    manifest: EncodedBody,
+    stages: Vec<PublishedStage>,
+    conflict_fingerprints: Arc<OnceCell<EncodedBody>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PublicationPayload {
     pub(crate) body: Bytes,
-    pub(crate) etag: Option<String>,
+    pub(crate) etag: String,
+    pub(crate) content_id: String,
+    pub(crate) uncompressed_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PublicationLookup<T> {
+    Ready(T),
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum StageLookup {
+    Ready(PublicationPayload),
+    Unavailable,
+    Superseded,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ConflictFactLookup {
+    Ready(PublicationPayload),
+    Unavailable,
+    NotTerminal,
+    Superseded,
+    NotPresent,
+    Uncovered,
 }
 
 struct PreparedObservation {
@@ -66,6 +120,12 @@ impl CurrentStatePublisher {
             state: RwLock::new(CurrentState::default()),
             #[cfg(test)]
             next_classification_preparation: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            next_publication_limits: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            next_poll_start_reencoding_limits: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            next_manifest_replacement_preparation: std::sync::Mutex::new(None),
         }
     }
 
@@ -85,10 +145,79 @@ impl CurrentStatePublisher {
         self.state.read().await.classification_generation
     }
 
-    pub(super) async fn record_poll_started(&self, started_at_ms: u64) {
-        let mut state = self.state.write().await;
-        state.last_poll_started_at_ms = Some(started_at_ms);
-        state.status_revision = state.status_revision.wrapping_add(1);
+    pub(super) async fn record_poll_started(&self, started_at_ms: u64) -> Result<(), RuntimeError> {
+        loop {
+            let (
+                status_revision,
+                classification_generation,
+                classification_revision,
+                source,
+                retained_manifest,
+            ) = {
+                let state = self.state.read().await;
+                if state.last_poll_started_at_ms == Some(started_at_ms)
+                    && !state.poll_start_publication_failed
+                {
+                    return Ok(());
+                }
+                let source = summary_from_parts(
+                    self,
+                    Some(started_at_ms),
+                    state.latest.as_ref(),
+                    state.classification_state,
+                    state.last_error.as_deref(),
+                );
+                (
+                    state.status_revision,
+                    state.classification_generation,
+                    state.classification_revision,
+                    source,
+                    state
+                        .publication
+                        .as_ref()
+                        .map(|publication| publication.manifest_value.clone()),
+                )
+            };
+            let replacement = if let Some(manifest) = retained_manifest.as_ref() {
+                match self.reencode_poll_start_manifest(manifest, &source) {
+                    Ok(replacement) => Some(replacement),
+                    Err(error) => {
+                        let mut state = self.state.write().await;
+                        if state.status_revision != status_revision
+                            || state.classification_generation != classification_generation
+                            || state.classification_revision != classification_revision
+                        {
+                            continue;
+                        }
+                        state.pending_poll_started_at_ms = Some(started_at_ms);
+                        state.poll_start_publication_failed = true;
+                        state.status_revision = state.status_revision.wrapping_add(1);
+                        return Err(error.into());
+                    }
+                }
+            } else {
+                None
+            };
+            #[cfg(test)]
+            if replacement.is_some() {
+                self.wait_on_next_manifest_replacement_preparation().await;
+            }
+            let mut state = self.state.write().await;
+            if state.status_revision != status_revision
+                || state.classification_generation != classification_generation
+                || state.classification_revision != classification_revision
+            {
+                continue;
+            }
+            if let Some(manifest) = replacement {
+                replace_manifest(&mut state, manifest)?;
+            }
+            state.last_poll_started_at_ms = Some(started_at_ms);
+            state.pending_poll_started_at_ms = None;
+            state.poll_start_publication_failed = false;
+            state.status_revision = state.status_revision.wrapping_add(1);
+            return Ok(());
+        }
     }
 
     pub(super) async fn summary(&self) -> SourceSummary {
@@ -96,31 +225,237 @@ impl CurrentStatePublisher {
         summary_from_state(self, &state)
     }
 
-    pub(super) async fn snapshot_response(&self) -> SourceSnapshotResponse {
+    #[cfg(test)]
+    pub(super) async fn published_state(&self) -> PublishedState {
         let state = self.state.read().await;
-        SourceSnapshotResponse {
+        PublishedState {
             source: summary_from_state(self, &state),
             snapshot: state.latest.clone(),
         }
     }
 
-    pub(super) async fn snapshot_response_payload(
-        &self,
-    ) -> Result<SnapshotResponsePayload, RuntimeError> {
+    pub(super) async fn manifest_payload(&self) -> PublicationLookup<PublicationPayload> {
         let state = self.state.read().await;
-        if let Some(response) = &state.cached_response {
-            return Ok(SnapshotResponsePayload {
-                body: response.body.clone(),
-                etag: response.etag.clone(),
-            });
-        }
-        let response = SourceSnapshotResponse {
-            source: summary_from_state(self, &state),
-            snapshot: state.latest.clone(),
+        let Some(publication) = &state.publication else {
+            return PublicationLookup::Unavailable;
         };
-        drop(state);
-        let (body, _) = encode_response(response).await?;
-        Ok(SnapshotResponsePayload { body, etag: None })
+        PublicationLookup::Ready(PublicationPayload {
+            body: publication.manifest.body.clone(),
+            etag: manifest_etag(&publication.manifest.content_id),
+            content_id: publication.manifest.content_id.clone(),
+            uncompressed_bytes: publication.manifest.body.len() as u64,
+        })
+    }
+
+    pub(super) async fn stage_payload(
+        &self,
+        kind: StageKind,
+        classifier_id: Option<&str>,
+        content_id: &str,
+    ) -> StageLookup {
+        let state = self.state.read().await;
+        let Some(publication) = &state.publication else {
+            return StageLookup::Unavailable;
+        };
+        let Some(stage) = publication.stages.iter().find(|stage| {
+            stage.descriptor.kind == kind
+                && stage.descriptor.classifier_id.as_deref() == classifier_id
+        }) else {
+            return StageLookup::Unknown;
+        };
+        if stage.descriptor.content_id != content_id {
+            if publication
+                .stages
+                .iter()
+                .any(|candidate| candidate.descriptor.content_id == content_id)
+            {
+                return StageLookup::Unknown;
+            }
+            return StageLookup::Superseded;
+        }
+        StageLookup::Ready(PublicationPayload {
+            body: stage.body.clone(),
+            etag: stage_etag(stage),
+            content_id: stage.descriptor.content_id.clone(),
+            uncompressed_bytes: stage.descriptor.uncompressed_bytes,
+        })
+    }
+
+    pub(super) async fn conflict_fingerprint_payload(
+        &self,
+        population_id: &str,
+        structure_id: &str,
+    ) -> Result<ConflictFactLookup, RuntimeError> {
+        let cache = {
+            let state = self.state.read().await;
+            let Some(publication) = &state.publication else {
+                return Ok(ConflictFactLookup::Unavailable);
+            };
+            if !publication.matches_conflict_identity(population_id, structure_id) {
+                return Ok(ConflictFactLookup::Superseded);
+            }
+            if !is_terminal_classification(state.classification_state) {
+                return Ok(ConflictFactLookup::NotTerminal);
+            }
+            if state.latest.is_none() {
+                return Ok(ConflictFactLookup::Unavailable);
+            };
+            Arc::clone(&publication.conflict_fingerprints)
+        };
+
+        let initializer_cache = Arc::clone(&cache);
+        let encoded = match cache
+            .get_or_try_init(|| async move {
+                let (total_rows, covered) = self
+                    .conflict_fingerprint_inputs(population_id, structure_id, &initializer_cache)
+                    .await?;
+                let encoded =
+                    tokio::task::spawn_blocking(move || encode_fingerprints(total_rows, &covered))
+                        .await?
+                        .map_err(|error| RuntimeError::ConflictFacts(error.to_string()))?;
+                Ok::<EncodedBody, RuntimeError>(EncodedBody {
+                    content_id: encoded.content_id,
+                    body: encoded.body,
+                })
+            })
+            .await
+        {
+            Ok(encoded) => encoded,
+            Err(RuntimeError::ConflictFactsSuperseded) => {
+                return Ok(ConflictFactLookup::Superseded);
+            }
+            Err(error) => return Err(error),
+        };
+
+        let state = self.state.read().await;
+        let Some(publication) = &state.publication else {
+            return Ok(ConflictFactLookup::Superseded);
+        };
+        if !publication.matches_conflict_identity(population_id, structure_id)
+            || !Arc::ptr_eq(&cache, &publication.conflict_fingerprints)
+        {
+            return Ok(ConflictFactLookup::Superseded);
+        }
+        if !is_terminal_classification(state.classification_state) {
+            return Ok(ConflictFactLookup::NotTerminal);
+        }
+        Ok(ConflictFactLookup::Ready(PublicationPayload {
+            body: encoded.body.clone(),
+            etag: conflict_etag("fingerprints", &encoded.content_id),
+            content_id: encoded.content_id.clone(),
+            uncompressed_bytes: encoded.body.len() as u64,
+        }))
+    }
+
+    async fn conflict_fingerprint_inputs(
+        &self,
+        population_id: &str,
+        structure_id: &str,
+        cache: &Arc<OnceCell<EncodedBody>>,
+    ) -> Result<(u32, Vec<(u32, Arc<[bitcoin::OutPoint]>)>), RuntimeError> {
+        let state = self.state.read().await;
+        let publication = state
+            .publication
+            .as_ref()
+            .ok_or(RuntimeError::ConflictFactsSuperseded)?;
+        if !publication.matches_conflict_identity(population_id, structure_id)
+            || !Arc::ptr_eq(cache, &publication.conflict_fingerprints)
+            || !is_terminal_classification(state.classification_state)
+        {
+            return Err(RuntimeError::ConflictFactsSuperseded);
+        }
+        let snapshot = state
+            .latest
+            .as_ref()
+            .ok_or(RuntimeError::ConflictFactsSuperseded)?;
+        let total_rows = u32::try_from(snapshot.transactions.len())
+            .map_err(|_| RuntimeError::ConflictFacts("total row count overflow".to_owned()))?;
+        let mut covered = Vec::new();
+        for (row, entry) in snapshot.transactions.iter().enumerate() {
+            let Some(outpoints) = state
+                .classifications
+                .get(&entry.txid)
+                .and_then(|classification| classification.input_outpoints.as_ref())
+            else {
+                continue;
+            };
+            let row = u32::try_from(row)
+                .map_err(|_| RuntimeError::ConflictFacts("source row overflow".to_owned()))?;
+            covered.push((row, Arc::clone(outpoints)));
+        }
+        Ok((total_rows, covered))
+    }
+
+    pub(super) async fn exact_outpoint_payload(
+        &self,
+        population_id: &str,
+        structure_id: &str,
+        txid: &str,
+    ) -> Result<ConflictFactLookup, RuntimeError> {
+        let fingerprints = match self
+            .conflict_fingerprint_payload(population_id, structure_id)
+            .await?
+        {
+            ConflictFactLookup::Ready(payload) => payload,
+            lookup => return Ok(lookup),
+        };
+        let total_rows = read_conflict_u32(&fingerprints.body, 8);
+        let covered_rows = read_conflict_u32(&fingerprints.body, 12);
+        let (source_row, outpoints) = {
+            let state = self.state.read().await;
+            let Some(publication) = &state.publication else {
+                return Ok(ConflictFactLookup::Unavailable);
+            };
+            if !publication.matches_conflict_identity(population_id, structure_id) {
+                return Ok(ConflictFactLookup::Superseded);
+            }
+            if !is_terminal_classification(state.classification_state) {
+                return Ok(ConflictFactLookup::NotTerminal);
+            }
+            let Some(snapshot) = state.latest.as_ref() else {
+                return Ok(ConflictFactLookup::Unavailable);
+            };
+            let Ok(source_row) = snapshot
+                .transactions
+                .binary_search_by(|entry| entry.txid.as_str().cmp(txid))
+            else {
+                return Ok(ConflictFactLookup::NotPresent);
+            };
+            let Some(outpoints) = state
+                .classifications
+                .get(txid)
+                .and_then(|classification| classification.input_outpoints.as_ref())
+            else {
+                return Ok(ConflictFactLookup::Uncovered);
+            };
+            let source_row = u32::try_from(source_row)
+                .map_err(|_| RuntimeError::ConflictFacts("source row count overflow".to_owned()))?;
+            (source_row, Arc::clone(outpoints))
+        };
+
+        let encoded = tokio::task::spawn_blocking(move || {
+            encode_exact_outpoints(total_rows, covered_rows, source_row, &outpoints)
+        })
+        .await?
+        .map_err(|error| RuntimeError::ConflictFacts(error.to_string()))?;
+
+        let state = self.state.read().await;
+        let Some(publication) = &state.publication else {
+            return Ok(ConflictFactLookup::Superseded);
+        };
+        if !publication.matches_conflict_identity(population_id, structure_id) {
+            return Ok(ConflictFactLookup::Superseded);
+        }
+        if !is_terminal_classification(state.classification_state) {
+            return Ok(ConflictFactLookup::NotTerminal);
+        }
+        let uncompressed_bytes = encoded.body.len() as u64;
+        Ok(ConflictFactLookup::Ready(PublicationPayload {
+            body: encoded.body,
+            etag: conflict_etag("outpoints", &encoded.content_id),
+            content_id: encoded.content_id,
+            uncompressed_bytes,
+        }))
     }
 
     pub(super) async fn publish_membership(
@@ -177,23 +512,22 @@ impl CurrentStatePublisher {
                 (
                     state.status_revision,
                     state.classification_generation,
-                    state.last_poll_started_at_ms,
+                    poll_started_at_ms_for_outcome(&state),
                 )
             };
             if current_generation.is_some_and(|current| current >= generation) {
                 return Ok(false);
             }
-            let response = SourceSnapshotResponse {
-                source: summary_from_parts(
-                    self,
-                    last_poll_started_at_ms,
-                    Some(&prepared.latest),
-                    Some(classification_state),
-                    None,
-                ),
-                snapshot: Some(Arc::clone(&prepared.latest)),
-            };
-            let (body, json_encoding_ms) = encode_response(response).await?;
+            let source = summary_from_parts(
+                self,
+                last_poll_started_at_ms,
+                Some(&prepared.latest),
+                Some(classification_state),
+                None,
+            );
+            let (candidate, json_encoding_ms) = self
+                .prepare_publication(source, Arc::clone(&prepared.latest), None)
+                .await?;
 
             let commit_started_at = Instant::now();
             let mut state = self.state.write().await;
@@ -212,13 +546,17 @@ impl CurrentStatePublisher {
             state.latest = Some(Arc::clone(&prepared.latest));
             state.classifications = prepared.classifications;
             debug_assert!(state.classifications.len() <= membership.transactions.len());
+            state.last_poll_started_at_ms = last_poll_started_at_ms;
+            state.pending_poll_started_at_ms = None;
+            state.poll_start_publication_failed = false;
             state.last_error = None;
             state.classification_generation = Some(generation);
             state.classification_revision = revision;
             state.classification_state = Some(classification_state);
             state.status_revision = state.status_revision.wrapping_add(1);
-            let (response_revision, encoded_bytes) =
-                replace_cached_response(self, &mut state, body);
+            let encoded_bytes = candidate.encoded_bytes();
+            let publication_id = candidate.manifest_value.publication_id.clone();
+            state.publication = Some(candidate);
             let total_classified_count = state.classifications.len();
             let commit_ms = commit_started_at.elapsed().as_millis();
             drop(state);
@@ -226,7 +564,7 @@ impl CurrentStatePublisher {
                 source_id = %self.source_id,
                 generation,
                 classification_revision = revision,
-                response_revision,
+                publication_id,
                 changed_count,
                 total_classified_count,
                 materialization_validation_ms = prepared.materialization_validation_ms,
@@ -266,6 +604,7 @@ impl CurrentStatePublisher {
             mut classifications,
             mut last_poll_started_at_ms,
             mut last_error,
+            reused_membership,
             classification_accumulation_started_at,
         ) = {
             let state = self.state.read().await;
@@ -296,6 +635,11 @@ impl CurrentStatePublisher {
                 state.classifications.clone(),
                 state.last_poll_started_at_ms,
                 state.last_error.clone(),
+                state
+                    .publication
+                    .as_ref()
+                    .ok_or(RuntimeError::PublicationStateWithoutBundle)?
+                    .membership_stages()?,
                 classification_accumulation_started_at,
             )
         };
@@ -319,17 +663,20 @@ impl CurrentStatePublisher {
         let prepared =
             prepare_observation(Arc::clone(&membership), delta.revision, classifications).await?;
         loop {
-            let response = SourceSnapshotResponse {
-                source: summary_from_parts(
-                    self,
-                    last_poll_started_at_ms,
-                    Some(&prepared.latest),
-                    Some(classification_state),
-                    last_error.as_deref(),
-                ),
-                snapshot: Some(Arc::clone(&prepared.latest)),
-            };
-            let (body, json_encoding_ms) = encode_response(response).await?;
+            let source = summary_from_parts(
+                self,
+                last_poll_started_at_ms,
+                Some(&prepared.latest),
+                Some(classification_state),
+                last_error.as_deref(),
+            );
+            let (candidate, json_encoding_ms) = self
+                .prepare_publication(
+                    source,
+                    Arc::clone(&prepared.latest),
+                    Some(reused_membership.clone()),
+                )
+                .await?;
 
             let commit_started_at = Instant::now();
             let mut state = self.state.write().await;
@@ -355,8 +702,9 @@ impl CurrentStatePublisher {
             if classification_state_changed {
                 state.status_revision = state.status_revision.wrapping_add(1);
             }
-            let (response_revision, encoded_bytes) =
-                replace_cached_response(self, &mut state, body);
+            let encoded_bytes = candidate.encoded_bytes();
+            let publication_id = candidate.manifest_value.publication_id.clone();
+            state.publication = Some(candidate);
             let total_classified_count = state.classifications.len();
             let commit_ms = commit_started_at.elapsed().as_millis();
             drop(state);
@@ -364,7 +712,7 @@ impl CurrentStatePublisher {
                 source_id = %self.source_id,
                 generation,
                 classification_revision = delta.revision,
-                response_revision,
+                publication_id,
                 changed_count,
                 total_classified_count,
                 classification_accumulation_ms,
@@ -392,6 +740,7 @@ impl CurrentStatePublisher {
                 latest,
                 last_error,
                 current_classification_state,
+                retained_manifest,
             ) = {
                 let state = self.state.read().await;
                 if state.classification_generation != Some(generation) {
@@ -407,22 +756,26 @@ impl CurrentStatePublisher {
                         .ok_or(RuntimeError::ClassificationStateWithoutSnapshot)?,
                     state.last_error.clone(),
                     state.classification_state,
+                    state
+                        .publication
+                        .as_ref()
+                        .map(|publication| publication.manifest_value.clone())
+                        .ok_or(RuntimeError::PublicationStateWithoutBundle)?,
                 )
             };
             if current_classification_state == Some(classification_state) {
                 return Ok(true);
             }
-            let response = SourceSnapshotResponse {
-                source: summary_from_parts(
-                    self,
-                    last_poll_started_at_ms,
-                    Some(&latest),
-                    Some(classification_state),
-                    last_error.as_deref(),
-                ),
-                snapshot: Some(Arc::clone(&latest)),
-            };
-            let (body, json_encoding_ms) = encode_response(response).await?;
+            let source = summary_from_parts(
+                self,
+                last_poll_started_at_ms,
+                Some(&latest),
+                Some(classification_state),
+                last_error.as_deref(),
+            );
+            let encode_started_at = Instant::now();
+            let manifest = reencode_manifest_for_source(&retained_manifest, &source)?;
+            let json_encoding_ms = encode_started_at.elapsed().as_millis();
 
             let commit_started_at = Instant::now();
             let mut state = self.state.write().await;
@@ -434,10 +787,10 @@ impl CurrentStatePublisher {
             {
                 continue;
             }
+            let publication_id = manifest.value.publication_id.clone();
+            let encoded_bytes = replace_manifest(&mut state, manifest)?;
             state.classification_state = Some(classification_state);
             state.status_revision = state.status_revision.wrapping_add(1);
-            let (response_revision, encoded_bytes) =
-                replace_cached_response(self, &mut state, body);
             let total_classified_count = state.classifications.len();
             let commit_ms = commit_started_at.elapsed().as_millis();
             drop(state);
@@ -445,7 +798,7 @@ impl CurrentStatePublisher {
                 source_id = %self.source_id,
                 generation,
                 classification_revision = current_revision,
-                response_revision,
+                publication_id,
                 changed_count = 0,
                 total_classified_count,
                 materialization_validation_ms = 0,
@@ -468,28 +821,39 @@ impl CurrentStatePublisher {
                 last_poll_started_at_ms,
                 latest,
                 classification_state,
+                retained_manifest,
             ) = {
                 let state = self.state.read().await;
                 (
                     state.status_revision,
                     state.classification_generation,
                     state.classification_revision,
-                    state.last_poll_started_at_ms,
+                    poll_started_at_ms_for_outcome(&state),
                     state.latest.clone(),
                     state.classification_state,
+                    state
+                        .publication
+                        .as_ref()
+                        .map(|publication| publication.manifest_value.clone()),
                 )
             };
-            let response = SourceSnapshotResponse {
-                source: summary_from_parts(
-                    self,
-                    last_poll_started_at_ms,
-                    latest.as_ref(),
-                    classification_state,
-                    Some(&error),
-                ),
-                snapshot: latest,
-            };
-            let (body, json_encoding_ms) = encode_response(response).await?;
+            let source = summary_from_parts(
+                self,
+                last_poll_started_at_ms,
+                latest.as_ref(),
+                classification_state,
+                Some(&error),
+            );
+            let encode_started_at = Instant::now();
+            let manifest = retained_manifest
+                .as_ref()
+                .map(|retained| reencode_manifest_for_source(retained, &source))
+                .transpose()?;
+            let json_encoding_ms = encode_started_at.elapsed().as_millis();
+            #[cfg(test)]
+            if manifest.is_some() {
+                self.wait_on_next_manifest_replacement_preparation().await;
+            }
 
             let commit_started_at = Instant::now();
             let mut state = self.state.write().await;
@@ -499,17 +863,25 @@ impl CurrentStatePublisher {
             {
                 continue;
             }
+            let (publication_id, encoded_bytes) = if let Some(manifest) = manifest {
+                let publication_id = manifest.value.publication_id.clone();
+                let encoded_bytes = replace_manifest(&mut state, manifest)?;
+                (Some(publication_id), encoded_bytes)
+            } else {
+                (None, 0)
+            };
+            state.last_poll_started_at_ms = last_poll_started_at_ms;
+            state.pending_poll_started_at_ms = None;
+            state.poll_start_publication_failed = false;
             state.last_error = Some(error);
             state.status_revision = state.status_revision.wrapping_add(1);
-            let (response_revision, encoded_bytes) =
-                replace_cached_response(self, &mut state, body);
             let total_classified_count = state.classifications.len();
             let commit_ms = commit_started_at.elapsed().as_millis();
             drop(state);
             info!(
                 source_id = %self.source_id,
                 classification_revision,
-                response_revision,
+                publication_id,
                 changed_count = 0,
                 total_classified_count,
                 materialization_validation_ms = 0,
@@ -525,7 +897,7 @@ impl CurrentStatePublisher {
     pub(super) async fn transaction_detail(&self, txid: &str) -> TransactionLookup {
         let state = self.state.read().await;
         let Some(snapshot) = state.latest.as_ref() else {
-            return TransactionLookup::WaitingForSnapshot;
+            return TransactionLookup::WaitingForPublication;
         };
         if snapshot
             .transactions
@@ -549,6 +921,55 @@ impl CurrentStatePublisher {
         })
     }
 
+    async fn prepare_publication(
+        &self,
+        source: SourceSummary,
+        snapshot: Arc<MempoolSnapshot>,
+        reused_membership: Option<(EncodedStage, EncodedStage)>,
+    ) -> Result<(CurrentV2Publication, u128), RuntimeError> {
+        let limits = self.take_publication_limits();
+        let started_at = Instant::now();
+        let bundle = tokio::task::spawn_blocking(move || {
+            encode_staged_snapshot_with_limits(&source, &snapshot, reused_membership, limits)
+        })
+        .await??;
+        Ok((
+            CurrentV2Publication::from_bundle(bundle),
+            started_at.elapsed().as_millis(),
+        ))
+    }
+
+    fn take_publication_limits(&self) -> StagedSnapshotLimits {
+        #[cfg(test)]
+        {
+            return self
+                .next_publication_limits
+                .lock()
+                .expect("publication limit test hook is not poisoned")
+                .take()
+                .unwrap_or_default();
+        }
+        #[cfg(not(test))]
+        StagedSnapshotLimits::default()
+    }
+
+    fn reencode_poll_start_manifest(
+        &self,
+        retained: &crate::staged_snapshot::StagedSnapshotManifest,
+        source: &SourceSummary,
+    ) -> Result<EncodedManifest, crate::staged_snapshot::StagedSnapshotError> {
+        #[cfg(test)]
+        if let Some(limits) = self
+            .next_poll_start_reencoding_limits
+            .lock()
+            .expect("poll-start re-encoding limit test hook is not poisoned")
+            .take()
+        {
+            return reencode_manifest_for_source_with_limits(retained, source, limits);
+        }
+        reencode_manifest_for_source(retained, source)
+    }
+
     #[cfg(test)]
     pub(super) fn block_next_classification_preparation(&self) -> Arc<PreparationBlock> {
         let block = Arc::new(PreparationBlock::default());
@@ -557,6 +978,32 @@ impl CurrentStatePublisher {
             .lock()
             .expect("classification preparation hook is not poisoned") = Some(Arc::clone(&block));
         block
+    }
+
+    #[cfg(test)]
+    pub(super) fn block_next_manifest_replacement_preparation(&self) -> Arc<PreparationBlock> {
+        let block = Arc::new(PreparationBlock::default());
+        *self
+            .next_manifest_replacement_preparation
+            .lock()
+            .expect("manifest replacement test hook is not poisoned") = Some(Arc::clone(&block));
+        block
+    }
+
+    #[cfg(test)]
+    pub(super) fn limit_next_publication(&self, limits: StagedSnapshotLimits) {
+        *self
+            .next_publication_limits
+            .lock()
+            .expect("publication limit test hook is not poisoned") = Some(limits);
+    }
+
+    #[cfg(test)]
+    pub(super) fn limit_next_poll_start_reencoding(&self, limits: StagedSnapshotLimits) {
+        *self
+            .next_poll_start_reencoding_limits
+            .lock()
+            .expect("poll-start re-encoding limit test hook is not poisoned") = Some(limits);
     }
 
     #[cfg(test)]
@@ -573,6 +1020,24 @@ impl CurrentStatePublisher {
                 .acquire()
                 .await
                 .expect("classification preparation test hook remains open")
+                .forget();
+        }
+    }
+
+    #[cfg(test)]
+    async fn wait_on_next_manifest_replacement_preparation(&self) {
+        let block = self
+            .next_manifest_replacement_preparation
+            .lock()
+            .expect("manifest replacement test hook is not poisoned")
+            .take();
+        if let Some(block) = block {
+            block.started.notify_one();
+            block
+                .release
+                .acquire()
+                .await
+                .expect("manifest replacement test hook remains open")
                 .forget();
         }
     }
@@ -623,28 +1088,165 @@ async fn prepare_observation(
     })
 }
 
-async fn encode_response(response: SourceSnapshotResponse) -> Result<(Bytes, u128), RuntimeError> {
-    let started_at = Instant::now();
-    let encoded = tokio::task::spawn_blocking(move || serde_json::to_vec(&response)).await??;
-    Ok((Bytes::from(encoded), started_at.elapsed().as_millis()))
+impl CurrentV2Publication {
+    fn from_bundle(bundle: StagedSnapshotBundle) -> Self {
+        let manifest_value = bundle.manifest.value;
+        let manifest = encoded_manifest_body(bundle.manifest.content_id, bundle.manifest.bytes);
+        let stages = std::iter::once(bundle.population)
+            .chain(std::iter::once(bundle.membership))
+            .chain(std::iter::once(bundle.structure))
+            .chain(bundle.classifier_stages)
+            .map(published_stage)
+            .collect();
+        Self {
+            manifest_value,
+            manifest,
+            stages,
+            conflict_fingerprints: Arc::new(OnceCell::new()),
+        }
+    }
+
+    fn matches_conflict_identity(&self, population_id: &str, structure_id: &str) -> bool {
+        self.manifest_value.population_id == population_id
+            && self.stages.iter().any(|stage| {
+                stage.descriptor.kind == StageKind::Structure
+                    && stage.descriptor.content_id == structure_id
+            })
+    }
+
+    fn membership_stages(&self) -> Result<(EncodedStage, EncodedStage), RuntimeError> {
+        let population = self
+            .stages
+            .iter()
+            .find(|stage| stage.descriptor.kind == StageKind::Population)
+            .ok_or(RuntimeError::PublicationStateWithoutBundle)?;
+        let membership = self
+            .stages
+            .iter()
+            .find(|stage| stage.descriptor.kind == StageKind::Membership)
+            .ok_or(RuntimeError::PublicationStateWithoutBundle)?;
+        Ok((population.encoded_stage(), membership.encoded_stage()))
+    }
+
+    fn encoded_bytes(&self) -> usize {
+        self.stages
+            .iter()
+            .fold(self.manifest.body.len(), |total, stage| {
+                total.saturating_add(stage.body.len())
+            })
+    }
 }
 
-fn replace_cached_response(
-    publisher: &CurrentStatePublisher,
+impl PublishedStage {
+    fn encoded_stage(&self) -> EncodedStage {
+        EncodedStage {
+            descriptor: self.descriptor.clone(),
+            bytes: self.body.clone(),
+        }
+    }
+}
+
+fn encoded_manifest_body(content_id: String, bytes: Bytes) -> EncodedBody {
+    EncodedBody {
+        content_id,
+        body: bytes,
+    }
+}
+
+fn published_stage(stage: EncodedStage) -> PublishedStage {
+    PublishedStage {
+        descriptor: stage.descriptor,
+        body: stage.bytes,
+    }
+}
+
+fn replace_manifest(
     state: &mut CurrentState,
-    body: Bytes,
-) -> (u64, usize) {
-    state.response_revision = state.response_revision.wrapping_add(1);
-    let response_revision = state.response_revision;
-    let etag = state.latest.as_ref().map(|snapshot| {
-        format!(
-            "W/\"{}-{}-{response_revision}\"",
-            publisher.source_id, snapshot.observed_at_ms
-        )
-    });
-    let encoded_bytes = body.len();
-    state.cached_response = Some(CachedSnapshotResponse { body, etag });
-    (response_revision, encoded_bytes)
+    manifest: EncodedManifest,
+) -> Result<usize, RuntimeError> {
+    let publication = state
+        .publication
+        .as_mut()
+        .ok_or(RuntimeError::PublicationStateWithoutBundle)?;
+    let stage_graph_matches = manifest.value.stages.len() == publication.stages.len()
+        && manifest
+            .value
+            .stages
+            .iter()
+            .zip(&publication.stages)
+            .all(|(descriptor, stage)| descriptor == &stage.descriptor);
+    if !stage_graph_matches
+        || manifest.value.population_id != publication.manifest_value.population_id
+        || manifest.value.classification_set_id != publication.manifest_value.classification_set_id
+    {
+        return Err(RuntimeError::PublicationManifestStageMismatch);
+    }
+    publication.manifest_value = manifest.value;
+    publication.manifest = encoded_manifest_body(manifest.content_id, manifest.bytes);
+    Ok(publication.encoded_bytes())
+}
+
+fn manifest_etag(content_id: &str) -> String {
+    format!("W/\"atlas-v2-manifest-{content_id}\"")
+}
+
+fn stage_etag(stage: &PublishedStage) -> String {
+    let kind = match stage.descriptor.kind {
+        StageKind::Population => "population".to_owned(),
+        StageKind::Membership => "membership".to_owned(),
+        StageKind::Structure => "structure".to_owned(),
+        StageKind::Classifier => format!(
+            "classifier-{}",
+            stage
+                .descriptor
+                .classifier_id
+                .as_deref()
+                .expect("classifier stages carry their classifier ID")
+        ),
+    };
+    format!(
+        "W/\"atlas-v2-stage-{kind}-{}\"",
+        stage.descriptor.content_id
+    )
+}
+
+fn conflict_etag(kind: &str, content_id: &str) -> String {
+    format!("W/\"atlas-v2-conflict-{kind}-{content_id}\"")
+}
+
+fn read_conflict_u32(body: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        body[offset..offset + 4]
+            .try_into()
+            .expect("an internally encoded conflict-fact header is fixed width"),
+    )
+}
+
+fn is_terminal_classification(state: Option<ClassificationState>) -> bool {
+    matches!(
+        state,
+        Some(ClassificationState::Complete | ClassificationState::Paused)
+    )
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(super) struct PublishedState {
+    pub(super) source: SourceSummary,
+    pub(super) snapshot: Option<Arc<MempoolSnapshot>>,
+}
+
+fn poll_started_at_ms_for_outcome(state: &CurrentState) -> Option<u64> {
+    debug_assert_eq!(
+        state.poll_start_publication_failed,
+        state.pending_poll_started_at_ms.is_some(),
+        "a failed poll-start publication must retain exactly one pending timestamp"
+    );
+    // The pending value remains private until this outcome's source and
+    // manifest can commit it together.
+    state
+        .pending_poll_started_at_ms
+        .or(state.last_poll_started_at_ms)
 }
 
 fn summary_from_state(publisher: &CurrentStatePublisher, state: &CurrentState) -> SourceSummary {
@@ -692,5 +1294,161 @@ fn summary_from_parts(
         total_vsize: latest.map(|snapshot| snapshot.total_vsize),
         classification,
         last_error: last_error.map(str::to_owned),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ChainTip;
+
+    #[test]
+    fn manifest_replacement_reports_a_missing_publication_bundle() {
+        let publisher = CurrentStatePublisher::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            Duration::from_secs(30),
+        );
+        let snapshot = Arc::new(
+            MempoolSnapshot::new(
+                "core".to_owned(),
+                "Bitcoin Core".to_owned(),
+                1_700_000_000_000,
+                ChainTip {
+                    height: 900_000,
+                    hash: "00".repeat(32),
+                },
+                Vec::new(),
+            )
+            .expect("snapshot"),
+        );
+        let source = summary_from_parts(
+            &publisher,
+            None,
+            Some(&snapshot),
+            Some(ClassificationState::Complete),
+            None,
+        );
+        let manifest = encode_staged_snapshot_with_limits(
+            &source,
+            &snapshot,
+            None,
+            StagedSnapshotLimits::default(),
+        )
+        .expect("encoded staged snapshot")
+        .manifest;
+
+        let error = replace_manifest(&mut CurrentState::default(), manifest)
+            .expect_err("missing publication bundle must be reported");
+
+        assert!(matches!(error, RuntimeError::PublicationStateWithoutBundle));
+    }
+
+    #[test]
+    fn manifest_replacement_reports_the_full_retained_bundle_size() {
+        let publisher = CurrentStatePublisher::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            Duration::from_secs(30),
+        );
+        let snapshot = Arc::new(
+            MempoolSnapshot::new(
+                "core".to_owned(),
+                "Bitcoin Core".to_owned(),
+                1_700_000_000_000,
+                ChainTip {
+                    height: 900_000,
+                    hash: "00".repeat(32),
+                },
+                Vec::new(),
+            )
+            .expect("snapshot"),
+        );
+        let source = summary_from_parts(
+            &publisher,
+            None,
+            Some(&snapshot),
+            Some(ClassificationState::Complete),
+            None,
+        );
+        let bundle = encode_staged_snapshot_with_limits(
+            &source,
+            &snapshot,
+            None,
+            StagedSnapshotLimits::default(),
+        )
+        .expect("encoded staged snapshot");
+        let retained_manifest = bundle.manifest.value.clone();
+        let mut state = CurrentState {
+            publication: Some(CurrentV2Publication::from_bundle(bundle)),
+            ..CurrentState::default()
+        };
+        let mut changed_source = source;
+        changed_source.last_error = Some("RPC timeout".to_owned());
+        let replacement = reencode_manifest_for_source(&retained_manifest, &changed_source)
+            .expect("replacement manifest");
+
+        let encoded_bytes = replace_manifest(&mut state, replacement).expect("replace manifest");
+        let publication = state.publication.as_ref().expect("publication");
+        let stage_bytes = publication
+            .stages
+            .iter()
+            .map(|stage| stage.body.len())
+            .sum::<usize>();
+
+        assert_eq!(encoded_bytes, publication.manifest.body.len() + stage_bytes);
+        assert_eq!(encoded_bytes, publication.encoded_bytes());
+    }
+
+    #[test]
+    fn manifest_replacement_rejects_a_different_stage_graph() {
+        let publisher = CurrentStatePublisher::new(
+            "core".to_owned(),
+            "Bitcoin Core".to_owned(),
+            Duration::from_secs(30),
+        );
+        let snapshot = Arc::new(
+            MempoolSnapshot::new(
+                "core".to_owned(),
+                "Bitcoin Core".to_owned(),
+                1_700_000_000_000,
+                ChainTip {
+                    height: 900_000,
+                    hash: "00".repeat(32),
+                },
+                Vec::new(),
+            )
+            .expect("snapshot"),
+        );
+        let source = summary_from_parts(
+            &publisher,
+            None,
+            Some(&snapshot),
+            Some(ClassificationState::Complete),
+            None,
+        );
+        let bundle = encode_staged_snapshot_with_limits(
+            &source,
+            &snapshot,
+            None,
+            StagedSnapshotLimits::default(),
+        )
+        .expect("encoded staged snapshot");
+        let retained_manifest = bundle.manifest.value.clone();
+        let mut state = CurrentState {
+            publication: Some(CurrentV2Publication::from_bundle(bundle)),
+            ..CurrentState::default()
+        };
+        let mut replacement = reencode_manifest_for_source(&retained_manifest, &source)
+            .expect("replacement manifest");
+        replacement.value.stages[0].content_id = "ff".repeat(32);
+
+        let error = replace_manifest(&mut state, replacement)
+            .expect_err("a different stage graph must be rejected");
+
+        assert!(matches!(
+            error,
+            RuntimeError::PublicationManifestStageMismatch
+        ));
     }
 }

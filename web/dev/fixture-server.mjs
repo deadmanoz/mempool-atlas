@@ -1,673 +1,484 @@
-// Fixture Atlas API server for frontend development without a live Bitcoin
-// node.
-//
-// This is a DEVELOPMENT-ONLY tool. It is never built, packaged, or served in
-// production; nothing under web/dev/ is part of the Vite build or npm
-// package. It serves `/api/v1/sources` and `/api/v1/sources/:id/mempool` on
-// 127.0.0.1:3101 with three deterministic synthetic sources, so
-// `web/vite.config.ts`'s existing proxy from `/api` to that origin
-// lets `npm --prefix web run dev` (or `just web-dev`) run the complete
-// frontend without any Bitcoin RPC endpoint configured.
-//
-// Payloads are generated to satisfy the structural validation `web/src/api.ts`
-// performs on every response, including: classification summary counts that
-// reconcile against per-transaction classifier states and label sets, a
-// `knots_bip110` projection whose `status`/`primary_rule`/`violated_rules`/
-// `unknown_rules` stay consistent with the paired `knots_bip110` classifier
-// result, tier-1 membership facts (weight, ancestor/descendant counts and
-// virtual sizes, `ancestor_fee_sats`) that stay within the bounds the
-// validator enforces, and `structure` being non-null exactly when
-// classifier results are present (the structure/classifications coupling).
-// Run with `just web-fixtures` or `node web/dev/fixture-server.mjs`, then run
-// `just web-dev` (or `npm --prefix web run dev`) in a second terminal.
+// Development-only Atlas v2 API server backed by canonical Rust-exported
+// bytes. The timed request path selects buffers prepared at startup and never
+// constructs or serializes a response.
+import { readFileSync, writeSync } from "node:fs";
 import { createServer } from "node:http";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
-const mulberry32 = (seed) => {
-  let a = seed >>> 0;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+const MANIFEST_VERSION = 2;
+const FIXTURE_ERROR =
+  "functional fixture export missing or incompatible; run just functional-fixtures";
+const HERE = dirname(fileURLToPath(import.meta.url));
+const FIXTURE_DIRECTORY = resolve(HERE, "../.perf-fixtures/functional");
+const MANIFEST_PATH = join(FIXTURE_DIRECTORY, "manifest.json");
+const CONTENT_ID = /^[0-9a-f]{64}$/;
+const CLASSIFIER_ID = /^[a-z][a-z0-9_]*$/;
+const SNAPSHOT_STAGE_KINDS = new Set(["population", "membership", "structure"]);
+const NO_STORE = "no-store";
+const MANIFEST_CACHE_CONTROL = "public, no-cache, must-revalidate";
+const STAGE_CACHE_CONTROL =
+  "public, max-age=31536000, immutable, must-revalidate";
+const FIXTURE_PORT_TEXT = process.env.ATLAS_FIXTURE_PORT ?? "3101";
+const EMULATE_CLOUDFLARE_HEADERS =
+  process.env.ATLAS_FIXTURE_CLOUDFLARE_HEADERS === "1";
+const OMIT_HEADER = process.env.ATLAS_FIXTURE_OMIT_HEADER ?? "";
+const REPEAT_HEADER = process.env.ATLAS_FIXTURE_REPEAT_HEADER ?? "";
+const FIXTURE_DETAIL_STATUS_TEXT =
+  process.env.ATLAS_FIXTURE_DETAIL_STATUS ?? "200";
+const FIXTURE_STAGE_FAULT_COUNT_TEXT =
+  process.env.ATLAS_FIXTURE_STAGE_FAULT_COUNT ?? "0";
+const FIXTURE_STAGE_FAULT_PHASE =
+  process.env.ATLAS_FIXTURE_STAGE_FAULT_PHASE ?? "initial";
+const FIXTURE_STAGE_FAULT_STATUS_TEXT =
+  process.env.ATLAS_FIXTURE_STAGE_FAULT_STATUS ?? "409";
+
+if (!/^(0|[1-9][0-9]{0,4})$/.test(FIXTURE_PORT_TEXT)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_PORT\n");
+  process.exit(2);
+}
+const FIXTURE_PORT = Number(FIXTURE_PORT_TEXT);
+if (FIXTURE_PORT > 65535) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_PORT\n");
+  process.exit(2);
+}
+if (!/^(200|404|503)$/.test(FIXTURE_DETAIL_STATUS_TEXT)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_DETAIL_STATUS\n");
+  process.exit(2);
+}
+if (!/^[0-4]$/.test(FIXTURE_STAGE_FAULT_COUNT_TEXT)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_STAGE_FAULT_COUNT\n");
+  process.exit(2);
+}
+if (!/^(initial|conditional)$/.test(FIXTURE_STAGE_FAULT_PHASE)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_STAGE_FAULT_PHASE\n");
+  process.exit(2);
+}
+if (!/^(404|409)$/.test(FIXTURE_STAGE_FAULT_STATUS_TEXT)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_STAGE_FAULT_STATUS\n");
+  process.exit(2);
+}
+if (!/^(|cache-control|cf-cache-status|vary)$/.test(OMIT_HEADER)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_OMIT_HEADER\n");
+  process.exit(2);
+}
+if (!/^(|cache-control|vary)$/.test(REPEAT_HEADER)) {
+  writeSync(process.stderr.fd, "invalid ATLAS_FIXTURE_REPEAT_HEADER\n");
+  process.exit(2);
+}
+const FIXTURE_DETAIL_STATUS = Number(FIXTURE_DETAIL_STATUS_TEXT);
+let fixtureStageFaultsRemaining = Number(FIXTURE_STAGE_FAULT_COUNT_TEXT);
+const FIXTURE_STAGE_FAULT_STATUS = Number(FIXTURE_STAGE_FAULT_STATUS_TEXT);
+
+const failFixtureLoad = () => {
+  writeSync(process.stderr.fd, `${FIXTURE_ERROR}\n`);
+  process.exit(1);
 };
 
-const hex64 = (rng) => {
-  let out = "";
-  for (let i = 0; i < 64; i += 1) {
-    out += "0123456789abcdef"[Math.floor(rng() * 16)];
-  }
-  return out;
-};
-
-const label = (key, name, description) => ({ key, label: name, description });
-
-const CATALOG = [
-  {
-    id: "transaction_properties",
-    version: "1",
-    title: "Transaction properties",
-    methodology: "exact",
-    semantics: "multi_label",
-    required_facts: ["raw_transaction", "input_script_pubkeys"],
-    labels: [
-      label("version_1", "Version 1", "Serialized transaction version 1."),
-      label("version_2", "Version 2", "Serialized transaction version 2."),
-      label("version_3", "Version 3", "Serialized transaction version 3."),
-      label(
-        "version_other",
-        "Other version",
-        "A transaction version other than 1, 2, or 3.",
-      ),
-      label(
-        "signals_rbf",
-        "Signals RBF",
-        "At least one input explicitly signals BIP-125 replaceability.",
-      ),
-      label(
-        "has_witness",
-        "Has witness",
-        "At least one input has witness data.",
-      ),
-      label(
-        "has_taproot_annex",
-        "Taproot annex",
-        "A P2TR input has a structural annex candidate.",
-      ),
-      label("p2pk", "P2PK", "A known input or output uses pay-to-public-key."),
-      label(
-        "bare_multisig",
-        "Bare multisig",
-        "A known input or output uses bare multisig.",
-      ),
-      label(
-        "p2pkh",
-        "P2PKH",
-        "A known input or output uses pay-to-public-key-hash.",
-      ),
-      label("p2sh", "P2SH", "A known input or output uses pay-to-script-hash."),
-      label(
-        "p2wpkh",
-        "P2WPKH",
-        "A known input or output uses native witness public-key-hash.",
-      ),
-      label(
-        "p2wsh",
-        "P2WSH",
-        "A known input or output uses native witness script-hash.",
-      ),
-      label("p2tr", "P2TR", "A known input or output uses Taproot."),
-      label("p2a", "P2A", "A known input or output uses pay-to-anchor."),
-      label(
-        "unknown_witness_program",
-        "Other witness program",
-        "A known input or output uses another syntactically valid witness program.",
-      ),
-      label("op_return", "OP_RETURN", "An output uses OP_RETURN."),
-      label(
-        "unknown_script",
-        "Other script",
-        "A known input or output script is outside the recognized families.",
-      ),
-    ],
-  },
-  {
-    id: "transaction_shape",
-    version: "2",
-    title: "Transaction shape",
-    methodology: "heuristic",
-    semantics: "multi_label",
-    required_facts: ["raw_transaction", "input_script_pubkeys"],
-    labels: [
-      label(
-        "possible_coinjoin",
-        "Possible CoinJoin",
-        "A conservative equal-output, no-script-reuse heuristic.",
-      ),
-      label(
-        "consolidation",
-        "Consolidation",
-        "At least five times as many inputs as outputs.",
-      ),
-      label(
-        "batch_payout",
-        "Batch payout",
-        "At least five times as many outputs as inputs.",
-      ),
-      label(
-        "other_shape",
-        "Other shape",
-        "Every registered transaction-shape heuristic was terminal and none matched.",
-      ),
-    ],
-  },
-  {
-    id: "data_protocols",
-    version: "2",
-    title: "Data protocols",
-    methodology: "fingerprint",
-    semantics: "multi_label",
-    required_facts: ["raw_transaction"],
-    labels: [
-      label(
-        "inscription",
-        "Inscription",
-        "An Ordinals inscription-envelope fingerprint.",
-      ),
-      label(
-        "brc20",
-        "BRC-20",
-        "A JSON-like BRC-20 marker inside an inscription envelope.",
-      ),
-      label("runes", "Runes", "An OP_RETURN OP_13 runestone marker."),
-      label(
-        "stamps",
-        "Stamps",
-        "A bare-multisig carrier whose deobfuscated payload holds a Stamps marker.",
-      ),
-      label(
-        "counterparty",
-        "Counterparty",
-        "A deobfuscated CNTRPRTY envelope in an OP_RETURN or bare-multisig carrier.",
-      ),
-      label(
-        "omni",
-        "Omni",
-        "An OP_RETURN payload beginning with the Omni Class C marker.",
-      ),
-      label(
-        "other_op_return",
-        "Other OP_RETURN",
-        "An OP_RETURN carrier with no registered OP_RETURN protocol fingerprint.",
-      ),
-      label(
-        "no_detected_protocol",
-        "No detected protocol",
-        "No registered data-protocol fingerprint fired.",
-      ),
-    ],
-  },
-  {
-    id: "knots_bip110",
-    version: "1",
-    title: "Knots BIP-110 compatibility",
-    methodology: "policy",
-    semantics: "rule_set",
-    required_facts: ["raw_transaction", "input_script_pubkeys"],
-    labels: [
-      label(
-        "compatible",
-        "Compatible",
-        "No BIP-110 policy violation or missing fact was found.",
-      ),
-      label(
-        "violating",
-        "Would violate",
-        "At least one BIP-110 policy violation was proven.",
-      ),
-      label(
-        "indeterminate",
-        "Indeterminate",
-        "No violation was proven and at least one required fact is missing.",
-      ),
-    ],
-  },
-];
-
-const PROFILES = [
-  {
-    weight: 0.34,
-    labels: ["version_2", "has_witness", "p2wpkh"],
-    vs: [110, 400],
-  },
-  {
-    weight: 0.18,
-    labels: ["version_2", "has_witness", "p2wsh"],
-    vs: [150, 900],
-  },
-  {
-    weight: 0.22,
-    labels: ["version_2", "has_witness", "p2tr", "signals_rbf"],
-    vs: [111, 650],
-  },
-  { weight: 0.1, labels: ["version_1", "p2pkh"], vs: [190, 1200] },
-  { weight: 0.05, labels: ["version_2", "p2sh"], vs: [220, 2500] },
-  {
-    weight: 0.06,
-    labels: ["version_2", "has_witness", "p2wpkh", "p2tr"],
-    vs: [140, 3000],
-  },
-  {
-    weight: 0.03,
-    labels: ["version_2", "has_witness", "p2tr", "op_return"],
-    vs: [130, 40000],
-  },
-  { weight: 0.02, labels: ["version_2", "p2a"], vs: [65, 120] },
-];
-
-const pick = (rng, entries) => {
-  const total = entries.reduce((sum, entry) => sum + entry.weight, 0);
-  let roll = rng() * total;
-  for (const entry of entries) {
-    roll -= entry.weight;
-    if (roll <= 0) {
-      return entry;
+const loadManifest = () => {
+  try {
+    const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
+    if (
+      manifest === null ||
+      typeof manifest !== "object" ||
+      manifest.manifest_version !== MANIFEST_VERSION ||
+      manifest.profile !== "functional" ||
+      typeof manifest.source_list !== "object" ||
+      !Array.isArray(manifest.snapshots) ||
+      !Array.isArray(manifest.transaction_details)
+    ) {
+      failFixtureLoad();
     }
+    return manifest;
+  } catch {
+    failFixtureLoad();
   }
-  return entries[entries.length - 1];
 };
 
-const feeRate = (rng) => {
-  const roll = rng();
-  if (roll < 0.45) return 1 + rng() * 3;
-  if (roll < 0.8) return 4 + rng() * 20;
-  if (roll < 0.95) return 24 + rng() * 80;
-  return 100 + rng() * 380;
-};
+const manifest = loadManifest();
 
-const result = (classifierId, state, labels, primary, missing) => ({
-  classifier_id: classifierId,
-  state,
-  primary_label: primary,
-  labels,
-  missing_facts: missing,
-  evidence: null,
-});
-
-const makeBody = (rng, observedAt) => {
-  const profile = pick(rng, PROFILES);
-  const vsize = Math.max(
-    65,
-    Math.round(profile.vs[0] + (profile.vs[1] - profile.vs[0]) * rng() ** 2.2),
-  );
-  const rate = feeRate(rng);
-  const fee_sats = Math.max(vsize, Math.round(vsize * rate));
-  const entered_at_ms = observedAt - Math.round(rng() ** 1.6 * 172_800_000);
-
-  const hasRelatives = rng() < 0.18;
-  const ancestorExtra = hasRelatives ? Math.round(rng() * 3) : 0;
-  const descendantExtra =
-    hasRelatives && rng() < 0.5 ? Math.round(rng() * 4) : 0;
-  const tier1 = {
-    weight: Math.max(1, vsize * 4 - Math.floor(rng() * 3)),
-    ancestor_count: 1 + ancestorExtra,
-    ancestor_vsize: vsize + ancestorExtra * Math.round(120 + rng() * 800),
-    ancestor_fee_sats:
-      fee_sats + ancestorExtra * Math.round(200 + rng() * 4_000),
-    descendant_count: 1 + descendantExtra,
-    descendant_vsize: vsize + descendantExtra * Math.round(120 + rng() * 800),
-    replaceable: rng() < 0.35,
-  };
-
-  const unavailable = rng() < 0.02;
-  if (unavailable) {
-    return {
-      vsize,
-      ...tier1,
-      fee_sats,
-      entered_at_ms,
-      structure: null,
-      classifications: [],
-      bip110: null,
-    };
-  }
-
-  const dataRoll = rng();
-  const dataLabels =
-    dataRoll < 0.7
-      ? ["no_detected_protocol"]
-      : dataRoll < 0.78
-        ? ["other_op_return"]
-        : dataRoll < 0.85
-          ? ["runes"]
-          : dataRoll < 0.91
-            ? ["inscription"]
-            : dataRoll < 0.94
-              ? ["inscription", "brc20"]
-              : dataRoll < 0.96
-                ? ["stamps"]
-                : dataRoll < 0.98
-                  ? ["counterparty"]
-                  : ["omni"];
-  const data = result(
-    "data_protocols",
-    "complete",
-    dataLabels,
-    dataLabels[0],
-    [],
-  );
-
-  const propertyLabels = [...profile.labels];
-  if (
-    dataLabels.some((entry) =>
-      ["other_op_return", "runes", "counterparty", "omni"].includes(entry),
-    ) &&
-    !propertyLabels.includes("op_return")
-  ) {
-    propertyLabels.push("op_return");
-  }
-  if (
-    dataLabels.some((entry) => ["inscription", "brc20"].includes(entry)) &&
-    !propertyLabels.includes("has_witness")
-  ) {
-    propertyLabels.push("has_witness");
-  }
-  const propertyOrder = CATALOG[0].labels.map(({ key }) => key);
-  propertyLabels.sort(
-    (left, right) => propertyOrder.indexOf(left) - propertyOrder.indexOf(right),
-  );
-  const partialProps = rng() < 0.07;
-  const props = result(
-    "transaction_properties",
-    partialProps ? "partial" : "complete",
-    propertyLabels,
-    null,
-    partialProps ? ["input_script_pubkeys"] : [],
-  );
-
-  const shapeRoll = rng();
-  const shapeLabels =
-    shapeRoll < 0.08 && !partialProps
-      ? ["possible_coinjoin"]
-      : shapeRoll < 0.25
-        ? ["consolidation"]
-        : shapeRoll < 0.42
-          ? ["batch_payout"]
-          : ["other_shape"];
-  // Shape version 2: `other_shape` is a terminal negative, so a result with
-  // missing spent-output scripts proves nothing instead of claiming it.
-  const provableShapeLabels =
-    partialProps && shapeLabels[0] === "other_shape" ? [] : shapeLabels;
-  const shape = result(
-    "transaction_shape",
-    partialProps ? "partial" : "complete",
-    provableShapeLabels,
-    provableShapeLabels[0] ?? null,
-    partialProps ? ["input_script_pubkeys"] : [],
-  );
-
-  const policyRoll = rng();
-  let bip110;
-  let policy;
-  if (policyRoll < 0.9) {
-    bip110 = {
-      status: "compatible",
-      primary_rule: null,
-      violated_rules: [],
-      unknown_rules: [],
-    };
-    policy = result(
-      "knots_bip110",
-      "complete",
-      ["compatible"],
-      "compatible",
-      [],
-    );
-  } else if (policyRoll < 0.96) {
-    const violated =
-      rng() < 0.7 ? ["element_size"] : ["output_size", "element_size"];
-    const unknown = rng() < 0.25 ? ["op_success"] : [];
-    bip110 = {
-      status: "violating",
-      primary_rule: violated[0],
-      violated_rules: violated,
-      unknown_rules: unknown,
-    };
-    policy = result(
-      "knots_bip110",
-      unknown.length === 0 ? "complete" : "partial",
-      ["violating"],
-      "violating",
-      unknown.length === 0 ? [] : ["policy_facts"],
-    );
-  } else {
-    const unknown = rng() < 0.5 ? ["op_success"] : ["tapscript_op_if"];
-    bip110 = {
-      status: "indeterminate",
-      primary_rule: null,
-      violated_rules: [],
-      unknown_rules: unknown,
-    };
-    policy = result(
-      "knots_bip110",
-      "partial",
-      ["indeterminate"],
-      "indeterminate",
-      ["policy_facts"],
-    );
-  }
-
-  const hasWitness = propertyLabels.includes("has_witness");
-  let inputCount;
-  let outputCount;
-  if (shapeLabels[0] === "possible_coinjoin") {
-    inputCount = 5 + Math.floor(rng() * 8);
-    outputCount = 5 + Math.floor(rng() * 8);
-  } else if (shapeLabels[0] === "consolidation") {
-    outputCount = 1 + Math.floor(rng() * 4);
-    inputCount = outputCount * 5 + Math.floor(rng() * 30);
-  } else if (shapeLabels[0] === "batch_payout") {
-    inputCount = 1 + Math.floor(rng() * 3);
-    outputCount = inputCount * 5 + Math.floor(rng() * 90);
-  } else {
-    inputCount = 1 + Math.floor(rng() * 4);
-    outputCount = 1 + Math.floor(rng() * 4);
-  }
-  const opReturnBytes =
-    dataLabels[0] === "other_op_return"
-      ? 8 + Math.floor(rng() * 220)
-      : dataLabels[0] === "runes"
-        ? 12 + Math.floor(rng() * 40)
-        : dataLabels[0] === "counterparty"
-          ? 16 + Math.floor(rng() * 120)
-          : dataLabels[0] === "omni"
-            ? 8 + Math.floor(rng() * 60)
-            : 0;
-  const outputSats = Math.round(10_000 * Math.exp(rng() * 11));
-  const structure = {
-    input_count: inputCount,
-    output_count: outputCount,
-    op_return_bytes: opReturnBytes,
-    output_sats: outputSats,
-    witness_bytes: hasWitness ? Math.round(vsize * (0.5 + rng() * 1.2)) : 0,
-  };
-
-  return {
-    vsize,
-    ...tier1,
-    fee_sats,
-    entered_at_ms,
-    structure,
-    classifications: [props, shape, data, policy],
-    bip110,
-  };
-};
-
-const buildSnapshot = (sourceId, sourceLabel, txids, seed, observedAt, tip) => {
-  const rng = mulberry32(seed);
-  const transactions = txids.map((txid) => {
-    const wtxid = hex64(rng);
-    return { txid, wtxid, ...makeBody(rng, observedAt) };
-  });
-  transactions.sort((a, b) => (a.txid < b.txid ? -1 : 1));
-
-  const total_vsize = transactions.reduce((sum, t) => sum + t.vsize, 0);
-  const statusCounts = {
-    compatible: 0,
-    violating: 0,
-    indeterminate: 0,
-    unclassified: 0,
-  };
-  const summaries = CATALOG.map((descriptor) => ({
-    classifier_id: descriptor.id,
-    complete_count: 0,
-    partial_count: 0,
-    unclassified_count: 0,
-    label_counts: Object.fromEntries(
-      descriptor.labels.map(({ key }) => [key, 0]),
-    ),
-  }));
-  for (const transaction of transactions) {
-    if (transaction.bip110 === null) {
-      statusCounts.unclassified += 1;
-    } else {
-      statusCounts[transaction.bip110.status] += 1;
+const loadBody = (descriptor, cacheControl) => {
+  try {
+    if (
+      descriptor === null ||
+      typeof descriptor !== "object" ||
+      typeof descriptor.path !== "string" ||
+      typeof descriptor.content_type !== "string" ||
+      typeof descriptor.content_id !== "string" ||
+      !CONTENT_ID.test(descriptor.content_id) ||
+      !Number.isSafeInteger(descriptor.uncompressed_bytes) ||
+      descriptor.uncompressed_bytes < 0
+    ) {
+      failFixtureLoad();
     }
-    CATALOG.forEach((descriptor, index) => {
-      const summary = summaries[index];
-      const entry = transaction.classifications[index];
-      if (entry === undefined) {
-        summary.unclassified_count += 1;
-        return;
-      }
-      summary[
-        entry.state === "complete" ? "complete_count" : "partial_count"
-      ] += 1;
-      for (const key of entry.labels) {
-        summary.label_counts[key] += 1;
-      }
+    const bytes = readFileSync(join(FIXTURE_DIRECTORY, descriptor.path));
+    if (bytes.byteLength !== descriptor.uncompressed_bytes) {
+      failFixtureLoad();
+    }
+    JSON.parse(bytes.toString("utf8"));
+    return Object.freeze({
+      bytes,
+      cacheable: cacheControl !== NO_STORE,
+      cacheControl,
+      gzipBytes: gzipSync(bytes),
+      contentId: descriptor.content_id,
+      contentType: descriptor.content_type,
     });
+  } catch {
+    failFixtureLoad();
+  }
+};
+
+const routes = new Map();
+const stageContracts = new Map();
+
+const stageLaneKey = (kind, classifierId) => `${kind}\0${classifierId ?? ""}`;
+
+const addStageContract = (snapshot, stage) => {
+  if (stage === null || typeof stage !== "object") {
+    failFixtureLoad();
+  }
+  const classifierId = stage.classifier_id ?? null;
+  if (
+    (stage.kind !== "classifier" && !SNAPSHOT_STAGE_KINDS.has(stage.kind)) ||
+    (stage.kind === "classifier"
+      ? typeof classifierId !== "string" || !CLASSIFIER_ID.test(classifierId)
+      : classifierId !== null)
+  ) {
+    failFixtureLoad();
+  }
+  const contentId = stage.route?.body?.content_id;
+  if (typeof contentId !== "string" || !CONTENT_ID.test(contentId)) {
+    failFixtureLoad();
+  }
+  let contract = stageContracts.get(snapshot.source_id);
+  if (contract === undefined) {
+    contract = {
+      contentIds: new Set(),
+      lanes: new Map(),
+    };
+    stageContracts.set(snapshot.source_id, contract);
+  }
+  const lane = stageLaneKey(stage.kind, classifierId);
+  if (contract.lanes.has(lane) || contract.contentIds.has(contentId)) {
+    failFixtureLoad();
+  }
+  contract.lanes.set(lane, contentId);
+  contract.contentIds.add(contentId);
+};
+
+const decodedSegment = (segment) => {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+};
+
+// Mirror `src/api.rs`: malformed route parameters are 400, an unknown source,
+// lane, or content ID used on the wrong current lane is 404, and a well-formed
+// non-current ID for an existing lane is the retryable 409 supersession case.
+const stageErrorStatus = (pathname) => {
+  const segments = pathname.split("/");
+  if (
+    segments.length < 9 ||
+    segments[0] !== "" ||
+    segments[1] !== "api" ||
+    segments[2] !== "v2" ||
+    segments[3] !== "sources" ||
+    segments[5] !== "mempool" ||
+    segments[6] !== "stages"
+  ) {
+    return 404;
   }
 
-  const started = observedAt - 1_800;
-  return {
-    source_id: sourceId,
-    source_label: sourceLabel,
-    collection_started_at_ms: started,
-    collection_completed_at_ms: observedAt,
-    collection_duration_ms: observedAt - started,
-    observed_at_ms: observedAt,
-    classification_revision: 7,
-    chain_tip: tip,
-    transaction_count: transactions.length,
-    total_vsize,
-    classifier_catalog: CATALOG,
-    classification_summaries: summaries,
-    bip110_summary: {
-      evaluator_id: "rdts-rules",
-      evaluator_version: "0.1.0",
-      scope: "knots_mempool_policy",
-      compatible_count: statusCounts.compatible,
-      violating_count: statusCounts.violating,
-      indeterminate_count: statusCounts.indeterminate,
-      unclassified_count: statusCounts.unclassified,
-    },
-    transactions,
-  };
+  const sourceId = decodedSegment(segments[4]);
+  const kind = decodedSegment(segments[7]);
+  if (sourceId === null || kind === null) return 400;
+
+  let classifierId = null;
+  let contentId;
+  if (segments.length === 9) {
+    contentId = decodedSegment(segments[8]);
+    if (!SNAPSHOT_STAGE_KINDS.has(kind)) return 400;
+  } else if (segments.length === 10 && kind === "classifier") {
+    classifierId = decodedSegment(segments[8]);
+    contentId = decodedSegment(segments[9]);
+    if (classifierId === null || !CLASSIFIER_ID.test(classifierId)) return 400;
+  } else {
+    return 404;
+  }
+  if (contentId === null || !CONTENT_ID.test(contentId)) return 400;
+
+  const contract = stageContracts.get(sourceId);
+  if (contract === undefined) return 404;
+  const expected = contract.lanes.get(stageLaneKey(kind, classifierId));
+  if (expected === undefined || contract.contentIds.has(contentId)) return 404;
+  return 409;
 };
 
-const poolRng = mulberry32(0xa71a5);
-const pool = [...new Set(Array.from({ length: 1000 }, () => hex64(poolRng)))];
-pool.sort();
-const common = pool.slice(0, 560);
-const coreOnly = pool.slice(560, 700);
-const knotsOnly = pool.slice(700, 840);
-const staleTxids = pool.slice(300, 720);
+const addRoute = (route, cacheControl) => {
+  if (
+    route === null ||
+    typeof route !== "object" ||
+    typeof route.request_path !== "string" ||
+    !route.request_path.startsWith("/api/v2/")
+  ) {
+    failFixtureLoad();
+  }
+  const body = loadBody(route.body, cacheControl);
+  routes.set(route.request_path, body);
+  return body;
+};
 
-const NOW = Date.now();
-const TIP = { height: 917_432, hash: hex64(mulberry32(0x7ea)) };
-const STALE_TIP = { height: 917_429, hash: hex64(mulberry32(0x7eb)) };
+const conflictFingerprintBody = (totalRows) => {
+  const bytes = Buffer.alloc(24);
+  bytes.write("ATLCFP01", 0, "ascii");
+  bytes.writeUInt32LE(totalRows, 8);
+  bytes.writeUInt32LE(0, 12);
+  bytes.writeUInt32LE(0, 16);
+  bytes.writeUInt32LE(0, 20);
+  return bytes;
+};
 
-const CORE_SOURCE_ID = "vps-core-01";
-const KNOTS_SOURCE_ID = "vps-knots-01";
-const STALE_SOURCE_ID = "fixture-stale-01";
-const SOURCE_IDS = [CORE_SOURCE_ID, KNOTS_SOURCE_ID, STALE_SOURCE_ID];
+const addConflictFingerprintRoute = (snapshot, publicationManifest) => {
+  const structure = publicationManifest.stages?.find(
+    ({ kind }) => kind === "structure",
+  );
+  if (
+    typeof publicationManifest.population_id !== "string" ||
+    !CONTENT_ID.test(publicationManifest.population_id) ||
+    structure === undefined ||
+    typeof structure.content_id !== "string" ||
+    !CONTENT_ID.test(structure.content_id)
+  ) {
+    failFixtureLoad();
+  }
+  const bytes = conflictFingerprintBody(snapshot.transaction_count);
+  routes.set(
+    `/api/v2/sources/${encodeURIComponent(snapshot.source_id)}/mempool/conflict-fingerprints/${publicationManifest.population_id}/${structure.content_id}`,
+    Object.freeze({
+      bytes,
+      cacheable: false,
+      cacheControl: NO_STORE,
+      gzipBytes: gzipSync(bytes),
+      contentId: publicationManifest.population_id,
+      contentType: "application/octet-stream",
+    }),
+  );
+};
 
-const snapshots = {
-  [CORE_SOURCE_ID]: buildSnapshot(
-    CORE_SOURCE_ID,
-    "vps-core-01",
-    [...common, ...coreOnly],
-    0x51ee7,
-    NOW - 42_000,
-    TIP,
+addRoute(manifest.source_list, NO_STORE);
+for (const snapshot of manifest.snapshots) {
+  if (
+    snapshot === null ||
+    typeof snapshot !== "object" ||
+    typeof snapshot.source_id !== "string" ||
+    !Number.isSafeInteger(snapshot.transaction_count) ||
+    snapshot.transaction_count < 0 ||
+    !Array.isArray(snapshot.stages)
+  ) {
+    failFixtureLoad();
+  }
+  const manifestBody = addRoute(snapshot.manifest, MANIFEST_CACHE_CONTROL);
+  addConflictFingerprintRoute(snapshot, JSON.parse(manifestBody.bytes));
+  for (const stage of snapshot.stages) {
+    addStageContract(snapshot, stage);
+    addRoute(stage.route, STAGE_CACHE_CONTROL);
+  }
+}
+for (const detail of manifest.transaction_details)
+  addRoute(detail.route, NO_STORE);
+
+const errorBodies = Object.freeze({
+  invalidStage: Buffer.from('{"error":"invalid v2 stage content ID"}'),
+  notFound: Buffer.from(
+    '{"error":"v2 stage does not exist for the requested kind or classifier"}',
   ),
-  [KNOTS_SOURCE_ID]: buildSnapshot(
-    KNOTS_SOURCE_ID,
-    "vps-knots-01",
-    [...common, ...knotsOnly],
-    0xb0a17,
-    NOW - 21_000,
-    TIP,
+  queryNotSupported: Buffer.from(
+    '{"error":"query-dependent v2 representations are not supported"}',
   ),
-  [STALE_SOURCE_ID]: buildSnapshot(
-    STALE_SOURCE_ID,
-    "fixture-stale-01",
-    staleTxids,
-    0x9a44a,
-    NOW - 1_260_000,
-    STALE_TIP,
+  superseded: Buffer.from(
+    '{"error":"requested stage is not part of the current v2 publication"}',
   ),
+});
+const transactionDetailPath =
+  /^\/api\/v2\/sources\/[^/]+\/transactions\/([0-9a-f]{64})$/;
+const manifestPath = /^\/api\/v2\/sources\/[^/]+\/mempool$/;
+const stagePath = /^\/api\/v2\/sources\/[^/]+\/mempool\/stages\//;
+
+const cloudflareHeaders = (cacheStatus) =>
+  EMULATE_CLOUDFLARE_HEADERS
+    ? {
+        "cf-cache-status": cacheStatus,
+        "cf-ray": "fixture-ray",
+      }
+    : {};
+
+const repeatedFixtureValue = (name, value) => {
+  if (name.toLowerCase() !== REPEAT_HEADER) return value;
+  return name.toLowerCase() === "vary"
+    ? [value, "Origin"]
+    : ["public, max-age=3600", value];
 };
 
-const AVAILABILITY = {
-  [CORE_SOURCE_ID]: "ready",
-  [KNOTS_SOURCE_ID]: "ready",
-  [STALE_SOURCE_ID]: "stale",
-};
-const LAST_ERROR = {
-  [CORE_SOURCE_ID]: null,
-  [KNOTS_SOURCE_ID]: null,
-  [STALE_SOURCE_ID]: "transport error: connection refused (os error 61)",
-};
+const fixtureHeaders = (headers) =>
+  Object.fromEntries(
+    Object.entries(headers)
+      .filter(([name]) => name.toLowerCase() !== OMIT_HEADER)
+      .map(([name, value]) => [name, repeatedFixtureValue(name, value)]),
+  );
 
-const sourceSummary = (id) => {
-  const snapshot = snapshots[id];
-  const unclassified = snapshot.bip110_summary.unclassified_count;
-  return {
-    source_id: id,
-    source_label: snapshot.source_label,
-    availability: AVAILABILITY[id],
-    poll_interval_seconds: 60,
-    last_poll_started_at_ms: NOW - 15_000,
-    snapshot_observed_at_ms: snapshot.observed_at_ms,
-    chain_tip: snapshot.chain_tip,
-    transaction_count: snapshot.transaction_count,
-    total_vsize: snapshot.total_vsize,
-    classification: {
-      state: id === STALE_SOURCE_ID ? "paused" : "complete",
-      revision: snapshot.classification_revision,
-      classified_count: snapshot.transaction_count - unclassified,
-      unclassified_count: unclassified,
-    },
-    last_error: LAST_ERROR[id],
-  };
+const send = (
+  request,
+  response,
+  status,
+  bytes,
+  headers = {},
+  cacheStatus = "BYPASS",
+) => {
+  response.writeHead(
+    status,
+    fixtureHeaders({
+      "cache-control": "no-store",
+      "content-length": String(bytes.byteLength),
+      "content-type": "application/json",
+      ...cloudflareHeaders(cacheStatus),
+      ...headers,
+    }),
+  );
+  response.end(request.method === "HEAD" ? undefined : bytes);
 };
 
 const server = createServer((request, response) => {
-  const url = new URL(request.url, "http://127.0.0.1");
-  const respond = (status, body) => {
-    const payload = JSON.stringify(body);
-    response.writeHead(status, {
-      "content-type": "application/json",
-      "cache-control": "no-store",
-    });
-    response.end(payload);
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    send(
+      request,
+      response,
+      405,
+      Buffer.from('{"error":"method not allowed"}'),
+      {
+        allow: "GET, HEAD",
+      },
+    );
+    return;
+  }
+  const requestTarget = request.url ?? "/";
+  const url = new URL(requestTarget, "http://127.0.0.1");
+  if (requestTarget.includes("?")) {
+    send(request, response, 400, errorBodies.queryNotSupported);
+    return;
+  }
+  const body = routes.get(url.pathname);
+  const detailMatch = url.pathname.match(transactionDetailPath);
+  if (
+    detailMatch !== null &&
+    (body === undefined || FIXTURE_DETAIL_STATUS !== 200)
+  ) {
+    const txid = detailMatch[1];
+    const detailStatus = body === undefined ? 404 : FIXTURE_DETAIL_STATUS;
+    const detailError =
+      detailStatus === 404
+        ? `transaction "${txid}" is not in the current snapshot`
+        : `transaction "${txid}" is present but has no policy assessment in the current snapshot`;
+    send(
+      request,
+      response,
+      detailStatus,
+      Buffer.from(JSON.stringify({ error: detailError })),
+    );
+    return;
+  }
+  if (body === undefined) {
+    const status = stageErrorStatus(url.pathname);
+    if (status === 409) {
+      send(request, response, 409, errorBodies.superseded);
+      return;
+    }
+    send(
+      request,
+      response,
+      status,
+      status === 400 ? errorBodies.invalidStage : errorBodies.notFound,
+    );
+    return;
+  }
+  const isConditional = request.headers["if-none-match"] !== undefined;
+  if (
+    fixtureStageFaultsRemaining > 0 &&
+    stagePath.test(url.pathname) &&
+    (FIXTURE_STAGE_FAULT_PHASE === "conditional") === isConditional
+  ) {
+    fixtureStageFaultsRemaining -= 1;
+    console.log(
+      `fixture injected ${FIXTURE_STAGE_FAULT_STATUS} ${FIXTURE_STAGE_FAULT_PHASE} stage response`,
+    );
+    send(
+      request,
+      response,
+      FIXTURE_STAGE_FAULT_STATUS,
+      FIXTURE_STAGE_FAULT_STATUS === 409
+        ? errorBodies.superseded
+        : errorBodies.notFound,
+    );
+    return;
+  }
+  if (
+    Number(FIXTURE_STAGE_FAULT_COUNT_TEXT) > 0 &&
+    manifestPath.test(url.pathname) &&
+    !isConditional
+  ) {
+    console.log("fixture served publication manifest attempt");
+  }
+  const bytes = body.bytes;
+  const etag = `W/"${body.contentId}"`;
+  const headers = {
+    "cache-control": body.cacheControl,
+    "content-type": body.contentType,
+    vary: "Accept-Encoding",
+    "x-atlas-content-id": body.contentId,
+    "x-atlas-uncompressed-length": String(bytes.byteLength),
+    ...(body.cacheable ? { etag } : {}),
   };
-  if (url.pathname === "/api/v1/sources") {
-    respond(200, {
-      atlas_version: "1.0.0",
-      sources: SOURCE_IDS.map(sourceSummary),
-    });
+  if (body.cacheable && request.headers["if-none-match"] === etag) {
+    response.writeHead(
+      304,
+      fixtureHeaders({
+        ...cloudflareHeaders("REVALIDATED"),
+        ...headers,
+      }),
+    );
+    response.end();
     return;
   }
-  const snapshotMatch = url.pathname.match(
-    /^\/api\/v1\/sources\/([A-Za-z0-9._-]+)\/mempool$/,
+  const acceptsGzip = /(?:^|,)\s*gzip(?:\s*;|\s*,|\s*$)/i.test(
+    request.headers["accept-encoding"] ?? "",
   );
-  if (snapshotMatch !== null && snapshots[snapshotMatch[1]] !== undefined) {
-    const id = snapshotMatch[1];
-    respond(200, { source: sourceSummary(id), snapshot: snapshots[id] });
-    return;
-  }
-  respond(404, { error: "not found" });
+  send(
+    request,
+    response,
+    200,
+    acceptsGzip ? body.gzipBytes : bytes,
+    {
+      ...headers,
+      ...(acceptsGzip ? { "content-encoding": "gzip" } : {}),
+    },
+    body.cacheable ? "MISS" : "BYPASS",
+  );
 });
 
-server.listen(3101, "127.0.0.1", () => {
-  console.log("fixture atlas api on 127.0.0.1:3101");
-  for (const [id, snapshot] of Object.entries(snapshots)) {
+server.listen(FIXTURE_PORT, "127.0.0.1", () => {
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("fixture server did not bind a TCP address");
+  }
+  console.log(
+    `fixture atlas v2 api on 127.0.0.1:${address.port} (${manifest.generated_at_ms})`,
+  );
+  for (const snapshot of manifest.snapshots) {
     console.log(
-      `  ${id}: ${snapshot.transaction_count} tx, ${snapshot.total_vsize} vB`,
+      `  ${snapshot.source_id}: ${snapshot.transaction_count} tx, ${snapshot.total_vsize} vB, ${snapshot.stages.length} stages`,
     );
   }
 });
